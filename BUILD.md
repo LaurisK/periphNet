@@ -34,13 +34,22 @@ make -j4
 - `Debug` - Full debug symbols, no optimization (default)
 - `Release` - Optimized build with -O3
 
-**Flash to device (requires st-flash):**
+**Flash to device:**
+
+Using J-Link (default method):
 ```bash
 make flash
 ```
 
-Or manually:
+Or manually with J-Link:
 ```bash
+JLinkExe -device STM32F407VE -if SWD -speed 4000 -CommanderScript flash_jlink.jlink
+```
+
+Using ST-Link (alternative):
+```bash
+make flash-stlink
+# Or manually:
 st-flash --reset write PeriphNet.bin 0x08000000
 ```
 
@@ -98,7 +107,77 @@ Memory region         Used Size  Region Size  %age Used
 - Flash: 391 KB (76%)
 - RAM: 72 KB (57%)
 
+## Hardware Flashing
+
+### J-Link Connection
+
+The STM32F407VET6 board is connected via J-Link debugger.
+
+**Connection details:**
+- Debugger: SEGGER J-Link V9 (S/N: 59600182)
+- Interface: SWD (Serial Wire Debug)
+- Target: STM32F407VE (Cortex-M4, 512KB Flash, 192KB RAM)
+- Speed: 4000 kHz
+
+**Flashing process:**
+1. Build firmware: `make`
+2. Flash: `make flash`
+3. Device automatically erases, programs, verifies, and runs
+
+**Flash script:** `flash_jlink.jlink`
+- Erases entire chip
+- Programs firmware to 0x08000000
+- Verifies programmed data
+- Resets and runs application
+
+**Manual flashing with JLinkExe:**
+```bash
+JLinkExe -device STM32F407VE -if SWD -speed 4000 -CommanderScript flash_jlink.jlink
+```
+
+**Typical flash output:**
+```
+Erasing device... (8.5s)
+Downloading file... (0.7s)
+Verify successful.
+Program & Verify speed: 210 KB/s
+```
+
+### Alternative: OpenOCD (if J-Link not available)
+
+Create `openocd.cfg`:
+```
+source [find interface/jlink.cfg]
+transport select swd
+source [find target/stm32f4x.cfg]
+
+init
+reset halt
+flash write_image erase build/PeriphNet.bin 0x08000000
+verify_image build/PeriphNet.bin 0x08000000
+reset run
+shutdown
+```
+
+Flash with:
+```bash
+openocd -f openocd.cfg
+```
+
 ## Troubleshooting
+
+**J-Link not detected:**
+```bash
+# Check USB connection
+lsusb | grep SEGGER
+
+# Check permissions (add user to plugdev group)
+sudo usermod -a -G plugdev $USER
+# Log out and back in
+
+# Install udev rules
+sudo apt-get install segger-jlink-udev-rules
+```
 
 **ARM GCC not found:**
 ```bash

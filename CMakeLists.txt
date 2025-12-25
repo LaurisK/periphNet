@@ -207,14 +207,43 @@ add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
 )
 
 # ==============================================================================
-# Flash target (optional - using st-flash)
+# Flash Targets
 # ==============================================================================
 
-add_custom_target(flash
-    COMMAND st-flash --reset write ${PROJECT_NAME}.bin 0x08000000
-    DEPENDS ${PROJECT_NAME}.elf
-    COMMENT "Flashing ${PROJECT_NAME}.bin to STM32F407VET6"
+# Find JLinkExe (check common locations)
+find_program(JLINK_EXE
+    NAMES JLinkExe
+    PATHS
+        /opt/SEGGER/JLink
+        /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.jlink.linux64_*/tools/bin
+        $ENV{HOME}/SEGGER/JLink
+    DOC "J-Link Commander executable"
 )
+
+# Flash target using J-Link
+if(JLINK_EXE)
+    add_custom_target(flash
+        COMMAND ${JLINK_EXE} -device STM32F407VE -if SWD -speed 4000
+                -CommanderScript ${CMAKE_SOURCE_DIR}/flash_jlink.jlink
+        DEPENDS ${PROJECT_NAME}.elf
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Flashing ${PROJECT_NAME}.bin via J-Link"
+    )
+    message(STATUS "J-Link found: ${JLINK_EXE}")
+else()
+    message(WARNING "J-Link not found. 'make flash' target will not be available.")
+    message(WARNING "Install SEGGER J-Link tools or use manual flashing.")
+endif()
+
+# Alternative: Flash using ST-Link (if available)
+find_program(STLINK_EXE NAMES st-flash)
+if(STLINK_EXE)
+    add_custom_target(flash-stlink
+        COMMAND ${STLINK_EXE} --reset write ${PROJECT_NAME}.bin 0x08000000
+        DEPENDS ${PROJECT_NAME}.elf
+        COMMENT "Flashing ${PROJECT_NAME}.bin via ST-Link"
+    )
+endif()
 
 # ==============================================================================
 # Print build information
