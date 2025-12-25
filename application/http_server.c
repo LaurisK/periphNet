@@ -1,0 +1,470 @@
+#include "http_server.h"
+#include "lwip/tcp.h"
+#include "lwip/netif.h"
+#include "string.h"
+#include "stdio.h"
+#include "main.h"
+#include "w25q128.h"
+#include "bl_app_contract.h"
+#include "update_manager.h"
+#include "image_transfer.h"
+#include "FreeRTOS.h"
+
+extern struct netif gnetif;
+
+static char flash_test_result[256] = "Not tested";
+static bool flash_test_ok = false;
+static char jedec_info[128] = "Not read";
+static char uid_info[128] = "Not read";
+static char erase_info[128] = "Not tested";
+static char init_info[64] = "Not tested";
+
+static char bl_api_test[128] = "Not tested";
+
+__attribute__((unused)) static const char http_200_header[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "Connection: close\r\n"
+    "\r\n";
+
+static const char http_404_header[] =
+    "HTTP/1.1 404 Not Found\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+    "<html><body><h1>404 Not Found</h1></body></html>";
+
+/**
+ * @brief TCP error callback; frees any active upload session when the connection drops.
+ * @param arg tcp_arg value, which holds the upload session pointer when an upload is active.
+ * @param err lwIP error code (unused).
+ */
+static void http_err_callback(void *arg, err_t err)
+{
+    (void)err;
+    if (arg != NULL) {
+        image_upload_abort_session_ptr(arg);
+    }
+}
+
+/**
+ * @brief TCP receive callback; dispatches incoming HTTP requests to the appropriate handler.
+ * @param arg tcp_arg value; non-NULL when an upload session is active on this PCB.
+ * @param pcb TCP PCB for the connection.
+ * @param p Received pbuf; NULL indicates the client closed the connection.
+ * @param err lwIP error status.
+ * @return ERR_OK on success, ERR_MEM if allocation fails, ERR_ABRT on abort.
+ */
+static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
+{
+    char *request;
+    char *response_buf;
+    int html_len;
+    err_t ret_err;
+
+    if (p == NULL) {
+        if (arg != NULL) {
+            image_upload_abort_session(pcb);
+        }
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    request = (char *)p->payload;
+
+    if (arg != NULL) {
+        err_t result = image_upload_handler(pcb, p);
+        pbuf_free(p);
+        return result;
+    }
+
+    if (p->len >= 25 && strncmp(request, "POST /api/firmware/upload", 25) == 0) {
+        err_t result = image_upload_handler(pcb, p);
+        pbuf_free(p);
+        return result;
+    }
+
+    if (p->len >= 26 && strncmp(request, "GET /api/firmware/download", 26) == 0) {
+        err_t result = image_download_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        return result;
+    }
+
+    if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
+        err_t result = image_status_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return result;
+    }
+
+    response_buf = (char *)pvPortMalloc(2048);
+    if (response_buf == NULL) {
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return ERR_MEM;
+    }
+
+    if (p->len > 512) {
+        vPortFree(response_buf);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
+        const char *status_text = flash_test_ok ? "PASS" : "FAIL";
+
+        html_len = snprintf(response_buf, 2048,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "\r\n"
+            "<html><body><h1>PeriphNet - Phase 4 - Update Mechanism</h1>"
+            "<p>Status: <b>%s</b></p>"
+            "<p>Result: %s</p>"
+            "<hr><h3>Flash Tests:</h3>"
+            "<p>1. Init: %s</p>"
+            "<p>2. JEDEC: %s</p>"
+            "<p>3. UID: %s</p>"
+            "<p>4. Erase: %s</p>"
+            "<hr><h3>Bootloader API Test:</h3>"
+            "<p>5. BL API: %s</p>"
+            "<hr><h3>Phase 4 - Update Test:</h3>"
+            "<p><a href='/trigger_update'>Trigger Firmware Update (Test)</a></p>"
+            "</body></html>",
+            status_text, flash_test_result,
+            init_info, jedec_info, uid_info, erase_info, bl_api_test);
+
+        if (html_len >= 2048) {
+            html_len = 2047;
+        }
+
+        ret_err = tcp_write(pcb, response_buf, html_len, TCP_WRITE_FLAG_COPY);
+        if (ret_err == ERR_OK) {
+            tcp_output(pcb);
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            vPortFree(response_buf);
+            return ERR_OK;
+        } else {
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            vPortFree(response_buf);
+            return ERR_ABRT;
+        }
+    } else if (strncmp(request, "GET /trigger_update", 19) == 0) {
+        uint32_t dummy_size = 245760;
+        uint32_t dummy_crc = 0x12345678;
+        uint32_t dummy_version = 0x010001;
+
+        int update_result = update_status_request(dummy_size, dummy_crc, dummy_version);
+
+        const char *result_msg;
+        if (update_result == 0) {
+            result_msg = "<p style='color:green;'><b>SUCCESS:</b> Firmware update requested!</p>"
+                        "<p>Update status written to external flash.</p>"
+                        "<p><b>Next step:</b> Reboot device to trigger bootloader update process.</p>"
+                        "<p><a href='/'>Back to Home</a></p>";
+        } else {
+            result_msg = "<p style='color:red;'><b>FAILED:</b> Could not write update request to external flash.</p>"
+                        "<p><a href='/'>Back to Home</a></p>";
+        }
+
+        html_len = snprintf(response_buf, 2048,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "\r\n"
+            "<html><body>"
+            "<h1>PeriphNet - Trigger Firmware Update</h1>"
+            "%s"
+            "<hr>"
+            "<p><b>NOTE:</b> This is a Phase 4 stub - no actual firmware uploaded yet.</p>"
+            "<p>Bootloader will see update_requested=1 on next boot and run verification/installation stubs.</p>"
+            "</body></html>",
+            result_msg);
+
+        ret_err = tcp_write(pcb, response_buf, html_len, TCP_WRITE_FLAG_COPY);
+        if (ret_err == ERR_OK) {
+            tcp_output(pcb);
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            vPortFree(response_buf);
+            return ERR_OK;
+        } else {
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            vPortFree(response_buf);
+            return ERR_ABRT;
+        }
+    } else {
+        ret_err = tcp_write(pcb, http_404_header, strlen(http_404_header), TCP_WRITE_FLAG_COPY);
+        if (ret_err == ERR_OK) {
+            tcp_output(pcb);
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            vPortFree(response_buf);
+            return ERR_OK;
+        } else {
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            vPortFree(response_buf);
+            return ERR_ABRT;
+        }
+    }
+}
+
+/**
+ * @brief TCP accept callback; registers recv and err callbacks for new connections.
+ * @param arg Unused.
+ * @param newpcb Newly accepted TCP PCB.
+ * @param err lwIP error status.
+ * @return ERR_OK on success, ERR_VAL if newpcb is NULL or err is set.
+ */
+static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
+{
+    if (err != ERR_OK || newpcb == NULL) {
+        return ERR_VAL;
+    }
+
+    tcp_recv(newpcb, http_recv_callback);
+    tcp_err(newpcb, http_err_callback);
+
+    return ERR_OK;
+}
+
+/**
+ * @brief Initialize the HTTP server and the image transfer module.
+ */
+void http_server_init(void)
+{
+    struct tcp_pcb *pcb;
+
+    image_transfer_init();
+
+    pcb = tcp_new();
+
+    if (pcb != NULL) {
+        err_t err;
+
+        err = tcp_bind(pcb, IP_ADDR_ANY, HTTP_SERVER_PORT);
+
+        if (err == ERR_OK) {
+            pcb = tcp_listen(pcb);
+            tcp_accept(pcb, http_accept_callback);
+        } else {
+            memp_free(MEMP_TCP_PCB, pcb);
+        }
+    }
+}
+
+/**
+ * @brief Run the external flash self-test sequence and store results in module-level strings.
+ */
+void http_server_test_flash(void)
+{
+    W25Q128_ID_t flash_id;
+    uint8_t uid_from_flash[12];
+    uint8_t uid_current[12];
+    HAL_StatusTypeDef spi_status;
+
+    strcpy(init_info, "Testing...");
+    strcpy(jedec_info, "Not tested");
+    strcpy(uid_info, "Not tested");
+    strcpy(erase_info, "Not tested");
+    strcpy(flash_test_result, "In Progress");
+    flash_test_ok = false;
+
+    if (W25Q128_Init() != W25Q128_OK) {
+        strcpy(init_info, "FAIL - W25Q128_Init() failed");
+        strcpy(flash_test_result, "STEP 0 FAILED - Flash initialization failed");
+        return;
+    }
+
+    extern SPI_HandleTypeDef hspi2;
+    if (hspi2.State == HAL_SPI_STATE_RESET) {
+        snprintf(init_info, sizeof(init_info), "FAIL - SPI not initialized (state=%d)", hspi2.State);
+        strcpy(flash_test_result, "STEP 1a FAILED - SPI peripheral not initialized");
+        return;
+    }
+
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+    HAL_Delay(5);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    HAL_Delay(5);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    uint8_t wakeup_cmd = 0xAB;
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    spi_status = HAL_SPI_Transmit(&hspi2, &wakeup_cmd, 1, 100);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    if (spi_status != HAL_OK) {
+        snprintf(init_info, sizeof(init_info), "FAIL - Wake-up SPI transmit error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1c FAILED - Wake-up command failed");
+        return;
+    }
+    HAL_Delay(10);
+
+    uint8_t jedec_cmd = 0x9F;
+    uint8_t jedec_data[3] = {0};
+
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    spi_status = HAL_SPI_Transmit(&hspi2, &jedec_cmd, 1, 100);
+    if (spi_status != HAL_OK) {
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+        snprintf(init_info, sizeof(init_info), "FAIL - JEDEC cmd transmit error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1d FAILED - JEDEC command transmit failed");
+        return;
+    }
+
+    spi_status = HAL_SPI_Receive(&hspi2, jedec_data, 3, 100);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    if (spi_status != HAL_OK) {
+        snprintf(init_info, sizeof(init_info), "FAIL - JEDEC receive error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1d FAILED - JEDEC data receive failed");
+        return;
+    }
+
+    if (jedec_data[0] == 0xFF && jedec_data[1] == 0xFF && jedec_data[2] == 0xFF) {
+        snprintf(init_info, sizeof(init_info), "FAIL - All 0xFF (no SPI response)");
+        strcpy(flash_test_result, "STEP 1e FAILED - Flash not responding (all 0xFF)");
+        return;
+    }
+
+    if (jedec_data[0] == 0x00 && jedec_data[1] == 0x00 && jedec_data[2] == 0x00) {
+        snprintf(init_info, sizeof(init_info), "FAIL - All 0x00 (SPI bus issue)");
+        strcpy(flash_test_result, "STEP 1e FAILED - SPI bus stuck at 0x00");
+        return;
+    }
+
+    flash_id.manufacturer_id = jedec_data[0];
+    flash_id.memory_type = jedec_data[1];
+    flash_id.capacity = jedec_data[2];
+
+    snprintf(init_info, sizeof(init_info), "OK - SPI state=%d", hspi2.State);
+
+    if (flash_id.manufacturer_id != 0xEF || flash_id.memory_type != 0x40) {
+        snprintf(jedec_info, sizeof(jedec_info),
+                "WRONG - Manuf=0x%02X Type=0x%02X Cap=0x%02X (Expected: 0xEF/0x40/0x17or0x18)",
+                flash_id.manufacturer_id, flash_id.memory_type, flash_id.capacity);
+        strcpy(flash_test_result, "STEP 2 FAILED - Wrong flash chip detected");
+        return;
+    }
+
+    const char *chip_name = (flash_id.capacity == 0x18) ? "W25Q128 (16MB)" :
+                            (flash_id.capacity == 0x17) ? "W25Q64 (8MB)" : "Unknown";
+    snprintf(jedec_info, sizeof(jedec_info),
+            "OK - 0x%02X/0x%02X/0x%02X (Winbond %s)",
+            flash_id.manufacturer_id, flash_id.memory_type, flash_id.capacity, chip_name);
+
+    uid_current[0] = *(uint8_t*)(0x1FFF7A10);
+    uid_current[1] = *(uint8_t*)(0x1FFF7A10 + 1);
+    uid_current[2] = *(uint8_t*)(0x1FFF7A10 + 2);
+    uid_current[3] = *(uint8_t*)(0x1FFF7A10 + 3);
+    uid_current[4] = *(uint8_t*)(0x1FFF7A10 + 4);
+    uid_current[5] = *(uint8_t*)(0x1FFF7A10 + 5);
+    uid_current[6] = *(uint8_t*)(0x1FFF7A10 + 6);
+    uid_current[7] = *(uint8_t*)(0x1FFF7A10 + 7);
+    uid_current[8] = *(uint8_t*)(0x1FFF7A10 + 8);
+    uid_current[9] = *(uint8_t*)(0x1FFF7A10 + 9);
+    uid_current[10] = *(uint8_t*)(0x1FFF7A10 + 10);
+    uid_current[11] = *(uint8_t*)(0x1FFF7A10 + 11);
+
+    uint32_t test_addr = EXT_FLASH_FWU_STATUS_ADDR + 256;
+
+    if (W25Q128_EraseSector(test_addr) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot erase test sector");
+        strcpy(flash_test_result, "STEP 4a FAILED - Erase failed");
+        return;
+    }
+
+    if (W25Q128_WritePage(test_addr, uid_current, 12) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot write UID to flash");
+        strcpy(flash_test_result, "STEP 4b FAILED - Write failed");
+        return;
+    }
+
+    if (W25Q128_Read(test_addr, uid_from_flash, 12) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot read back UID");
+        strcpy(flash_test_result, "STEP 4c FAILED - Read after write failed");
+        return;
+    }
+
+    if (memcmp(uid_current, uid_from_flash, 12) != 0) {
+        snprintf(uid_info, sizeof(uid_info),
+                "WRITE TEST FAIL - Wrote: %02X%02X... Read: %02X%02X...",
+                uid_current[0], uid_current[1],
+                uid_from_flash[0], uid_from_flash[1]);
+        strcpy(flash_test_result, "STEP 4d FAILED - Write/read verify failed");
+        return;
+    }
+
+    snprintf(uid_info, sizeof(uid_info),
+            "OK - Write/Read test passed: %02X%02X%02X%02X...",
+            uid_from_flash[0], uid_from_flash[1], uid_from_flash[2], uid_from_flash[3]);
+
+    if (W25Q128_EraseSector(EXT_FLASH_FWU_STATUS_ADDR + 4096) != W25Q128_OK) {
+        strcpy(erase_info, "FAILED - Cannot erase sector");
+        strcpy(flash_test_result, "STEP 6 FAILED - Cannot erase sector");
+        return;
+    }
+
+    uint8_t erased_data[16];
+    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + 4096, erased_data, 16) != W25Q128_OK) {
+        strcpy(erase_info, "FAILED - Cannot verify erase");
+        strcpy(flash_test_result, "STEP 7 FAILED - Cannot read back erased data");
+        return;
+    }
+
+    uint8_t all_ff = 1;
+    for (int i = 0; i < 16; i++) {
+        if (erased_data[i] != 0xFF) {
+            all_ff = 0;
+            break;
+        }
+    }
+
+    if (!all_ff) {
+        snprintf(erase_info, sizeof(erase_info),
+                "FAILED - Erase verify: %02X %02X %02X %02X... (Expected: FF FF FF FF...)",
+                erased_data[0], erased_data[1], erased_data[2], erased_data[3]);
+        strcpy(flash_test_result, "STEP 7 FAILED - Erase verification failed");
+        return;
+    }
+
+    strcpy(erase_info, "OK - Sector erased (verified 0xFF)");
+
+    const sBootloaderApi *bl_api = (const sBootloaderApi*)BL_API_TABLE_ADDR;
+
+    if (bl_api->magic != BL_API_MAGIC) {
+        snprintf(bl_api_test, sizeof(bl_api_test),
+                "FAIL - Wrong magic 0x%08X (expected 0x%08X)",
+                (unsigned int)bl_api->magic, (unsigned int)BL_API_MAGIC);
+        strcpy(flash_test_result, "STEP 5 FAILED - BL API magic invalid");
+        return;
+    }
+
+    uint32_t bl_major = 0, bl_minor = 0, bl_patch = 0;
+    bl_api->get_bootloader_version(&bl_major, &bl_minor, &bl_patch);
+
+    uint32_t test_crc = bl_api->calculate_crc32(0x08000000, 1024, false);
+
+    int verify_result = bl_api->verify_internal_app();
+
+    snprintf(bl_api_test, sizeof(bl_api_test),
+            "OK - BL v%lu.%lu.%lu, CRC=0x%08lX, Verify=%d",
+            bl_major, bl_minor, bl_patch, test_crc, verify_result);
+
+    strcpy(flash_test_result, "ALL TESTS PASSED");
+    flash_test_ok = true;
+}

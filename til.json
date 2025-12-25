@@ -1,0 +1,890 @@
+{
+	"1019": {
+		"Type": "TRice",
+		"Strg": "New client received for trice stream."
+	},
+	"1037": {
+		"Type": "TRICE0",
+		"Strg": "  System halted - infinite loop below   \\n"
+	},
+	"1058": {
+		"Type": "TRice",
+		"Strg": "R0  = 0x%08X\\n"
+	},
+	"1077": {
+		"Type": "TRICE",
+		"Strg": "FWU: Upload handler called, data_len=%u\\n"
+	},
+	"1098": {
+		"Type": "TRice",
+		"Strg": "PSR = 0x%08X\\n"
+	},
+	"1102": {
+		"Type": "TRICE",
+		"Strg": "R12 = 0x%08X\\n"
+	},
+	"1115": {
+		"Type": "TRice",
+		"Strg": "R3  = 0x%08X\\n"
+	},
+	"1177": {
+		"Type": "TRice",
+		"Strg": "  - MemManage fault during FP lazy state preservation\\n"
+	},
+	"1195": {
+		"Type": "TRice",
+		"Strg": "  - No coprocessor\\n"
+	},
+	"1197": {
+		"Type": "TRice",
+		"Strg": "  - Instruction bus error\\n"
+	},
+	"1209": {
+		"Type": "TRICE",
+		"Strg": "FWU: Flash erase complete\\n"
+	},
+	"1231": {
+		"Type": "TRice",
+		"Strg": "  2. Set PC: set $pc = 0x%08X\\n"
+	},
+	"1243": {
+		"Type": "TRice",
+		"Strg": "Heartbeat: tick=%u heap=%u\\n"
+	},
+	"1390": {
+		"Type": "TRice",
+		"Strg": "CFSR = 0x%08X\\n"
+	},
+	"1405": {
+		"Type": "TRice",
+		"Strg": "\\n========================================\\n"
+	},
+	"1457": {
+		"Type": "TRice",
+		"Strg": "  Return to: Handler mode (MSP)\\n"
+	},
+	"1475": {
+		"Type": "TRice",
+		"Strg": "  4. Backtrace: bt\\n"
+	},
+	"1504": {
+		"Type": "TRice",
+		"Strg": "\\nTo disassemble fault address:\\n"
+	},
+	"1559": {
+		"Type": "TRICE",
+		"Strg": "ERR: Bind FAILED, err=%d\\n"
+	},
+	"1639": {
+		"Type": "TRICE0",
+		"Strg": "  - Undefined instruction\\n"
+	},
+	"1657": {
+		"Type": "TRice",
+		"Strg": "\\n--- MemManage Fault ---\\n"
+	},
+	"1686": {
+		"Type": "trice",
+		"Strg": "err:=========================================\\n"
+	},
+	"1721": {
+		"Type": "TRICE0",
+		"Strg": "  - Forced HardFault (escalated from other fault)\\n"
+	},
+	"1739": {
+		"Type": "TRICE",
+		"Strg": "LR  = 0x%08X (return address)\\n"
+	},
+	"1820": {
+		"Type": "TRICE0",
+		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
+	},
+	"1894": {
+		"Type": "TRICE0",
+		"Strg": "  - Divide by zero\\n"
+	},
+	"1896": {
+		"Type": "TRICE",
+		"Strg": "FWU: Status query - status=%d, bytes=%u/%u\\n"
+	},
+	"1903": {
+		"Type": "TRICE",
+		"Strg": "  arm-none-eabi-addr2line -e build/application.elf 0x%08X\\n"
+	},
+	"1932": {
+		"Type": "TRice",
+		"Strg": "FWU: heap=%u hwm=%u\\n"
+	},
+	"1977": {
+		"Type": "TRice",
+		"Strg": "FWU: resp malloc FAIL heap=%u\\n"
+	},
+	"2004": {
+		"Type": "TRICE",
+		"Strg": "FWU: Download handler called\\n"
+	},
+	"2041": {
+		"Type": "TRiceS",
+		"Strg": "err:========== %s ==========\\n"
+	},
+	"2053": {
+		"Type": "TRice",
+		"Strg": "BTN2: triggering UsageFault (div-by-zero)\\n"
+	},
+	"2070": {
+		"Type": "trice",
+		"Strg": " [%c%c%c] freeStack=%u words\\n"
+	},
+	"2153": {
+		"Type": "triceS",
+		"Strg": "\\t%s"
+	},
+	"2170": {
+		"Type": "TRice",
+		"Strg": "BTN3: triggering BusFault (invalid SRAM)\\n"
+	},
+	"2207": {
+		"Type": "trice",
+		"Strg": "\\t R12 = 0x%08X\\n\\t LR  = 0x%08X\\n"
+	},
+	"2266": {
+		"Type": "trice",
+		"Strg": "err:Fault Status:\\n"
+	},
+	"2286": {
+		"Type": "TRICE0",
+		"Strg": "  - Invalid PC load\\n"
+	},
+	"2396": {
+		"Type": "TRice",
+		"Strg": "FWU: upload_err -\u003e HTTP 500\\n"
+	},
+	"2424": {
+		"Type": "TRice",
+		"Strg": "  - Fault address: 0x%08X (BFAR)\\n"
+	},
+	"2450": {
+		"Type": "TRice",
+		"Strg": "FWU: page addr=0x%X len=%u last=%u total=%lu\\n"
+	},
+	"2455": {
+		"Type": "TRICE",
+		"Strg": "DBG: tcp_write OK, calling tcp_output\\n"
+	},
+	"2469": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTML built, len=%d, sending...\\n"
+	},
+	"2497": {
+		"Type": "TRice",
+		"Strg": "  - Instruction access violation\\n"
+	},
+	"2498": {
+		"Type": "TRice",
+		"Strg": "  - Divide by zero\\n"
+	},
+	"2564": {
+		"Type": "TRICE0",
+		"Strg": "  - Instruction access violation\\n"
+	},
+	"2636": {
+		"Type": "TRICE",
+		"Strg": "ERR: Invalid content length: %u (max %u)\\n"
+	},
+	"2788": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved %u -\u003e tcpip_thread\\n"
+	},
+	"2794": {
+		"Type": "trice",
+		"Strg": "\\t R0  = 0x%08X\\n\\t R1  = 0x%08X\\n"
+	},
+	"2826": {
+		"Type": "TRICE",
+		"Strg": "DFSR = 0x%08X\\n"
+	},
+	"2833": {
+		"Type": "TRICE0",
+		"Strg": "  Stack: Main Stack (MSP)\\n"
+	},
+	"2862": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Bus Fault ---\\n"
+	},
+	"2868": {
+		"Type": "TRICE",
+		"Strg": "PC  = 0x%08X (fault address)\\n"
+	},
+	"2905": {
+		"Type": "trice",
+		"Strg": "========== Tasks (%u) ==============\\n"
+	},
+	"2943": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_done 0x%X\\n"
+	},
+	"2980": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_start 0x%X\\n"
+	},
+	"3027": {
+		"Type": "TRice",
+		"Strg": "  Stack: Main Stack (MSP)\\n"
+	},
+	"3046": {
+		"Type": "TRICE",
+		"Strg": "ERR: pvPortMalloc FAILED - out of memory!\\n"
+	},
+	"3051": {
+		"Type": "TRice",
+		"Strg": "  - Imprecise data bus error\\n"
+	},
+	"3060": {
+		"Type": "TRICE",
+		"Strg": "  - Fault address: 0x%08X (MMFAR)\\n"
+	},
+	"3098": {
+		"Type": "TRice",
+		"Strg": "R2  = 0x%08X\\n"
+	},
+	"3151": {
+		"Type": "TRICE0",
+		"Strg": "  - Vector table read fault\\n"
+	},
+	"3180": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Exception Return ---\\n"
+	},
+	"3249": {
+		"Type": "TRice",
+		"Strg": "  - Vector table read fault\\n"
+	},
+	"3251": {
+		"Type": "TRice",
+		"Strg": "  - Bus fault on unstacking\\n"
+	},
+	"3266": {
+		"Type": "TRice",
+		"Strg": "  arm-none-eabi-objdump -d -S build/application.elf | grep -A20 %08X\\n"
+	},
+	"3275": {
+		"Type": "TRICE0",
+		"Strg": "  - Data access violation\\n"
+	},
+	"3298": {
+		"Type": "TRICE0",
+		"Strg": "========================================\\n\\n"
+	},
+	"3355": {
+		"Type": "TRice",
+		"Strg": "R12 = 0x%08X\\n"
+	},
+	"3357": {
+		"Type": "TRICE0",
+		"Strg": "  - No coprocessor\\n"
+	},
+	"3447": {
+		"Type": "TRice",
+		"Strg": "  Stack: Process Stack (PSP)\\n"
+	},
+	"3457": {
+		"Type": "TRICE0",
+		"Strg": "\\nTo find function at fault address:\\n"
+	},
+	"3458": {
+		"Type": "TRICE",
+		"Strg": "ERR: Final flash write failed\\n"
+	},
+	"3480": {
+		"Type": "TRICE0",
+		"Strg": "\\n========================================\\n"
+	},
+	"3569": {
+		"Type": "TRICE0",
+		"Strg": "\\nTo disassemble fault address:\\n"
+	},
+	"3583": {
+		"Type": "TRICE",
+		"Strg": "CFSR = 0x%08X\\n"
+	},
+	"3640": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_FAIL 0x%X\\n"
+	},
+	"3660": {
+		"Type": "TRICE0",
+		"Strg": "\\nTo debug with GDB:\\n"
+	},
+	"3753": {
+		"Type": "TRICE",
+		"Strg": "WARN: Request too large (%u \u003e 512), rejecting\\n"
+	},
+	"3755": {
+		"Type": "TRICE",
+		"Strg": "Stack frame at: 0x%08X\\n"
+	},
+	"3795": {
+		"Type": "TRice",
+		"Strg": "  - Unaligned access\\n"
+	},
+	"3811": {
+		"Type": "TRice",
+		"Strg": "\\n--- Fault Status Registers ---\\n"
+	},
+	"3829": {
+		"Type": "TRice",
+		"Strg": "========================================\\n"
+	},
+	"3831": {
+		"Type": "TRICE",
+		"Strg": "DBG: Processing /trigger_update request\\n"
+	},
+	"3882": {
+		"Type": "TRICE0",
+		"Strg": "  4. Backtrace: bt\\n"
+	},
+	"3891": {
+		"Type": "TRice",
+		"Strg": "tcpip HWM=%u words\\n"
+	},
+	"3900": {
+		"Type": "trice",
+		"Strg": "\\t CFSR = 0x%08X\\n\\t HFSR = 0x%08X\\n"
+	},
+	"3929": {
+		"Type": "TRICE",
+		"Strg": "INFO: HTTP server ready\\n"
+	},
+	"3948": {
+		"Type": "TRICE",
+		"Strg": "DBG: Unknown path, sending 404\\n"
+	},
+	"3966": {
+		"Type": "TRice",
+		"Strg": "\\n--- Usage Fault ---\\n"
+	},
+	"4048": {
+		"Type": "TRICE",
+		"Strg": "R3  = 0x%08X\\n"
+	},
+	"4090": {
+		"Type": "TRICE0",
+		"Strg": "  1. Load ELF: file build/application.elf\\n"
+	},
+	"4102": {
+		"Type": "TRICE0",
+		"Strg": "  - Debug event\\n"
+	},
+	"4177": {
+		"Type": "trice",
+		"Strg": "--- End ---\\n"
+	},
+	"4178": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Usage Fault ---\\n"
+	},
+	"4230": {
+		"Type": "TRICE0",
+		"Strg": "  Return to: Handler mode (MSP)\\n"
+	},
+	"4244": {
+		"Type": "TRice",
+		"Strg": "\\nTo debug with GDB:\\n"
+	},
+	"4255": {
+		"Type": "trice",
+		"Strg": " IWDG"
+	},
+	"4283": {
+		"Type": "TRice",
+		"Strg": "\\n\\n"
+	},
+	"4361": {
+		"Type": "TRICE",
+		"Strg": "HFSR = 0x%08X\\n"
+	},
+	"4388": {
+		"Type": "TRICE0",
+		"Strg": "  - MemManage fault on unstacking\\n"
+	},
+	"4401": {
+		"Type": "TRice",
+		"Strg": "  - Fault address: 0x%08X (MMFAR)\\n"
+	},
+	"4404": {
+		"Type": "TRice",
+		"Strg": "upload HWM=%u words heap=%u\\n"
+	},
+	"4432": {
+		"Type": "TRice",
+		"Strg": "LR  = 0x%08X (return address)\\n"
+	},
+	"4468": {
+		"Type": "TRice",
+		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
+	},
+	"4538": {
+		"Type": "trice",
+		"Strg": "err:Stacked Registers:\\n"
+	},
+	"4562": {
+		"Type": "TRice",
+		"Strg": "Stack frame at: 0x%08X\\n"
+	},
+	"4590": {
+		"Type": "TRICE0",
+		"Strg": "  - Instruction bus error\\n"
+	},
+	"4687": {
+		"Type": "trice",
+		"Strg": "\\t  #%d 0x%08X\\n"
+	},
+	"4757": {
+		"Type": "TRice",
+		"Strg": "FWU: page addr=0x%X len=%u last=%u total=%u\\n"
+	},
+	"4770": {
+		"Type": "TRice",
+		"Strg": "  1. Load ELF: file build/application.elf\\n"
+	},
+	"4797": {
+		"Type": "TRICE0",
+		"Strg": "  - Invalid state (e.g., trying to switch to ARM mode)\\n"
+	},
+	"4801": {
+		"Type": "TRICE",
+		"Strg": "DBG: Connection accepted\\n"
+	},
+	"4858": {
+		"Type": "TRICE0",
+		"Strg": "  - Bus fault on stacking\\n"
+	},
+	"4861": {
+		"Type": "TRice",
+		"Strg": "PC  = 0x%08X (fault address)\\n"
+	},
+	"4863": {
+		"Type": "trice",
+		"Strg": " LPWR"
+	},
+	"4905": {
+		"Type": "TRice",
+		"Strg": "FWU: write_ok 0x%X %uB\\n"
+	},
+	"4916": {
+		"Type": "TRice",
+		"Strg": "  - Invalid state (e.g., trying to switch to ARM mode)\\n"
+	},
+	"4923": {
+		"Type": "TRice",
+		"Strg": "DFSR = 0x%08X\\n"
+	},
+	"4951": {
+		"Type": "TRICE",
+		"Strg": "ERR: Accept rejected\\n"
+	},
+	"4960": {
+		"Type": "TRICE0",
+		"Strg": "  - MemManage fault on stacking\\n"
+	},
+	"4999": {
+		"Type": "TRICE0",
+		"Strg": "  - Bus fault during FP lazy state preservation\\n"
+	},
+	"5018": {
+		"Type": "TRICE",
+		"Strg": "  2. Set PC: set $pc = 0x%08X\\n"
+	},
+	"5158": {
+		"Type": "TRice",
+		"Strg": "  - Undefined instruction\\n"
+	},
+	"5229": {
+		"Type": "trice",
+		"Strg": "\\t PC  = 0x%08X\\n\\t PSR = 0x%08X\\n"
+	},
+	"5292": {
+		"Type": "TRice",
+		"Strg": "\\n--- Stack Unwinding Information ---\\n"
+	},
+	"5297": {
+		"Type": "TRice",
+		"Strg": "\\nTo find function at fault address:\\n"
+	},
+	"5393": {
+		"Type": "TRICE",
+		"Strg": "FWU: Erasing %u sectors...\\n"
+	},
+	"5410": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved malloc FAIL\\n"
+	},
+	"5432": {
+		"Type": "TRice",
+		"Strg": "  - MemManage fault on stacking\\n"
+	},
+	"5444": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- HardFault Status ---\\n"
+	},
+	"5447": {
+		"Type": "TRice",
+		"Strg": "  - Bus fault during FP lazy state preservation\\n"
+	},
+	"5453": {
+		"Type": "TRICE",
+		"Strg": "FWU: No firmware available for download (status=%d)\\n"
+	},
+	"5476": {
+		"Type": "TRICE",
+		"Strg": "  3. Set SP: set $sp = 0x%08X\\n"
+	},
+	"5496": {
+		"Type": "TRICE",
+		"Strg": "EXC_RETURN = 0x%08X\\n"
+	},
+	"5514": {
+		"Type": "trice",
+		"Strg": " PIN"
+	},
+	"5527": {
+		"Type": "TRice",
+		"Strg": "  arm-none-eabi-addr2line -e build/application.elf 0x%08X\\n"
+	},
+	"5533": {
+		"Type": "TRICE0",
+		"Strg": "  - Precise data bus error\\n"
+	},
+	"5534": {
+		"Type": "TRICE0",
+		"Strg": "  - Unaligned access\\n"
+	},
+	"5555": {
+		"Type": "TRICE",
+		"Strg": "R2  = 0x%08X\\n"
+	},
+	"5586": {
+		"Type": "TRice",
+		"Strg": "========================================\\n"
+	},
+	"5649": {
+		"Type": "TRice",
+		"Strg": "PeriphNet started. Heap=%u\\n"
+	},
+	"5662": {
+		"Type": "TRICE0",
+		"Strg": "  Return to: Thread mode (PSP)\\n"
+	},
+	"5697": {
+		"Type": "TRice",
+		"Strg": "  - Debug event\\n"
+	},
+	"5707": {
+		"Type": "trice",
+		"Strg": "err:Control:\\n"
+	},
+	"5714": {
+		"Type": "TRiceS",
+		"Strg": "err:Watchdog in task: %s\\n"
+	},
+	"5780": {
+		"Type": "TRice",
+		"Strg": "FWU: resp cb FAIL err=%d heap=%u\\n"
+	},
+	"5841": {
+		"Type": "TRICE",
+		"Strg": "ERR: HTTP error callback, err=%d\\n"
+	},
+	"5932": {
+		"Type": "TRICE0",
+		"Strg": "  - Bus fault on unstacking\\n"
+	},
+	"5944": {
+		"Type": "TRICE",
+		"Strg": "R0  = 0x%08X\\n"
+	},
+	"5986": {
+		"Type": "TRICE",
+		"Strg": "PSR = 0x%08X\\n"
+	},
+	"6045": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTTP accept, pcb=%p, err=%d\\n"
+	},
+	"6081": {
+		"Type": "TRice",
+		"Strg": "  - Bus fault on stacking\\n"
+	},
+	"6087": {
+		"Type": "trice",
+		"Strg": " BOR"
+	},
+	"6104": {
+		"Type": "TRICE",
+		"Strg": "  arm-none-eabi-objdump -d -S build/application.elf | grep -A20 %08X\\n"
+	},
+	"6107": {
+		"Type": "TRice",
+		"Strg": "FWU: write_FAIL 0x%X\\n"
+	},
+	"6121": {
+		"Type": "TRice",
+		"Strg": "  Return to: Thread mode (PSP)\\n"
+	},
+	"6209": {
+		"Type": "trice",
+		"Strg": "\\t SP      = 0x%08X (PSP)\\n\\t CONTROL = 0x%08X\\n"
+	},
+	"6220": {
+		"Type": "trice",
+		"Strg": "\\t PRIMASK = 0x%08X\\n"
+	},
+	"6248": {
+		"Type": "TRice",
+		"Strg": "  - MemManage fault on unstacking\\n"
+	},
+	"6253": {
+		"Type": "TRICE",
+		"Strg": "DBG: Buffer allocated at %p\\n"
+	},
+	"6257": {
+		"Type": "TRice",
+		"Strg": "upload_progress=0x%X\\n"
+	},
+	"6284": {
+		"Type": "TRICE",
+		"Strg": "INFO: Bind OK, listening...\\n"
+	},
+	"6292": {
+		"Type": "TRice",
+		"Strg": "FWU: upload_done %lu bytes -\u003e HTTP 200\\n"
+	},
+	"6296": {
+		"Type": "TRice",
+		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
+	},
+	"6402": {
+		"Type": "TRICE",
+		"Strg": "FWU: Upload complete - flushing buffer\\n"
+	},
+	"6471": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Fault Status Registers ---\\n"
+	},
+	"6484": {
+		"Type": "TRICE",
+		"Strg": "ERR: tcp_new FAILED - no PCBs!\\n"
+	},
+	"6491": {
+		"Type": "TRice",
+		"Strg": "  - Invalid PC load\\n"
+	},
+	"6525": {
+		"Type": "TRICE",
+		"Strg": "DBG: Client closed connection\\n"
+	},
+	"6573": {
+		"Type": "TRice",
+		"Strg": "HFSR = 0x%08X\\n"
+	},
+	"6619": {
+		"Type": "TRice",
+		"Strg": "\\n--- Bus Fault ---\\n"
+	},
+	"6666": {
+		"Type": "TRICE0",
+		"Strg": "========================================\\n"
+	},
+	"6697": {
+		"Type": "trice",
+		"Strg": " POR"
+	},
+	"6796": {
+		"Type": "TRice",
+		"Strg": "BTN1: triggering HardFault (null write)\\n"
+	},
+	"6814": {
+		"Type": "TRice",
+		"Strg": "\\n--- HardFault Status ---\\n"
+	},
+	"6862": {
+		"Type": "TRice",
+		"Strg": "Counter is - %d\\n"
+	},
+	"6905": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
+	},
+	"6914": {
+		"Type": "TRICE",
+		"Strg": "FWU: SUCCESS - %u bytes uploaded to flash\\n"
+	},
+	"6951": {
+		"Type": "TRICE0",
+		"Strg": "========================================\\n"
+	},
+	"6961": {
+		"Type": "trice",
+		"Strg": "\u003e\u003e\u003e Backtrace:\\n"
+	},
+	"6988": {
+		"Type": "TRice",
+		"Strg": "  - Precise data bus error\\n"
+	},
+	"6990": {
+		"Type": "TRICE",
+		"Strg": "DBG: Request completed successfully\\n"
+	},
+	"6994": {
+		"Type": "TRICE",
+		"Strg": "AFSR = 0x%08X\\n"
+	},
+	"7047": {
+		"Type": "TRice",
+		"Strg": "EXC_RETURN = 0x%08X\\n"
+	},
+	"7049": {
+		"Type": "TRice",
+		"Strg": "R1  = 0x%08X\\n"
+	},
+	"7073": {
+		"Type": "TRice",
+		"Strg": "FWU: upload_done %u bytes -\u003e HTTP 200\\n"
+	},
+	"7101": {
+		"Type": "TRice",
+		"Strg": "Reset cause (RCC_CSR=0x%08X):"
+	},
+	"7173": {
+		"Type": "TRice",
+		"Strg": "AFSR = 0x%08X\\n"
+	},
+	"7205": {
+		"Type": "TRICE",
+		"Strg": "WARN: HTML truncated! len=%d \u003e= 2048\\n"
+	},
+	"7219": {
+		"Type": "TRice",
+		"Strg": "========================================\\n\\n"
+	},
+	"7223": {
+		"Type": "TRICE",
+		"Strg": "DBG: Processing GET / request\\n"
+	},
+	"7239": {
+		"Type": "TRICE0",
+		"Strg": "  Stack: Process Stack (PSP)\\n"
+	},
+	"7263": {
+		"Type": "TRice",
+		"Strg": "\\n--- Exception Return ---\\n"
+	},
+	"7281": {
+		"Type": "trice",
+		"Strg": " SW"
+	},
+	"7304": {
+		"Type": "TRICE",
+		"Strg": "FWU: First packet - creating session\\n"
+	},
+	"7314": {
+		"Type": "TRICE",
+		"Strg": "INFO: HTTP server init, port=%d\\n"
+	},
+	"7318": {
+		"Type": "trice",
+		"Strg": "\\t MMFAR= 0x%08X\\n\\t BFAR = 0x%08X\\n"
+	},
+	"7342": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- Stack Unwinding Information ---\\n"
+	},
+	"7368": {
+		"Type": "TRICE",
+		"Strg": "R1  = 0x%08X\\n"
+	},
+	"7396": {
+		"Type": "TRICE",
+		"Strg": "ERR: tcp_write FAILED, err=%d\\n"
+	},
+	"7425": {
+		"Type": "TRice",
+		"Strg": "  System halted - infinite loop below   \\n"
+	},
+	"7465": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved cb FAIL err=%d\\n"
+	},
+	"7472": {
+		"Type": "trice",
+		"Strg": "\\n"
+	},
+	"7499": {
+		"Type": "TRice",
+		"Strg": "  - Data access violation\\n"
+	},
+	"7509": {
+		"Type": "TRICE",
+		"Strg": "DBG: Request size=%u, allocating 2048 bytes...\\n"
+	},
+	"7652": {
+		"Type": "TRICE",
+		"Strg": "DBG: Parsing request (len=%u)\\n"
+	},
+	"7687": {
+		"Type": "trice",
+		"Strg": " WWDG"
+	},
+	"7695": {
+		"Type": "TRICE",
+		"Strg": "  - Fault address: 0x%08X (BFAR)\\n"
+	},
+	"7698": {
+		"Type": "trice",
+		"Strg": "\\t R2  = 0x%08X\\n\\t R3  = 0x%08X\\n"
+	},
+	"7752": {
+		"Type": "TRICE",
+		"Strg": "DBG: Building HTML (status=%s)\\n"
+	},
+	"7754": {
+		"Type": "TRICE",
+		"Strg": "DBG: Cleanup and close\\n"
+	},
+	"7755": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTTP recv enter, p=%p, err=%d\\n"
+	},
+	"7764": {
+		"Type": "TRICE0",
+		"Strg": "  - Imprecise data bus error\\n"
+	},
+	"7767": {
+		"Type": "TRice",
+		"Strg": "  - Forced HardFault (escalated from other fault)\\n"
+	},
+	"7772": {
+		"Type": "TRICE0",
+		"Strg": "\\n\\n"
+	},
+	"7804": {
+		"Type": "TRICE",
+		"Strg": "FWU: Content-Length parsed: %u bytes\\n"
+	},
+	"7866": {
+		"Type": "TRICE0",
+		"Strg": "  - MemManage fault during FP lazy state preservation\\n"
+	},
+	"7914": {
+		"Type": "TRice",
+		"Strg": "  3. Set SP: set $sp = 0x%08X\\n"
+	},
+	"7944": {
+		"Type": "TRICE",
+		"Strg": "ERR: Flash erase failed at sector %u\\n"
+	},
+	"7954": {
+		"Type": "TRICE0",
+		"Strg": "\\n--- MemManage Fault ---\\n"
+	}
+}

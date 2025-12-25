@@ -10,18 +10,387 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - FreeRTOS-based architecture with lwIP TCP/IP stack
 - Trice tracing over TCP/IP
 
-## Build System
+## Development Status
 
-This project is currently in **Phase 0** (initial setup). It was generated using STM32CubeIDE and will be migrated to CMake.
+### 📅 Latest Updates (Dec 27, 2024)
 
-**Current build approach:**
-- STM32CubeIDE project (use Eclipse-based toolchain)
-- Linker scripts: `STM32F407VETX_FLASH.ld` (application), `STM32F407VETX_RAM.ld` (debug)
+**Milestone 2 Phase 2 Completed:** External Flash Driver Verified
+- ✅ Fixed GPIO Pin 6 configuration issue (ANALOG → OUTPUT)
+- ✅ Removed dead code from http_server.c and boot_main.c
+- ✅ Enhanced flash test with detailed step-by-step debugging
+- ✅ **Root cause analysis:** Chip is W25Q64 (8MB), not W25Q128 (16MB)
+- ✅ Updated driver to support both W25Q64 (0x17) and W25Q128 (0x18)
+- ✅ All flash tests passing: Init, JEDEC ID, Write/Read, Erase
+- ✅ HTTP test interface working at http://10.42.0.203/
+- ✅ Verified compatibility with STM32CubeMX auto-generation
 
-**Future build approach (planned):**
-- CMake-based build system with ARM GCC toolchain
-- Separate build configurations for bootloader and application
-- CppUTest framework for unit testing
+**Build Status:**
+- Bootloader: 13.9 KB / 32 KB (43.4% used)
+- Application: 125.0 KB / 480 KB (26.0% used)
+- Both verified and running on hardware
+
+**Next Step:** Implement Phase 3 - BL-APP Contract (API + Headers)
+
+### ✅ Milestone 1: Ethernet + HTTP Server (COMPLETED - Dec 26, 2024)
+
+**Achievements:**
+- ✅ STM32F407VET6 board configured and running
+- ✅ FreeRTOS integrated and operational
+- ✅ lwIP TCP/IP stack integrated with RMII Ethernet
+- ✅ DHCP client functional (obtains IP: 10.42.0.203)
+- ✅ ARP, ICMP (ping) responding correctly
+- ✅ HTTP server serving web pages on port 80
+- ✅ CMake build system configured and working
+- ✅ J-Link flash automation operational
+
+**Key Fixes Applied:**
+- Increased FreeRTOS heap from 15KB → 40KB (configTOTAL_HEAP_SIZE)
+- Increased EthIf thread stack from 350 → 1024 words
+- Fixed TCP error handling (added tcp_err callback)
+- Resolved buffer overflow in HTTP response handling
+- Fixed network initialization timing issues
+
+**Current Configuration:**
+- Build: CMake + ARM GCC toolchain
+- Flash: 121KB / 512KB (23.6%)
+- RAM: 89KB / 128KB (68.0%)
+- Network: DHCP on 10.42.0.x subnet
+- HTTP: Simple HTML page at http://10.42.0.203
+
+### 🔄 Milestone 2: Bootloader-Application Separation (IN PROGRESS)
+
+**Current Status (Dec 27, 2024):**
+- ✅ Phase 1: Complete - Dual build system working
+- ✅ Phase 2: Complete - Flash driver verified on actual hardware
+- ⏳ Phase 3: Next - Implement BL-APP contract
+- ⏸️ Phase 4: Pending - Update mechanism
+
+**Phase 1: Dual Build System & Boot Jump** ✅ COMPLETED
+- ✅ Split build into bootloader + application CMake targets
+- ✅ Bootloader linker script (0x08000000, 32KB max)
+- ✅ Application linker script (0x08008000, 480KB max)
+- ✅ Bootloader jumps to application at 0x08008000
+- ✅ Application relocates VTOR and runs FreeRTOS/lwIP
+- ✅ Simple "Hello from Bootloader" → "Hello from Application" flow
+
+**Phase 2: Common External Flash Driver** ✅ COMPLETED (Dec 27, 2024)
+- ✅ W25Qxx SPI driver in `Core/Src/` (shared code)
+- ✅ Supports both W25Q64 (8MB) and W25Q128 (16MB)
+- ✅ **Actual chip detected: W25Q64 (8MB)** - JEDEC ID: 0xEF/0x40/0x17
+- ✅ Basic read/write/erase operations verified
+- ✅ Compiled into both bootloader AND application
+- ✅ HTTP-based flash test with step-by-step debugging
+- ✅ Full test suite: Init, JEDEC ID, Write/Read cycle, Sector erase
+- ✅ Test results: http://10.42.0.203/ - All 4 tests PASSING
+
+**Phase 3: BL-APP Contract (API + Headers)** (NEXT)
+- ⏸️ Bootloader API table structure at 0x08007F00
+- ⏸️ Application info header at 0x08008200
+- ✅ Shared header: `Core/Inc/bl_app_contract.h` (created, needs implementation)
+- ⏸️ CRC32 calculation functions
+- ⏸️ Application can call bootloader API to verify images
+
+**Phase 4: Update Mechanism** (FUTURE)
+- ⏸️ Update status structure in external flash (0x00000000)
+- ⏸️ Bootloader reads update flag on boot
+- ⏸️ Firmware verification and installation
+- ⏸️ Golden image fallback support
+
+### 📋 Milestone 3: OTA Firmware Updates (FUTURE)
+
+**Goals:**
+- HTTP firmware upload endpoint
+- Firmware metadata extraction
+- Download to external flash
+- Verification via bootloader API
+- Scheduled installation support
+- Golden image fallback mechanism
+
+### 📋 Milestone 4: Modbus RTU Bridge (FUTURE)
+
+**Goals:**
+- RS485 driver implementation
+- Modbus RTU protocol stack
+- Solis inverter register mapping
+- MQTT client integration
+- Data publishing to Home Assistant
+
+## Build and Flash Instructions
+
+**Build system: CMake + ARM GCC** ✅
+**Flash tool: J-Link (with clone popup workaround)** ✅
+
+### Prerequisites
+
+- ARM GCC toolchain installed
+- CMake 3.10+
+- J-Link software installed (JLinkExe)
+- STM32F407VET6 board connected via J-Link
+
+### Complete Workflow
+
+**All commands run from project root: `/home/laurynas/Projects/PeriphNet`**
+
+**Quick Reference:**
+```bash
+# First time setup
+cmake -B build -S .
+
+# Daily workflow
+cmake --build build -j8                           # Build
+./flash_nokill.sh flash_application.jlink        # Flash
+
+# Or one-liner
+cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
+```
+
+#### 1. Configure (First Time Only)
+
+```bash
+# From project root
+cmake -B build -S .
+```
+
+**Options:**
+- `-B build` - Build directory
+- `-S .` - Source directory (current directory)
+
+#### 2. Build Firmware
+
+**Build both bootloader and application:**
+```bash
+# From project root
+cmake --build build -j8
+```
+
+**Build specific targets:**
+```bash
+# Build bootloader only
+cmake --build build --target bootloader.elf -j8
+
+# Build application only
+cmake --build build --target application.elf -j8
+
+# Clean build
+cmake --build build --target clean
+```
+
+**Build output files** (in `build/` directory):
+- `bootloader.bin` - Bootloader binary (32KB max)
+- `bootloader.elf` - Bootloader with debug symbols
+- `application.bin` - Application binary (480KB max)
+- `application.elf` - Application with debug symbols
+
+#### 3. Flash to Board
+
+**⚠️ IMPORTANT: Clone J-Link Popup Issue**
+
+This project uses a clone J-Link which shows a popup warning that blocks flashing. Use the provided wrapper script to avoid manual intervention.
+
+**Flash both bootloader and application (recommended):**
+```bash
+# From project root
+./flash_nokill.sh flash_both.jlink
+```
+
+**Flash application only (during development):**
+```bash
+# From project root
+./flash_nokill.sh flash_application.jlink
+```
+
+**Flash bootloader only (rare):**
+```bash
+# From project root
+./flash_nokill.sh flash_bootloader.jlink
+```
+
+**Timing:**
+- Full flash (both): ~11 seconds
+- Application only: ~10 seconds
+- Bootloader only: ~10 seconds
+
+**What the script does:**
+1. Runs JLinkExe with specified .jlink script
+2. Monitors output for "Verify successful"
+3. Kills process after completion (avoids popup hang)
+4. Returns success/failure status
+
+**Alternative (not recommended):**
+```bash
+# Direct JLinkExe usage - will hang on popup, requires manual click
+JLinkExe -CommandFile flash_both.jlink
+```
+
+### J-Link Script Files
+
+The project includes three J-Link command scripts:
+
+**`flash_both.jlink`** - Flash both bootloader and application
+```
+si SWD                                      # Select SWD interface
+speed 4000                                  # 4MHz speed
+device STM32F407VE                          # Target MCU
+r                                           # Reset
+h                                           # Halt
+erase                                       # Full chip erase
+loadfile build/bootloader.bin 0x08000000    # Flash bootloader at 0x08000000
+loadfile build/application.bin 0x08008000   # Flash application at 0x08008000
+verifybin build/bootloader.bin 0x08000000   # Verify bootloader
+verifybin build/application.bin 0x08008000  # Verify application
+r                                           # Reset
+go                                          # Run
+exit
+```
+
+**`flash_application.jlink`** - Flash application only
+```
+erase 0x08008000 0x0807FFFF                 # Erase application sectors only
+loadfile build/application.bin 0x08008000
+verifybin build/application.bin 0x08008000
+```
+
+**`flash_bootloader.jlink`** - Flash bootloader only
+```
+erase                                       # Full chip erase
+loadfile build/bootloader.bin 0x08000000
+verifybin build/bootloader.bin 0x08000000
+```
+
+### Typical Development Cycle
+
+**All commands from project root:**
+
+```bash
+# 1. Make code changes
+vim Core/Src/http_server.c
+
+# 2. Build
+cmake --build build -j8
+
+# 3. Flash application only (faster during development)
+./flash_nokill.sh flash_application.jlink
+
+# 4. Test
+ping 10.42.0.203
+curl http://10.42.0.203/
+```
+
+**One-liner for quick iterations:**
+```bash
+cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
+```
+
+### Build Output Details
+
+**Bootloader:**
+- Size limit: 32 KB (sectors 0-1)
+- Current size: ~14 KB
+- Location: 0x08000000
+- No network stack (minimal code)
+
+**Application:**
+- Size limit: 480 KB (sectors 2-7)
+- Current size: ~125 KB
+- Location: 0x08008000
+- Full network stack (FreeRTOS + lwIP)
+
+**Memory usage check (from project root):**
+```bash
+arm-none-eabi-size build/bootloader.elf
+arm-none-eabi-size build/application.elf
+```
+
+### Troubleshooting
+
+**Build fails:**
+- Check ARM GCC toolchain: `arm-none-eabi-gcc --version`
+- Clean and rebuild: `cmake --build build --target clean && cmake -B build -S . && cmake --build build -j8`
+
+**Flash fails:**
+- Check J-Link connection: `JLinkExe` (should connect)
+- Verify USB cable connected
+- Check board power
+- Try manual reset button on board
+
+**Device doesn't boot after flash:**
+- Reflash both: `./flash_nokill.sh flash_both.jlink`
+- Check bootloader LED sequence (3 blinks = bootloader running)
+- Verify network: `ping 10.42.0.203`
+
+**Clone J-Link popup appears:**
+- Use `flash_nokill.sh` instead of direct JLinkExe
+- See `FLASH_CLONE_JLINK.md` for details
+
+### Documentation
+
+- `FLASH_CLONE_JLINK.md` - J-Link clone popup solution details
+- `CLAUDE.md` - This file (project overview and instructions)
+- `README.md` - Project README (if exists)
+
+## Trice Debug Logging
+
+**Trice** is the real-time trace system used for debugging over TCP/IP (no UART needed).
+
+### Build Integration (Automatic)
+
+The CMake build system automatically manages Trice IDs:
+1. **Before build:** Inserts IDs into TRICE macros in source code
+2. **After build:** Removes IDs, returning source to clean state
+3. **ID database:** Maintained in `til.json` and `li.json`
+
+**No manual intervention needed** - just build normally:
+```bash
+cmake --build build -j8
+```
+
+### Viewing Trace Output
+
+To view real-time logs from the device, run from project root:
+
+```bash
+./tools/trice log \
+    -p TCP4 \
+    -args "10.42.0.203:61486" \
+    -i ./til.json \
+    -li ./li.json \
+    -color default \
+    -showID "ID:%5d " \
+    -ts "ms" \
+    -prefix "time: "
+```
+
+**Parameters:**
+- `-p TCP4` - Protocol: TCP over IPv4
+- `-args "10.42.0.203:61486"` - Device IP and trace server port
+- `-i ./til.json` - Trice ID list (maps IDs to format strings)
+- `-li ./li.json` - Location information (file:line mappings)
+- `-color default` - Color output for readability
+- `-showID "ID:%5d "` - Display Trice ID before each message
+- `-ts "ms"` - Show timestamps in milliseconds
+- `-prefix "time: "` - Timestamp prefix
+
+**Usage:**
+```bash
+# Check device is reachable
+ping 10.42.0.203
+
+# Start trace viewer (press Ctrl+C to exit)
+./tools/trice log -p TCP4 -args "10.42.0.203:61486" -i ./til.json -li ./li.json
+```
+
+**Expected output:**
+```
+time: 1234 ID:  123 HTTP_INIT: Starting HTTP server on port 80
+time: 1235 ID:  124 HTTP_INIT: Bind OK, starting listen
+time: 1236 ID:  125 HTTP_INIT: HTTP server ready
+time: 1240 ID:  126 HTTP_ACCEPT: New connection, pcb=0x20001234, err=0
+```
+
+**Troubleshooting:**
+- **Connection refused:** Device not running or network issue - check `ping 10.42.0.203`
+- **No output:** No TRICE calls executed yet - trigger some action (e.g., access HTTP server)
+- **Garbled output:** Wrong til.json/li.json - rebuild application to regenerate IDs
 
 ## Memory Architecture
 
@@ -156,72 +525,115 @@ Memory Layout:
 
 ## Project Structure
 
-**Current structure (STM32CubeMX autogenerated):**
+### Directory Organization Principles
+
+**⚠️ CRITICAL: Files are grouped by MODULE/FUNCTIONALITY, NOT by file type**
+
+- **DO NOT** separate `.c` and `.h` files into `src/` and `inc/` directories
+- **DO** keep related `.c`, `.h`, and `.ld` files together in the same directory
+- **DO** use subdirectories to organize functional modules
+- Linker scripts (`.ld`) belong with the code they link, not in separate `linker/` directories
+
+**Example - WRONG (file type separation):**
 ```
-PeriphNet/
-├── Core/                       # Common code (HAL, drivers, utilities)
-│   ├── Inc/                    # Shared headers
-│   ├── Src/                    # Shared source files
-│   └── Startup/                # Startup assembly
-├── Drivers/                    # STM32 HAL and CMSIS
-│   ├── STM32F4xx_HAL_Driver/
-│   └── CMSIS/
-├── PeriphNet.ioc               # STM32CubeMX project file
-├── STM32F407VETX_FLASH.ld      # Current linker script
-└── STM32F407VETX_RAM.ld
+application/
+  inc/           ❌ Don't separate headers
+    trace.h
+  src/           ❌ Don't separate source
+    trace.c
+  linker/        ❌ Don't separate linker scripts
+    application.ld
 ```
 
-**Target structure (to be implemented with CMake):**
+**Example - CORRECT (functional grouping):**
+```
+application/
+  trace.c        ✅ Related files together
+  trace.h
+  app_info.c
+  app_info.h
+  application.ld ✅ Linker script with code
+```
+
+**Example - CORRECT (modular structure for complex features):**
+```
+application/
+  trace/         ✅ Module directory
+    trace.c
+    trace.h
+    trace_tcp.c
+  firmware_update/ ✅ Another module
+    fwu_manager.c
+    fwu_manager.h
+    fwu_http.c
+  application.ld
+```
+
+### Current Structure
+
 ```
 PeriphNet/
 ├── Core/                       # Common code shared between BL and APP
-│   ├── Inc/
+│   ├── Inc/                    # Shared headers (STM32 HAL style)
 │   │   ├── bl_app_contract.h   # BL-APP interface contract
-│   │   └── ...                 # Other shared headers
-│   ├── Src/
-│   │   ├── drivers/            # Shared drivers (SPI, flash, CRC, etc.)
+│   │   ├── w25q128.h           # External flash driver
 │   │   └── ...
-│   └── Startup/
-├── Drivers/                    # STM32 HAL (shared by BL and APP)
+│   ├── Src/                    # Shared source files
+│   │   ├── w25q128.c           # External flash driver
+│   │   ├── update_manager.c    # Update status management
+│   │   └── ...
+│   └── Startup/                # Startup assembly
+│       └── startup_stm32f407vetx.s
+│
+├── Drivers/                    # STM32 HAL and CMSIS (vendor code)
 │   ├── STM32F4xx_HAL_Driver/
 │   └── CMSIS/
-├── bootloader/                 # Bootloader-specific code
-│   ├── src/
-│   │   ├── boot_main.c
-│   │   ├── boot_api.c          # Implements BL API at 0x08007F00
-│   │   └── crypto.c            # Encryption/decryption (BL only)
-│   ├── inc/
-│   │   └── boot_config.h
-│   ├── linker/
-│   │   └── bootloader.ld       # 32KB at 0x08000000
-│   └── tests/
-├── application/                # Application-specific code
-│   ├── src/
-│   │   ├── app_main.c
-│   │   ├── app_info.c          # Defines app_info_t instance
-│   │   ├── hal/                # App-specific HAL
-│   │   ├── middleware/         # FreeRTOS, lwIP, MQTT, Modbus
-│   │   ├── app/                # Application logic
-│   │   │   ├── modbus_mqtt_bridge/
-│   │   │   ├── firmware_update/
-│   │   │   └── ...
-│   │   └── utils/
-│   ├── inc/
-│   ├── linker/
-│   │   └── application.ld      # 480KB at 0x08008000
-│   └── config/
-├── tests/                      # Unit and integration tests
-│   ├── unit/                   # CppUTest
-│   ├── integration/
-│   └── mocks/
-├── third_party/                # External dependencies
-│   ├── FreeRTOS/
-│   ├── lwIP/
-│   ├── trice/
-│   ├── CppUTest/
-│   └── MQTT_client/
-└── tools/                      # Build scripts, utilities
-    └── finalize_binary.py      # Post-build: calculate CRCs
+│
+├── bootloader/                 # Bootloader (all files together)
+│   ├── boot_main.c
+│   ├── boot_api.c              # Implements BL API at 0x08007F00
+│   ├── boot_stm32f4xx_it.c
+│   └── bootloader.ld           # 32KB at 0x08000000
+│
+├── application/                # Application (all files together)
+│   ├── app_info.c              # Application metadata
+│   ├── trace.c                 # Trace TCP server
+│   ├── trace.h
+│   ├── triceConfig.h           # Trice configuration
+│   └── application.ld          # 480KB at 0x08008000
+│
+├── LWIP/                       # lwIP TCP/IP stack (STM32 integration)
+├── Middlewares/                # Middleware components
+│   └── Third_Party/            # Third-party middleware (IMPORTANT: submodules go here)
+│       ├── FreeRTOS/           # FreeRTOS RTOS
+│       ├── LwIP/               # lwIP TCP/IP stack
+│       └── trice/              # Trice tracing library (git submodule)
+│
+├── flash_nokill.sh             # J-Link clone flash wrapper
+├── flash_both.jlink            # Flash bootloader + application
+├── flash_bootloader.jlink      # Flash bootloader only
+├── flash_application.jlink     # Flash application only
+├── CMakeLists.txt              # Build system
+└── CLAUDE.md                   # This file
+```
+
+**Future modular structure (when features grow):**
+```
+application/
+  trace/                        # Trace module
+    trace.c
+    trace.h
+    trace_tcp.c
+  firmware_update/              # OTA update module
+    fwu_manager.c
+    fwu_manager.h
+    fwu_http.c
+  modbus_bridge/                # Modbus-MQTT bridge module
+    modbus_rtu.c
+    modbus_rtu.h
+    mqtt_client.c
+  app_info.c                    # Root-level files
+  application.ld
 ```
 
 ## Hardware Configuration
@@ -290,7 +702,33 @@ PeriphNet/
 - **Test-Driven Development (TDD)** with CppUTest
 - **Modular architecture**: Each HAL driver, middleware component independently testable
 - **Trice tracing**: Use Trice over TCP/IP for runtime diagnostics (not RTT/UART)
-- All third-party code goes in `third_party/` directory
+
+### Third-Party Module Integration
+
+**⚠️ IMPORTANT: All third-party libraries and submodules MUST go in `Middlewares/Third_Party/`**
+
+This follows the STM32CubeMX convention and keeps the project structure consistent:
+- ✅ `Middlewares/Third_Party/FreeRTOS/` - RTOS
+- ✅ `Middlewares/Third_Party/LwIP/` - TCP/IP stack
+- ✅ `Middlewares/Third_Party/trice/` - Trace library
+- ❌ `third_party/` - DO NOT use this directory
+
+**When adding a new third-party module:**
+1. Add as git submodule: `git submodule add <repo_url> Middlewares/Third_Party/<module_name>`
+2. Create `Middlewares/Third_Party/<module_name>/CMakeLists.txt` defining the library
+3. Use `add_subdirectory(Middlewares/Third_Party/<module_name>)` in root CMakeLists.txt
+4. Link against the library using `target_link_libraries()`
+
+**Trice Submodule Branch:**
+The trice library is on the `uartDma` branch to support UART DMA output functions:
+```bash
+cd Middlewares/Third_Party/trice
+git status  # Should show: HEAD detached at bdc043ab
+# Branch: origin/uartDma
+# Provides: TriceNonBlockingWriteUartA(), TriceOutDepthUartA()
+```
+
+This branch adds weak implementations for UART DMA-based trice output, which we override in `Core/Src/usart.c` with STM32 HAL DMA functions.
 
 ### Important Notes
 
@@ -590,6 +1028,206 @@ typedef struct {
 - **Toolchain:** ARM GCC
 - **Testing:** CppUTest (manual execution)
 - **Build:** CMake (planned migration from STM32CubeIDE)
+
+## Trice Debug Tracing
+
+**Trice** is a fast, binary trace system for embedded systems. This project uses Trice over UART with DMA for high-speed debug output.
+
+### How to Use Trice in Code
+
+**✅ CORRECT Usage:**
+
+```c
+#include "trice.h"
+
+void my_function(void) {
+    uint32_t value = 42;
+    const char *status = "ready";
+
+    TRice("Simple message\n");                          // String only
+    TRice("Value: %d\n", value);                        // One parameter
+    TRice("Status: %s, Value: %d\n", status, value);    // Multiple parameters
+}
+```
+
+**❌ INCORRECT Usage:**
+
+```c
+// ❌ DO NOT use ID() wrapper - trice tool inserts IDs automatically
+TRICE(ID(0), "message\n");
+
+// ❌ DO NOT use all-caps TRICE - only lowercase/capitalized versions
+TRICE("message\n");
+TRICE0("message\n");
+
+// ❌ DO NOT manually specify IDs
+TRice(ID(12345), "message\n");
+```
+
+### Valid Trice Macros
+
+- `TRice("format", ...)` - Standard trace (most common)
+- `trice("format", ...)` - Alternative lowercase version
+- `Trice("format", ...)` - Alternative capitalized version
+
+**Note:** The `trice insert` command automatically adds unique IDs to source code before compilation. You write simple `TRice(...)` statements, and the tool modifies them to include IDs like `TRice(iD(12345), ...)` during the build process.
+
+### Critical Limitation: lwIP Callback Context
+
+**⚠️ TRICE CANNOT BE USED IN lwIP CALLBACKS!**
+
+Trice uses FreeRTOS critical sections (`taskENTER_CRITICAL`/`taskEXIT_CRITICAL`) which conflict with lwIP's `tcpip_thread` context and **WILL CAUSE CRASHES**.
+
+**Where you CANNOT use Trice:**
+- HTTP server callbacks (`http_recv_callback`, `http_accept_callback`, etc.)
+- TCP/UDP callbacks (`tcp_recv`, `tcp_sent`, `udp_recv`, etc.)
+- Any function called from lwIP's `tcpip_thread`
+
+**Where you CAN use Trice:**
+- FreeRTOS tasks (application tasks, custom threads)
+- Interrupt Service Routines (ISRs)
+- Main loop code outside lwIP context
+- Hardfault handlers and exception handlers
+
+**Example - Safe vs Unsafe:**
+
+```c
+// ✅ SAFE - FreeRTOS task context
+void my_task(void *argument) {
+    while (1) {
+        TRice("Task running, counter=%d\n", counter++);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// ❌ UNSAFE - lwIP callback context (WILL CRASH!)
+static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
+    TRice("HTTP request received\n");  // ❌ DO NOT DO THIS!
+    // ... rest of handler
+}
+
+// ✅ SAFE - Hardfault handler (exception context)
+void HardFault_Handler_C(exception_stack_frame_t *frame, uint32_t lr) {
+    TRice("HardFault: PC=0x%08X\n", frame->pc);  // ✅ OK in exception handler
+    while (1);
+}
+```
+
+### Viewing Trice Output
+
+**Connect to device UART trice stream:**
+
+```bash
+# First, identify the USB-to-serial device
+ls /dev/ttyUSB* /dev/ttyACM*
+
+# From project root - connect to USART3 @ 921600 baud
+./tools/trice log \
+    -p COM \
+    -args "/dev/ttyUSB0:921600" \
+    -i ./til.json \
+    -li ./li.json \
+    -color default \
+    -ts "ms" \
+    -prefix "time: "
+```
+
+**Parameters:**
+- `-p COM` - Use serial COM port connection
+- `-args "PORT:BAUD"` - Serial device and baud rate (USART3 @ 921600)
+- `-i ./til.json` - Trice ID list (auto-generated)
+- `-li ./li.json` - Location information (auto-generated)
+- `-color default` - Enable colorized output
+- `-ts "ms"` - Show millisecond timestamps
+- `-prefix "time: "` - Timestamp prefix
+
+**Hardware connection:**
+- USART3 TX (PD8) connects to USB-to-serial RX
+- Baud rate: 921600 (high speed for minimal trace overhead)
+- DMA transmission for non-blocking output
+
+**Save to file:**
+```bash
+./tools/trice log -p COM -args "/dev/ttyUSB0:921600" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
+```
+
+### Build Integration
+
+Trice IDs are automatically managed by CMake:
+
+1. **Pre-build:** `trice insert` adds IDs to source files
+2. **Compilation:** Source files compiled with embedded IDs
+3. **Post-build:** `trice clean` removes IDs from source (keeps code clean in git)
+
+**CMake targets:**
+- `trice-insert` - Insert IDs before build (runs automatically)
+- Application build - Compiles with IDs embedded
+- Post-build clean - Removes IDs after successful build
+
+**Manual control (if needed):**
+```bash
+# Insert IDs manually
+./tools/trice insert -src application -src Core/Src -i til.json -li li.json
+
+# Clean IDs manually
+./tools/trice clean -src application -src Core/Src -i til.json -li li.json
+```
+
+### Configuration
+
+Trice configuration is in `application/triceConfig.h`:
+
+- **Buffer mode:** Double buffer (1072 bytes total)
+- **Output:** UART DMA (USART3 @ 921600 baud)
+- **Hardware:** STM32 USART3 with DMA1_Stream3
+- **Functions:** `TriceNonBlockingWriteUartA()` / `TriceOutDepthUartA()` in `Core/Src/usart.c`
+- **Framing:** TCOBS (efficient zero-delimiter framing)
+- **Timestamp:** FreeRTOS tick count (32-bit)
+- **Critical sections:** FreeRTOS `taskENTER_CRITICAL`/`taskEXIT_CRITICAL`
+
+**Implementation (based on Lusety project):**
+- `TriceNonBlockingWriteUartA()` - Starts DMA transfer via `HAL_UART_Transmit_DMA()`
+- `TriceOutDepthUartA()` - Returns bytes remaining in DMA transfer (`__HAL_DMA_GET_COUNTER(huart3.hdmatx)`)
+- Non-blocking transmission: Trice never waits for UART, uses DMA for background output
+
+**Why double buffer + DMA?**
+- Fast trice execution (no blocking on UART send)
+- Background transmission via DMA (CPU-free output)
+- Buffer swap via `TriceTransfer()` called every 50ms from trace task
+- High-speed output (921600 baud) with minimal overhead
+
+### Common Patterns
+
+**Progress tracking:**
+```c
+void flash_erase(uint32_t sectors) {
+    for (uint32_t i = 0; i < sectors; i++) {
+        TRice("Erasing sector %d/%d...\n", i+1, sectors);
+        erase_sector(i);
+    }
+    TRice("Erase complete\n");
+}
+```
+
+**Error reporting:**
+```c
+if (result != HAL_OK) {
+    TRice("ERROR: SPI init failed, code=%d\n", result);
+}
+```
+
+**State machine debugging:**
+```c
+TRice("State: %s -> %s\n", state_names[old_state], state_names[new_state]);
+```
+
+**Performance measurement:**
+```c
+uint32_t start = xTaskGetTickCount();
+process_data();
+uint32_t elapsed = xTaskGetTickCount() - start;
+TRice("Processing took %d ms\n", elapsed);
+```
 
 ## Linker Script Notes
 

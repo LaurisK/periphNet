@@ -1,0 +1,3 @@
+[submodule "Middlewares/Third_Party/trice"]
+	path = Middlewares/Third_Party/trice
+	url = https://github.com/LaurisK/trice
