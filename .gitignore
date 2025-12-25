@@ -1,6 +1,210 @@
+# ============================================================================
+# PeriphNet - STM32F407 Firmware Project .gitignore
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Build Outputs
+# ----------------------------------------------------------------------------
+# CMake build directory
+/build/
+/build-*/
+
+# Binary outputs (hex, bin, elf)
+*.bin
+*.hex
+*.elf
+*.out
+*.map
+*.list
+
+# Object files and libraries
+*.o
+*.a
+*.lo
+*.la
+*.obj
+*.lib
+
+# Linker outputs
+*.lss
+*.sym
+
+# ----------------------------------------------------------------------------
+# STM32CubeIDE / Eclipse IDE
+# ----------------------------------------------------------------------------
+# Eclipse project files (generated, keep .ioc only)
 .cproject
 .mxproject
 .project
-.settings/
-/build
 
+# Eclipse settings (user-specific)
+.settings/
+
+# STM32CubeIDE Debug folder (contains build and debug outputs)
+Debug/
+Release/
+
+# ----------------------------------------------------------------------------
+# STM32CubeMX Generated Code
+# ----------------------------------------------------------------------------
+# Keep .ioc file (project definition) but ignore generated metadata
+*.mxproject
+
+# ----------------------------------------------------------------------------
+# Debugging and Profiling
+# ----------------------------------------------------------------------------
+# GDB debug files
+*.su
+*.cyclo
+
+# Core dumps
+core
+core.*
+
+# Valgrind, profiling
+*.out
+callgrind.out.*
+vgcore.*
+
+# OpenOCD, ST-Link
+openocd.log
+
+# ----------------------------------------------------------------------------
+# Compiler and Toolchain Artifacts
+# ----------------------------------------------------------------------------
+# ARM GCC specific
+*.d
+*.s
+
+# Preprocessed files
+*.i
+*.ii
+
+# Cache and temporary files
+*.cache
+.cache/
+
+# ----------------------------------------------------------------------------
+# CMake Artifacts
+# ----------------------------------------------------------------------------
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# ----------------------------------------------------------------------------
+# IDE Specific
+# ----------------------------------------------------------------------------
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.sw?
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ----------------------------------------------------------------------------
+# Operating System Files
+# ----------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ----------------------------------------------------------------------------
+# Documentation Build Outputs
+# ----------------------------------------------------------------------------
+# Doxygen
+/docs/html/
+/docs/latex/
+/docs/doxygen_warnings.txt
+
+# Sphinx
+/docs/_build/
+
+# ----------------------------------------------------------------------------
+# Testing and Coverage
+# ----------------------------------------------------------------------------
+# CppUTest
+/tests/build/
+*.gcov
+*.gcda
+*.gcno
+coverage.info
+coverage/
+
+# ----------------------------------------------------------------------------
+# Logs and Temporary Files
+# ----------------------------------------------------------------------------
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.orig
+
+# Python cache (if using Python scripts)
+__pycache__/
+*.pyc
+*.pyo
+
+# ----------------------------------------------------------------------------
+# Credentials and Secrets
+# ----------------------------------------------------------------------------
+# Never commit sensitive data
+*.key
+*.pem
+*.p12
+secrets.h
+credentials.json
+.env
+.env.*
+
+# ----------------------------------------------------------------------------
+# Third-Party Libraries
+# ----------------------------------------------------------------------------
+# Keep third_party/ structure in git, but ignore build outputs within
+third_party/*/build/
+third_party/*/.git/
+
+# ----------------------------------------------------------------------------
+# Project Specific
+# ----------------------------------------------------------------------------
+# Backup files from editors
+*_backup.*
+
+# Generated version files (auto-generated at build time)
+version_generated.h
+build_info.h
