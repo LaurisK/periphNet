@@ -124,6 +124,19 @@ static int http_generate_html(char *buf, size_t buflen)
 }
 
 /**
+ * @brief  TCP error callback - handle connection errors
+ * @param  arg: User argument (not used)
+ * @param  err: Error code
+ * @retval None
+ */
+static void http_err_callback(void *arg, err_t err)
+{
+    /* Connection aborted - PCB already freed by lwIP, nothing to do */
+    (void)arg;
+    (void)err;
+}
+
+/**
  * @brief  TCP receive callback - handle HTTP request
  * @param  arg: User argument (not used)
  * @param  pcb: TCP protocol control block
@@ -134,7 +147,7 @@ static int http_generate_html(char *buf, size_t buflen)
 static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
     char *request;
-    static char response_buf[1024];  /* Reduced buffer size to prevent stack issues */
+    static char response_buf[2048];  /* Increased to hold full HTML response */
     int html_len;
     err_t ret_err;
 
@@ -155,35 +168,55 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
 
     /* Simple parsing - check if it's a GET request for root */
     if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
-        /* Generate HTML response */
-        strncpy(response_buf, http_200_header, sizeof(response_buf) - 1);
-        response_buf[sizeof(response_buf) - 1] = '\0';
-        html_len = strlen(response_buf);
-        if (html_len < sizeof(response_buf) - 1) {
-            html_len += http_generate_html(response_buf + html_len, sizeof(response_buf) - html_len);
+        /* Temporary: Small HTML to test */
+        const char *simple_html =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "\r\n"
+            "<html><body><h1>Hello from STM32!</h1>"
+            "<p>IP: 10.42.0.203</p>"
+            "</body></html>";
+        html_len = strlen(simple_html);
+        if (html_len < sizeof(response_buf)) {
+            memcpy(response_buf, simple_html, html_len);
+        } else {
+            html_len = 0;  /* Error - too big */
         }
 
         /* Send response */
         ret_err = tcp_write(pcb, response_buf, html_len, TCP_WRITE_FLAG_COPY);
         if (ret_err == ERR_OK) {
             tcp_output(pcb);
+            /* For simple HTTP, close after sending - lwIP will queue properly */
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            return ERR_OK;
+        } else {
+            /* Write failed, clean up and close */
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            return ERR_ABRT;
         }
     } else {
         /* 404 Not Found */
-        tcp_write(pcb, http_404_header, strlen(http_404_header), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
+        ret_err = tcp_write(pcb, http_404_header, strlen(http_404_header), TCP_WRITE_FLAG_COPY);
+        if (ret_err == ERR_OK) {
+            tcp_output(pcb);
+            /* For simple HTTP, close after sending */
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            return ERR_OK;
+        } else {
+            /* Write failed, clean up and abort */
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            return ERR_ABRT;
+        }
     }
-
-    /* Acknowledge received data */
-    tcp_recved(pcb, p->tot_len);
-
-    /* Free packet buffer */
-    pbuf_free(p);
-
-    /* Close connection after sending response */
-    tcp_close(pcb);
-
-    return ERR_OK;
 }
 
 /**
@@ -199,8 +232,9 @@ static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
         return ERR_VAL;
     }
 
-    /* Set receive callback */
+    /* Set callbacks */
     tcp_recv(newpcb, http_recv_callback);
+    tcp_err(newpcb, http_err_callback);
 
     return ERR_OK;
 }
