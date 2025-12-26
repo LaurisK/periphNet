@@ -78,6 +78,7 @@ set(COMMON_DRIVER_SOURCES
 # Minimal system files for bootloader
 set(BOOTLOADER_SOURCES
     bootloader/src/boot_main.c
+    bootloader/src/boot_api.c
     bootloader/src/boot_stm32f4xx_it.c
     Core/Src/system_stm32f4xx.c
     Core/Src/stm32f4xx_hal_msp.c
@@ -96,6 +97,7 @@ set(BOOTLOADER_SOURCES
 file(GLOB_RECURSE APP_SOURCES
     "Core/Src/*.c"
     "Core/ThreadSafe/*.c"
+    "application/src/*.c"
 )
 
 # BSP Component sources (Ethernet PHY driver)

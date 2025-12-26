@@ -12,6 +12,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Status
 
+### 📅 Latest Updates (Dec 27, 2024)
+
+**Milestone 2 Phase 2 Completed:** External Flash Driver Verified
+- ✅ Fixed GPIO Pin 6 configuration issue (ANALOG → OUTPUT)
+- ✅ Removed dead code from http_server.c and boot_main.c
+- ✅ Enhanced flash test with detailed step-by-step debugging
+- ✅ **Root cause analysis:** Chip is W25Q64 (8MB), not W25Q128 (16MB)
+- ✅ Updated driver to support both W25Q64 (0x17) and W25Q128 (0x18)
+- ✅ All flash tests passing: Init, JEDEC ID, Write/Read, Erase
+- ✅ HTTP test interface working at http://10.42.0.203/
+- ✅ Verified compatibility with STM32CubeMX auto-generation
+
+**Build Status:**
+- Bootloader: 13.9 KB / 32 KB (43.4% used)
+- Application: 125.0 KB / 480 KB (26.0% used)
+- Both verified and running on hardware
+
+**Next Step:** Implement Phase 3 - BL-APP Contract (API + Headers)
+
 ### ✅ Milestone 1: Ethernet + HTTP Server (COMPLETED - Dec 26, 2024)
 
 **Achievements:**
@@ -38,9 +57,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Network: DHCP on 10.42.0.x subnet
 - HTTP: Simple HTML page at http://10.42.0.203
 
-### 🔄 Milestone 2: Bootloader-Application Separation (NEXT)
+### 🔄 Milestone 2: Bootloader-Application Separation (IN PROGRESS)
 
-**Phase 1: Dual Build System & Boot Jump** (IMMEDIATE)
+**Current Status (Dec 27, 2024):**
+- ✅ Phase 1: Complete - Dual build system working
+- ✅ Phase 2: Complete - Flash driver verified on actual hardware
+- ⏳ Phase 3: Next - Implement BL-APP contract
+- ⏸️ Phase 4: Pending - Update mechanism
+
+**Phase 1: Dual Build System & Boot Jump** ✅ COMPLETED
 - ✅ Split build into bootloader + application CMake targets
 - ✅ Bootloader linker script (0x08000000, 32KB max)
 - ✅ Application linker script (0x08008000, 480KB max)
@@ -48,25 +73,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ✅ Application relocates VTOR and runs FreeRTOS/lwIP
 - ✅ Simple "Hello from Bootloader" → "Hello from Application" flow
 
-**Phase 2: Common External Flash Driver**
-- ✅ W25Q128 SPI driver in `Core/Src/drivers/` (shared code)
-- ✅ Basic read/write/erase operations
+**Phase 2: Common External Flash Driver** ✅ COMPLETED (Dec 27, 2024)
+- ✅ W25Qxx SPI driver in `Core/Src/` (shared code)
+- ✅ Supports both W25Q64 (8MB) and W25Q128 (16MB)
+- ✅ **Actual chip detected: W25Q64 (8MB)** - JEDEC ID: 0xEF/0x40/0x17
+- ✅ Basic read/write/erase operations verified
 - ✅ Compiled into both bootloader AND application
-- ✅ Test: Bootloader writes test pattern, application reads it
-- ✅ Verify both can access external flash independently
+- ✅ HTTP-based flash test with step-by-step debugging
+- ✅ Full test suite: Init, JEDEC ID, Write/Read cycle, Sector erase
+- ✅ Test results: http://10.42.0.203/ - All 4 tests PASSING
 
-**Phase 3: BL-APP Contract (API + Headers)**
-- ✅ Bootloader API table structure at 0x08007F00
-- ✅ Application info header at 0x08008200
-- ✅ Shared header: `Core/Inc/bl_app_contract.h`
-- ✅ CRC32 calculation functions
-- ✅ Application can call bootloader API to verify images
+**Phase 3: BL-APP Contract (API + Headers)** (NEXT)
+- ⏸️ Bootloader API table structure at 0x08007F00
+- ⏸️ Application info header at 0x08008200
+- ✅ Shared header: `Core/Inc/bl_app_contract.h` (created, needs implementation)
+- ⏸️ CRC32 calculation functions
+- ⏸️ Application can call bootloader API to verify images
 
-**Phase 4: Update Mechanism**
-- ✅ Update status structure in external flash (0x00000000)
-- ✅ Bootloader reads update flag on boot
-- ✅ Firmware verification and installation
-- ✅ Golden image fallback support
+**Phase 4: Update Mechanism** (FUTURE)
+- ⏸️ Update status structure in external flash (0x00000000)
+- ⏸️ Bootloader reads update flag on boot
+- ⏸️ Firmware verification and installation
+- ⏸️ Golden image fallback support
 
 ### 📋 Milestone 3: OTA Firmware Updates (FUTURE)
 

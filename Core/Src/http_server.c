@@ -18,6 +18,7 @@
 #include "stdio.h"
 #include "main.h"
 #include "w25q128.h"
+#include "bl_app_contract.h"
 
 /* External network interface (defined in lwip.c) */
 extern struct netif gnetif;
@@ -29,6 +30,9 @@ static char jedec_info[128] = "Not read";
 static char uid_info[128] = "Not read";
 static char erase_info[128] = "Not tested";
 static char init_info[64] = "Not tested";
+
+/* Bootloader API test result */
+static char bl_api_test[128] = "Not tested";
 
 /* HTTP response headers */
 static const char http_200_header[] =
@@ -189,16 +193,19 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "\r\n"
-            "<html><body><h1>PeriphNet - Phase 2 - Flash Test</h1>"
+            "<html><body><h1>PeriphNet - Phase 3 - BL-APP Contract</h1>"
             "<p>Status: <b>%s</b></p>"
             "<p>Result: %s</p>"
-            "<hr><p>1. Init: %s</p>"
+            "<hr><h3>Flash Tests:</h3>"
+            "<p>1. Init: %s</p>"
             "<p>2. JEDEC: %s</p>"
             "<p>3. UID: %s</p>"
             "<p>4. Erase: %s</p>"
+            "<hr><h3>Bootloader API Test:</h3>"
+            "<p>5. BL API: %s</p>"
             "</body></html>",
             status_text, flash_test_result,
-            init_info, jedec_info, uid_info, erase_info);
+            init_info, jedec_info, uid_info, erase_info, bl_api_test);
 
         /* Safety check */
         if (html_len >= (int)sizeof(response_buf)) {
@@ -481,6 +488,32 @@ void http_server_test_flash(void)
     }
 
     strcpy(erase_info, "OK - Sector erased (verified 0xFF)");
+
+    /* Step 5: Test bootloader API */
+    const sBootloaderApi *bl_api = (const sBootloaderApi*)BL_API_TABLE_ADDR;
+
+    if (bl_api->magic != BL_API_MAGIC) {
+        snprintf(bl_api_test, sizeof(bl_api_test),
+                "FAIL - Wrong magic 0x%08lX (expected 0x%08lX)",
+                bl_api->magic, BL_API_MAGIC);
+        strcpy(flash_test_result, "STEP 5 FAILED - BL API magic invalid");
+        return;
+    }
+
+    /* Test get_bootloader_version */
+    uint32_t bl_major = 0, bl_minor = 0, bl_patch = 0;
+    bl_api->get_bootloader_version(&bl_major, &bl_minor, &bl_patch);
+
+    /* Test calculate_crc32 (stub returns 0xDEADBEEF) */
+    uint32_t test_crc = bl_api->calculate_crc32(0x08000000, 1024, false);
+
+    /* Test verify_internal_app (stub returns BL_OK) */
+    int verify_result = bl_api->verify_internal_app();
+
+    snprintf(bl_api_test, sizeof(bl_api_test),
+            "OK - BL v%lu.%lu.%lu, CRC=0x%08lX, Verify=%d",
+            bl_major, bl_minor, bl_patch, test_crc, verify_result);
+
     strcpy(flash_test_result, "ALL TESTS PASSED");
     flash_test_ok = true;
 }
