@@ -1,5 +1,6 @@
 # ==============================================================================
 # PeriphNet - STM32F407VET6 Firmware CMake Build
+# Dual Build: Bootloader + Application
 # ==============================================================================
 
 cmake_minimum_required(VERSION 3.22)
@@ -24,29 +25,68 @@ set(CMAKE_C_EXTENSIONS ON)
 # MCU Configuration
 set(MCU_FAMILY STM32F4)
 set(MCU_MODEL STM32F407xx)
-set(MCU_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/STM32F407VETX_FLASH.ld)
 
 # CPU and FPU settings
 set(CPU_FLAGS "-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard")
 
 # ==============================================================================
-# Source Files
+# Common Source Files (shared by bootloader and application)
 # ==============================================================================
-
-# Application source files
-file(GLOB_RECURSE APP_SOURCES
-    "Core/Src/*.c"
-    "Core/ThreadSafe/*.c"
-)
 
 # Startup file
 set(STARTUP_FILE
     Core/Startup/startup_stm32f407vetx.s
 )
 
-# HAL Driver sources
-file(GLOB HAL_SOURCES
-    "Drivers/STM32F4xx_HAL_Driver/Src/*.c"
+# HAL Driver sources (minimal for bootloader)
+set(BOOTLOADER_HAL_SOURCES
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c"
+)
+
+# HAL Driver sources (full set for application)
+set(APP_HAL_SOURCES
+    ${BOOTLOADER_HAL_SOURCES}
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_eth.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c"
+)
+
+# Minimal system files for bootloader
+set(BOOTLOADER_SOURCES
+    bootloader/src/boot_main.c
+    bootloader/src/boot_stm32f4xx_it.c
+    Core/Src/system_stm32f4xx.c
+    Core/Src/stm32f4xx_hal_msp.c
+    ${BOOTLOADER_HAL_SOURCES}
+    ${STARTUP_FILE}
+)
+
+# ==============================================================================
+# Application Sources
+# ==============================================================================
+
+# Application source files
+file(GLOB_RECURSE APP_SOURCES
+    "Core/Src/*.c"
+    "Core/ThreadSafe/*.c"
 )
 
 # BSP Component sources (Ethernet PHY driver)
@@ -75,23 +115,25 @@ list(FILTER FREERTOS_SOURCES EXCLUDE REGEX ".*example.*")
 # Include Directories
 # ==============================================================================
 
-set(INCLUDE_DIRS
-    # Core includes
+# Common includes for bootloader
+set(BOOTLOADER_INCLUDES
     Core/Inc
-    Core/ThreadSafe
-
-    # CMSIS
     Drivers/CMSIS/Device/ST/STM32F4xx/Include
     Drivers/CMSIS/Include
-
-    # HAL
     Drivers/STM32F4xx_HAL_Driver/Inc
     Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+    bootloader/inc
+)
 
-    # BSP Components (Ethernet PHY)
+# Full includes for application
+set(APP_INCLUDES
+    Core/Inc
+    Core/ThreadSafe
+    Drivers/CMSIS/Device/ST/STM32F4xx/Include
+    Drivers/CMSIS/Include
+    Drivers/STM32F4xx_HAL_Driver/Inc
+    Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
     Drivers/BSP/Components/dp83848
-
-    # LWIP
     LWIP/App
     LWIP/Target
     Middlewares/Third_Party/LwIP/src/include
@@ -108,8 +150,6 @@ set(INCLUDE_DIRS
     Middlewares/Third_Party/LwIP/src/include/compat/posix/sys
     Middlewares/Third_Party/LwIP/src/include/compat/stdc
     Middlewares/Third_Party/LwIP/system/arch
-
-    # FreeRTOS
     Middlewares/Third_Party/FreeRTOS/Source/include
     Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
     Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
@@ -120,11 +160,8 @@ set(INCLUDE_DIRS
 # ==============================================================================
 
 add_compile_definitions(
-    # MCU definitions
     ${MCU_MODEL}
     USE_HAL_DRIVER
-
-    # Debug build
     $<$<CONFIG:Debug>:DEBUG>
     $<$<CONFIG:Debug>:USE_FULL_ASSERT>
 )
@@ -135,22 +172,60 @@ add_compile_definitions(
 
 set(COMMON_FLAGS "${CPU_FLAGS} -Wall -fdata-sections -ffunction-sections")
 
-# C Flags
 set(CMAKE_C_FLAGS "${COMMON_FLAGS}")
 set(CMAKE_C_FLAGS_DEBUG "-g3 -O0")
 set(CMAKE_C_FLAGS_RELEASE "-O3")
 
-# ASM Flags
 set(CMAKE_ASM_FLAGS "${CPU_FLAGS} -x assembler-with-cpp")
 
 # ==============================================================================
-# Linker Flags
+# TARGET 1: BOOTLOADER (32KB at 0x08000000)
 # ==============================================================================
 
-set(LINKER_FLAGS
+set(BOOTLOADER_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/linker/bootloader.ld)
+
+set(BOOTLOADER_LINKER_FLAGS
     "${CPU_FLAGS} \
-    -T${MCU_LINKER_SCRIPT} \
-    -Wl,-Map=${PROJECT_NAME}.map,--cref \
+    -T${BOOTLOADER_LINKER_SCRIPT} \
+    -Wl,-Map=bootloader.map,--cref \
+    -Wl,--gc-sections \
+    -Wl,--print-memory-usage \
+    --specs=nano.specs \
+    -lc \
+    -lm"
+)
+
+add_executable(bootloader.elf
+    ${BOOTLOADER_SOURCES}
+)
+
+target_include_directories(bootloader.elf PRIVATE
+    ${BOOTLOADER_INCLUDES}
+)
+
+set_target_properties(bootloader.elf PROPERTIES
+    LINK_FLAGS "${BOOTLOADER_LINKER_FLAGS}"
+)
+
+# Bootloader post-build
+add_custom_command(TARGET bootloader.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:bootloader.elf> bootloader.hex
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:bootloader.elf> bootloader.bin
+    COMMAND ${CMAKE_OBJDUMP} -h -S $<TARGET_FILE:bootloader.elf> > bootloader.list
+    COMMAND ${CMAKE_SIZE} --format=berkeley $<TARGET_FILE:bootloader.elf>
+    COMMENT "Bootloader size:"
+)
+
+# ==============================================================================
+# TARGET 2: APPLICATION (480KB at 0x08008000)
+# ==============================================================================
+
+set(APPLICATION_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/application/linker/application.ld)
+
+set(APPLICATION_LINKER_FLAGS
+    "${CPU_FLAGS} \
+    -T${APPLICATION_LINKER_SCRIPT} \
+    -Wl,-Map=application.map,--cref \
     -Wl,--gc-sections \
     -Wl,--print-memory-usage \
     -Wl,--allow-multiple-definition \
@@ -159,101 +234,103 @@ set(LINKER_FLAGS
     -lm"
 )
 
-set(CMAKE_EXE_LINKER_FLAGS "${LINKER_FLAGS}")
-
-# ==============================================================================
-# Executable Target
-# ==============================================================================
-
-add_executable(${PROJECT_NAME}.elf
+add_executable(application.elf
     ${APP_SOURCES}
     ${STARTUP_FILE}
-    ${HAL_SOURCES}
+    ${APP_HAL_SOURCES}
     ${BSP_SOURCES}
     ${LWIP_SOURCES}
     ${FREERTOS_SOURCES}
 )
 
-target_include_directories(${PROJECT_NAME}.elf PRIVATE
-    ${INCLUDE_DIRS}
+target_include_directories(application.elf PRIVATE
+    ${APP_INCLUDES}
 )
 
-# ==============================================================================
-# Post-build: Generate Binary and Hex Files
-# ==============================================================================
-
-# Generate .hex file
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${PROJECT_NAME}.elf> ${PROJECT_NAME}.hex
-    COMMENT "Generating HEX file: ${PROJECT_NAME}.hex"
+# Define APPLICATION_BUILD for VTOR relocation
+target_compile_definitions(application.elf PRIVATE
+    APPLICATION_BUILD
 )
 
-# Generate .bin file
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${PROJECT_NAME}.elf> ${PROJECT_NAME}.bin
-    COMMENT "Generating BIN file: ${PROJECT_NAME}.bin"
+set_target_properties(application.elf PROPERTIES
+    LINK_FLAGS "${APPLICATION_LINKER_FLAGS}"
 )
 
-# Generate extended listing
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-    COMMAND ${CMAKE_OBJDUMP} -h -S $<TARGET_FILE:${PROJECT_NAME}.elf> > ${PROJECT_NAME}.list
-    COMMENT "Generating listing file: ${PROJECT_NAME}.list"
-)
-
-# Print size information
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-    COMMAND ${CMAKE_SIZE} --format=berkeley $<TARGET_FILE:${PROJECT_NAME}.elf>
-    COMMENT "Firmware size:"
+# Application post-build
+add_custom_command(TARGET application.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:application.elf> application.hex
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:application.elf> application.bin
+    COMMAND ${CMAKE_OBJDUMP} -h -S $<TARGET_FILE:application.elf> > application.list
+    COMMAND ${CMAKE_SIZE} --format=berkeley $<TARGET_FILE:application.elf>
+    COMMENT "Application size:"
 )
 
 # ==============================================================================
 # Flash Targets
 # ==============================================================================
 
-# Find JLinkExe (check common locations)
+# Find JLinkExe
 find_program(JLINK_EXE
     NAMES JLinkExe
     PATHS
         /opt/SEGGER/JLink
         /opt/st/stm32cubeide_*/plugins/com.st.stm32cube.ide.mcu.externaltools.jlink.linux64_*/tools/bin
         $ENV{HOME}/SEGGER/JLink
-    DOC "J-Link Commander executable"
 )
 
-# Flash target using J-Link
 if(JLINK_EXE)
-    add_custom_target(flash
+    # Flash bootloader only
+    add_custom_target(flash-bootloader
         COMMAND ${JLINK_EXE} -device STM32F407VE -if SWD -speed 4000
-                -CommanderScript ${CMAKE_SOURCE_DIR}/flash_jlink.jlink
-        DEPENDS ${PROJECT_NAME}.elf
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Flashing ${PROJECT_NAME}.bin via J-Link"
+                -CommanderScript ${CMAKE_SOURCE_DIR}/flash_bootloader.jlink
+        DEPENDS bootloader.elf
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Flashing bootloader.bin to 0x08000000 via J-Link"
     )
+
+    # Flash application only
+    add_custom_target(flash-application
+        COMMAND ${JLINK_EXE} -device STM32F407VE -if SWD -speed 4000
+                -CommanderScript ${CMAKE_SOURCE_DIR}/flash_application.jlink
+        DEPENDS application.elf
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Flashing application.bin to 0x08008000 via J-Link"
+    )
+
+    # Flash both bootloader AND application
+    add_custom_target(flash-both
+        COMMAND ${JLINK_EXE} -device STM32F407VE -if SWD -speed 4000
+                -CommanderScript ${CMAKE_SOURCE_DIR}/flash_both.jlink
+        DEPENDS bootloader.elf application.elf
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Flashing bootloader + application via J-Link"
+    )
+
+    # Default flash target (flash both)
+    add_custom_target(flash
+        DEPENDS flash-both
+    )
+
     message(STATUS "J-Link found: ${JLINK_EXE}")
 else()
-    message(WARNING "J-Link not found. 'make flash' target will not be available.")
-    message(WARNING "Install SEGGER J-Link tools or use manual flashing.")
-endif()
-
-# Alternative: Flash using ST-Link (if available)
-find_program(STLINK_EXE NAMES st-flash)
-if(STLINK_EXE)
-    add_custom_target(flash-stlink
-        COMMAND ${STLINK_EXE} --reset write ${PROJECT_NAME}.bin 0x08000000
-        DEPENDS ${PROJECT_NAME}.elf
-        COMMENT "Flashing ${PROJECT_NAME}.bin via ST-Link"
-    )
+    message(WARNING "J-Link not found. Flash targets will not be available.")
 endif()
 
 # ==============================================================================
-# Print build information
+# Build Information
 # ==============================================================================
 
 message(STATUS "")
-message(STATUS "=== PeriphNet Build Configuration ===")
+message(STATUS "=== PeriphNet Dual-Build Configuration ===")
 message(STATUS "MCU Family:      ${MCU_FAMILY}")
 message(STATUS "MCU Model:       ${MCU_MODEL}")
 message(STATUS "Build Type:      ${CMAKE_BUILD_TYPE}")
-message(STATUS "Linker Script:   ${MCU_LINKER_SCRIPT}")
-message(STATUS "C Compiler:      ${CMAKE_C_COMPILER}")
+message(STATUS "")
+message(STATUS "Bootloader:")
+message(STATUS "  - Linker Script: ${BOOTLOADER_LINKER_SCRIPT}")
+message(STATUS "  - Flash Addr:    0x08000000 (32KB max)")
+message(STATUS "")
+message(STATUS "Application:")
+message(STATUS "  - Linker Script: ${APPLICATION_LINKER_SCRIPT}")
+message(STATUS "  - Flash Addr:    0x08008000 (480KB max)")
 message(STATUS "")

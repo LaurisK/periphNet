@@ -10,18 +10,112 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - FreeRTOS-based architecture with lwIP TCP/IP stack
 - Trice tracing over TCP/IP
 
+## Development Status
+
+### ✅ Milestone 1: Ethernet + HTTP Server (COMPLETED - Dec 26, 2024)
+
+**Achievements:**
+- ✅ STM32F407VET6 board configured and running
+- ✅ FreeRTOS integrated and operational
+- ✅ lwIP TCP/IP stack integrated with RMII Ethernet
+- ✅ DHCP client functional (obtains IP: 10.42.0.203)
+- ✅ ARP, ICMP (ping) responding correctly
+- ✅ HTTP server serving web pages on port 80
+- ✅ CMake build system configured and working
+- ✅ J-Link flash automation operational
+
+**Key Fixes Applied:**
+- Increased FreeRTOS heap from 15KB → 40KB (configTOTAL_HEAP_SIZE)
+- Increased EthIf thread stack from 350 → 1024 words
+- Fixed TCP error handling (added tcp_err callback)
+- Resolved buffer overflow in HTTP response handling
+- Fixed network initialization timing issues
+
+**Current Configuration:**
+- Build: CMake + ARM GCC toolchain
+- Flash: 121KB / 512KB (23.6%)
+- RAM: 89KB / 128KB (68.0%)
+- Network: DHCP on 10.42.0.x subnet
+- HTTP: Simple HTML page at http://10.42.0.203
+
+### 🔄 Milestone 2: Bootloader-Application Separation (NEXT)
+
+**Phase 1: Dual Build System & Boot Jump** (IMMEDIATE)
+- ✅ Split build into bootloader + application CMake targets
+- ✅ Bootloader linker script (0x08000000, 32KB max)
+- ✅ Application linker script (0x08008000, 480KB max)
+- ✅ Bootloader jumps to application at 0x08008000
+- ✅ Application relocates VTOR and runs FreeRTOS/lwIP
+- ✅ Simple "Hello from Bootloader" → "Hello from Application" flow
+
+**Phase 2: Common External Flash Driver**
+- ✅ W25Q128 SPI driver in `Core/Src/drivers/` (shared code)
+- ✅ Basic read/write/erase operations
+- ✅ Compiled into both bootloader AND application
+- ✅ Test: Bootloader writes test pattern, application reads it
+- ✅ Verify both can access external flash independently
+
+**Phase 3: BL-APP Contract (API + Headers)**
+- ✅ Bootloader API table structure at 0x08007F00
+- ✅ Application info header at 0x08008200
+- ✅ Shared header: `Core/Inc/bl_app_contract.h`
+- ✅ CRC32 calculation functions
+- ✅ Application can call bootloader API to verify images
+
+**Phase 4: Update Mechanism**
+- ✅ Update status structure in external flash (0x00000000)
+- ✅ Bootloader reads update flag on boot
+- ✅ Firmware verification and installation
+- ✅ Golden image fallback support
+
+### 📋 Milestone 3: OTA Firmware Updates (FUTURE)
+
+**Goals:**
+- HTTP firmware upload endpoint
+- Firmware metadata extraction
+- Download to external flash
+- Verification via bootloader API
+- Scheduled installation support
+- Golden image fallback mechanism
+
+### 📋 Milestone 4: Modbus RTU Bridge (FUTURE)
+
+**Goals:**
+- RS485 driver implementation
+- Modbus RTU protocol stack
+- Solis inverter register mapping
+- MQTT client integration
+- Data publishing to Home Assistant
+
 ## Build System
 
-This project is currently in **Phase 0** (initial setup). It was generated using STM32CubeIDE and will be migrated to CMake.
+**Current build system: CMake + ARM GCC** ✅
 
-**Current build approach:**
-- STM32CubeIDE project (use Eclipse-based toolchain)
-- Linker scripts: `STM32F407VETX_FLASH.ld` (application), `STM32F407VETX_RAM.ld` (debug)
+The project uses CMake for building and J-Link for flashing.
 
-**Future build approach (planned):**
-- CMake-based build system with ARM GCC toolchain
-- Separate build configurations for bootloader and application
+**Build commands:**
+```bash
+cd build
+cmake ..
+make -j8                    # Build firmware
+make flash                  # Flash to board via J-Link
+```
+
+**Build output:**
+- `PeriphNet.elf` - ELF executable with debug symbols
+- `PeriphNet.bin` - Raw binary for flashing
+- `PeriphNet.hex` - Intel HEX format
+- `PeriphNet.list` - Disassembly listing
+
+**Linker scripts:**
+- Application: `STM32F407VETX_FLASH.ld` (0x08000000, 512KB)
+- Future bootloader: Custom script (0x08000000, 32KB)
+- Future application: Custom script (0x08008000, 480KB)
+
+**Planned additions:**
+- Separate bootloader build target
 - CppUTest framework for unit testing
+- Automated size checks (ensure bootloader < 32KB)
 
 ## Memory Architecture
 
