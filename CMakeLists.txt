@@ -50,6 +50,7 @@ set(BOOTLOADER_HAL_SOURCES
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c"
 )
 
 # HAL Driver sources (full set for application)
@@ -69,13 +70,21 @@ set(APP_HAL_SOURCES
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c"
 )
 
+# Common driver sources (shared by bootloader and application)
+set(COMMON_DRIVER_SOURCES
+    "Core/Src/w25q128.c"
+)
+
 # Minimal system files for bootloader
 set(BOOTLOADER_SOURCES
     bootloader/src/boot_main.c
     bootloader/src/boot_stm32f4xx_it.c
     Core/Src/system_stm32f4xx.c
     Core/Src/stm32f4xx_hal_msp.c
+    Core/Src/spi.c
+    Core/Src/gpio.c
     ${BOOTLOADER_HAL_SOURCES}
+    ${COMMON_DRIVER_SOURCES}
     ${STARTUP_FILE}
 )
 

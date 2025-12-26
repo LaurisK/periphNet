@@ -17,9 +17,18 @@
 #include "string.h"
 #include "stdio.h"
 #include "main.h"
+#include "w25q128.h"
 
 /* External network interface (defined in lwip.c) */
 extern struct netif gnetif;
+
+/* Flash test result (set by application init) */
+static char flash_test_result[256] = "Not tested";
+static bool flash_test_ok = false;
+static char jedec_info[128] = "Not read";
+static char uid_info[128] = "Not read";
+static char erase_info[128] = "Not tested";
+static char init_info[64] = "Not tested";
 
 /* HTTP response headers */
 static const char http_200_header[] =
@@ -101,10 +110,14 @@ static int http_generate_html(char *buf, size_t buflen)
         "                <span class=\"label\">Uptime:</span> \n"
         "                <span class=\"value\">%luh %lum %lus</span>\n"
         "            </div>\n"
-        "            <div class=\"info-item\">\n"
-        "                <span class=\"label\">Firmware:</span> \n"
-        "                <span class=\"value\">v1.0.0 (Milestone 1)</span>\n"
-        "            </div>\n"
+"            <div class=\"info-item\">\n"
+         "                <span class=\"label\">Firmware:</span> \n"
+         "                <span class=\"value\">v1.0.0 (Milestone 2)</span>\n"
+         "            </div>\n"
+         "            <div class=\"info-item\">\n"
+         "                <span class=\"label\">External Flash:</span> \n"
+         "                <span class=\"value\">%s</span>\n"
+         "            </div>\n"
         "            <div class=\"info-item\">\n"
         "                <span class=\"label\">Stack:</span> \n"
         "                <span class=\"value\">FreeRTOS + lwIP</span>\n"
@@ -117,8 +130,8 @@ static int http_generate_html(char *buf, size_t buflen)
         "        </div>\n"
         "    </div>\n"
         "</body>\n"
-        "</html>",
-        ip_str, mac_str, uptime_hr, uptime_min % 60, uptime_sec % 60);
+"</html>",
+         ip_str, mac_str, uptime_hr, uptime_min % 60, uptime_sec % 60, flash_test_result);
 
     return len;
 }
@@ -168,19 +181,28 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
 
     /* Simple parsing - check if it's a GET request for root */
     if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
-        /* Temporary: Small HTML to test */
-        const char *simple_html =
+        /* Build HTML with flash test result */
+        const char *status_class = flash_test_ok ? "pass" : "fail";
+        const char *status_text = flash_test_ok ? "PASS" : "FAIL";
+
+        html_len = snprintf(response_buf, sizeof(response_buf),
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "\r\n"
-            "<html><body><h1>Hello from STM32!</h1>"
-            "<p>IP: 10.42.0.203</p>"
-            "</body></html>";
-        html_len = strlen(simple_html);
-        if (html_len < sizeof(response_buf)) {
-            memcpy(response_buf, simple_html, html_len);
-        } else {
-            html_len = 0;  /* Error - too big */
+            "<html><body><h1>PeriphNet - Phase 2 - Flash Test</h1>"
+            "<p>Status: <b>%s</b></p>"
+            "<p>Result: %s</p>"
+            "<hr><p>1. Init: %s</p>"
+            "<p>2. JEDEC: %s</p>"
+            "<p>3. UID: %s</p>"
+            "<p>4. Erase: %s</p>"
+            "</body></html>",
+            status_text, flash_test_result,
+            init_info, jedec_info, uid_info, erase_info);
+
+        /* Safety check */
+        if (html_len >= (int)sizeof(response_buf)) {
+            html_len = sizeof(response_buf) - 1;
         }
 
         /* Send response */
@@ -268,4 +290,197 @@ void http_server_init(void)
             memp_free(MEMP_TCP_PCB, pcb);
         }
     }
+}
+
+/**
+ * @brief  Test external flash - read pattern written by bootloader
+ * @retval None
+ */
+void http_server_test_flash(void)
+{
+    W25Q128_ID_t flash_id;
+    uint8_t uid_from_flash[12];
+    uint8_t uid_current[12];
+    HAL_StatusTypeDef spi_status;
+    W25Q128_Status_t w25_status;
+
+    /* Reset status strings */
+    strcpy(init_info, "Testing...");
+    strcpy(jedec_info, "Not tested");
+    strcpy(uid_info, "Not tested");
+    strcpy(erase_info, "Not tested");
+    strcpy(flash_test_result, "In Progress");
+    flash_test_ok = false;
+
+    /* Step 1a: Check SPI peripheral state */
+    extern SPI_HandleTypeDef hspi2;
+    if (hspi2.State == HAL_SPI_STATE_RESET) {
+        snprintf(init_info, sizeof(init_info), "FAIL - SPI not initialized (state=%d)", hspi2.State);
+        strcpy(flash_test_result, "STEP 1a FAILED - SPI peripheral not initialized");
+        return;
+    }
+
+    /* Step 1b: Test CS pin control */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+    HAL_Delay(5);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    HAL_Delay(5);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    /* Step 1c: Try wake-up command */
+    uint8_t wakeup_cmd = 0xAB;
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    spi_status = HAL_SPI_Transmit(&hspi2, &wakeup_cmd, 1, 100);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    if (spi_status != HAL_OK) {
+        snprintf(init_info, sizeof(init_info), "FAIL - Wake-up SPI transmit error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1c FAILED - Wake-up command failed");
+        return;
+    }
+    HAL_Delay(10);
+
+    /* Step 1d: Try reading JEDEC ID manually */
+    uint8_t jedec_cmd = 0x9F;
+    uint8_t jedec_data[3] = {0};
+
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+    spi_status = HAL_SPI_Transmit(&hspi2, &jedec_cmd, 1, 100);
+    if (spi_status != HAL_OK) {
+        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+        snprintf(init_info, sizeof(init_info), "FAIL - JEDEC cmd transmit error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1d FAILED - JEDEC command transmit failed");
+        return;
+    }
+
+    spi_status = HAL_SPI_Receive(&hspi2, jedec_data, 3, 100);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);
+
+    if (spi_status != HAL_OK) {
+        snprintf(init_info, sizeof(init_info), "FAIL - JEDEC receive error (status=%d)", spi_status);
+        strcpy(flash_test_result, "STEP 1d FAILED - JEDEC data receive failed");
+        return;
+    }
+
+    /* Step 1e: Verify JEDEC data */
+    if (jedec_data[0] == 0xFF && jedec_data[1] == 0xFF && jedec_data[2] == 0xFF) {
+        snprintf(init_info, sizeof(init_info), "FAIL - All 0xFF (no SPI response)");
+        strcpy(flash_test_result, "STEP 1e FAILED - Flash not responding (all 0xFF)");
+        return;
+    }
+
+    if (jedec_data[0] == 0x00 && jedec_data[1] == 0x00 && jedec_data[2] == 0x00) {
+        snprintf(init_info, sizeof(init_info), "FAIL - All 0x00 (SPI bus issue)");
+        strcpy(flash_test_result, "STEP 1e FAILED - SPI bus stuck at 0x00");
+        return;
+    }
+
+    /* Got valid data - store it */
+    flash_id.manufacturer_id = jedec_data[0];
+    flash_id.memory_type = jedec_data[1];
+    flash_id.capacity = jedec_data[2];
+
+    snprintf(init_info, sizeof(init_info), "OK - SPI state=%d", hspi2.State);
+
+    /* Step 2: Verify JEDEC ID (accept both W25Q64 and W25Q128) */
+    if (flash_id.manufacturer_id != 0xEF || flash_id.memory_type != 0x40) {
+        snprintf(jedec_info, sizeof(jedec_info),
+                "WRONG - Manuf=0x%02X Type=0x%02X Cap=0x%02X (Expected: 0xEF/0x40/0x17or0x18)",
+                flash_id.manufacturer_id, flash_id.memory_type, flash_id.capacity);
+        strcpy(flash_test_result, "STEP 2 FAILED - Wrong flash chip detected");
+        return;
+    }
+
+    const char *chip_name = (flash_id.capacity == 0x18) ? "W25Q128 (16MB)" :
+                            (flash_id.capacity == 0x17) ? "W25Q64 (8MB)" : "Unknown";
+    snprintf(jedec_info, sizeof(jedec_info),
+            "OK - 0x%02X/0x%02X/0x%02X (Winbond %s)",
+            flash_id.manufacturer_id, flash_id.memory_type, flash_id.capacity, chip_name);
+
+    /* Step 3: Read current STM32 UID */
+    uid_current[0] = *(uint8_t*)(0x1FFF7A10);
+    uid_current[1] = *(uint8_t*)(0x1FFF7A10 + 1);
+    uid_current[2] = *(uint8_t*)(0x1FFF7A10 + 2);
+    uid_current[3] = *(uint8_t*)(0x1FFF7A10 + 3);
+    uid_current[4] = *(uint8_t*)(0x1FFF7A10 + 4);
+    uid_current[5] = *(uint8_t*)(0x1FFF7A10 + 5);
+    uid_current[6] = *(uint8_t*)(0x1FFF7A10 + 6);
+    uid_current[7] = *(uint8_t*)(0x1FFF7A10 + 7);
+    uid_current[8] = *(uint8_t*)(0x1FFF7A10 + 8);
+    uid_current[9] = *(uint8_t*)(0x1FFF7A10 + 9);
+    uid_current[10] = *(uint8_t*)(0x1FFF7A10 + 10);
+    uid_current[11] = *(uint8_t*)(0x1FFF7A10 + 11);
+
+    /* Step 4: Try writing and reading back UID to test flash write */
+    uint32_t test_addr = EXT_FLASH_FWU_STATUS_ADDR + 256;  /* Use offset 256 to avoid bootloader data */
+
+    /* Erase test sector */
+    if (W25Q128_EraseSector(test_addr) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot erase test sector");
+        strcpy(flash_test_result, "STEP 4a FAILED - Erase failed");
+        return;
+    }
+
+    /* Write UID to flash */
+    if (W25Q128_WritePage(test_addr, uid_current, 12) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot write UID to flash");
+        strcpy(flash_test_result, "STEP 4b FAILED - Write failed");
+        return;
+    }
+
+    /* Read back UID */
+    if (W25Q128_Read(test_addr, uid_from_flash, 12) != W25Q128_OK) {
+        strcpy(uid_info, "FAIL - Cannot read back UID");
+        strcpy(flash_test_result, "STEP 4c FAILED - Read after write failed");
+        return;
+    }
+
+    /* Verify write/read cycle worked */
+    if (memcmp(uid_current, uid_from_flash, 12) != 0) {
+        snprintf(uid_info, sizeof(uid_info),
+                "WRITE TEST FAIL - Wrote: %02X%02X... Read: %02X%02X...",
+                uid_current[0], uid_current[1],
+                uid_from_flash[0], uid_from_flash[1]);
+        strcpy(flash_test_result, "STEP 4d FAILED - Write/read verify failed");
+        return;
+    }
+
+    snprintf(uid_info, sizeof(uid_info),
+            "OK - Write/Read test passed: %02X%02X%02X%02X...",
+            uid_from_flash[0], uid_from_flash[1], uid_from_flash[2], uid_from_flash[3]);
+
+    /* Step 6: Test erase function */
+    if (W25Q128_EraseSector(EXT_FLASH_FWU_STATUS_ADDR + 4096) != W25Q128_OK) {
+        strcpy(erase_info, "FAILED - Cannot erase sector");
+        strcpy(flash_test_result, "STEP 6 FAILED - Cannot erase sector");
+        return;
+    }
+
+    /* Step 7: Verify sector is actually erased (all 0xFF) */
+    uint8_t erased_data[16];
+    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + 4096, erased_data, 16) != W25Q128_OK) {
+        strcpy(erase_info, "FAILED - Cannot verify erase");
+        strcpy(flash_test_result, "STEP 7 FAILED - Cannot read back erased data");
+        return;
+    }
+
+    uint8_t all_ff = 1;
+    for (int i = 0; i < 16; i++) {
+        if (erased_data[i] != 0xFF) {
+            all_ff = 0;
+            break;
+        }
+    }
+
+    if (!all_ff) {
+        snprintf(erase_info, sizeof(erase_info),
+                "FAILED - Erase verify: %02X %02X %02X %02X... (Expected: FF FF FF FF...)",
+                erased_data[0], erased_data[1], erased_data[2], erased_data[3]);
+        strcpy(flash_test_result, "STEP 7 FAILED - Erase verification failed");
+        return;
+    }
+
+    strcpy(erase_info, "OK - Sector erased (verified 0xFF)");
+    strcpy(flash_test_result, "ALL TESTS PASSED");
+    flash_test_ok = true;
 }

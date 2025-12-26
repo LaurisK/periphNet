@@ -26,6 +26,7 @@ extern "C" {
 
 /* Function prototypes */
 void http_server_init(void);
+void http_server_test_flash(void);
 
 #ifdef __cplusplus
 }

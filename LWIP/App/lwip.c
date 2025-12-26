@@ -94,6 +94,9 @@ void MX_LWIP_Init(void)
 /* USER CODE BEGIN 3 */
   /* Initialize HTTP server after network interface is up */
   http_server_init();
+
+  /* Phase 2: Test external flash - read pattern written by bootloader */
+  http_server_test_flash();
 /* USER CODE END 3 */
 }
 
