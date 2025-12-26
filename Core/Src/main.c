@@ -23,7 +23,6 @@
 #include "i2c.h"
 #include "lwip.h"
 #include "rtc.h"
-#include "sdio.h"
 #include "spi.h"
 #include "usart.h"
 #include "gpio.h"
@@ -99,7 +98,6 @@ int main(void)
   MX_CAN2_Init();
   MX_I2C1_Init();
   MX_RTC_Init();
-  MX_SDIO_SD_Init();
   MX_SPI2_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
