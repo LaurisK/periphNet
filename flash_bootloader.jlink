@@ -1,0 +1,11 @@
+si SWD
+speed 4000
+device STM32F407VE
+r
+h
+erase
+loadfile build/bootloader.bin 0x08000000
+verifybin build/bootloader.bin 0x08000000
+r
+go
+exit

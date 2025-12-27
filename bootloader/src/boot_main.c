@@ -259,72 +259,11 @@ int main(void)
         HAL_Delay(300);
     }
 
-    /* Phase 4: Check for pending firmware update */
-    sUpdateStatus update_status;
-    if (update_status_read(&update_status) == 0) {
-        /* Valid update status block found */
-        if (update_status.update_requested == 1) {
-            /* Update requested - blink LED 6 times to indicate update mode */
-            boot_blink_led(6);
+    /* Phase 4: Firmware update DISABLED - bootloader cannot write to MCU flash */
+    /* Bootloader can only: read external flash, write UID to external flash, jump to app */
+    /* Firmware installation must be done via J-Link for now */
 
-            /* Verify firmware image */
-            bool verify_ok = boot_verify_firmware(&update_status);
-
-            if (verify_ok) {
-                /* Firmware verified - 2 fast blinks */
-                for (uint8_t i = 0; i < 2; i++) {
-                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
-                    HAL_Delay(100);
-                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
-                    HAL_Delay(100);
-                }
-
-                /* Install firmware */
-                bool install_ok = boot_install_firmware(&update_status);
-
-                if (install_ok) {
-                    /* Installation succeeded - 3 slow blinks */
-                    boot_blink_led(3);
-
-                    /* Clear update request flag */
-                    update_status_clear();
-
-                    /* Jump to new application */
-                    boot_jump_to_application(APPLICATION_ADDRESS);
-                } else {
-                    /* Installation failed - 7 fast blinks */
-                    for (uint8_t i = 0; i < 7; i++) {
-                        HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
-                        HAL_Delay(50);
-                        HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
-                        HAL_Delay(50);
-                    }
-
-                    /* Clear failed update request */
-                    update_status_clear();
-
-                    /* Jump to current application (fallback) */
-                    boot_jump_to_application(APPLICATION_ADDRESS);
-                }
-            } else {
-                /* Verification failed - 8 fast blinks */
-                for (uint8_t i = 0; i < 8; i++) {
-                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
-                    HAL_Delay(50);
-                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
-                    HAL_Delay(50);
-                }
-
-                /* Clear failed update request */
-                update_status_clear();
-
-                /* Jump to current application (fallback) */
-                boot_jump_to_application(APPLICATION_ADDRESS);
-            }
-        }
-    }
-
-    /* No update requested - jump to application normally */
+    /* Skip update check entirely - just jump to application */
     boot_jump_to_application(APPLICATION_ADDRESS);
 
     /* Should never reach here */

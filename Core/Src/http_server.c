@@ -20,6 +20,7 @@
 #include "w25q128.h"
 #include "bl_app_contract.h"
 #include "update_manager.h"
+#include "FreeRTOS.h"  /* For pvPortMalloc/vPortFree */
 
 /* External network interface (defined in lwip.c) */
 extern struct netif gnetif;
@@ -165,7 +166,7 @@ static void http_err_callback(void *arg, err_t err)
 static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
     char *request;
-    static char response_buf[2048];  /* Increased to hold full HTML response */
+    char *response_buf;  /* Dynamically allocated response buffer */
     int html_len;
     err_t ret_err;
 
@@ -175,9 +176,20 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
         return ERR_OK;
     }
 
+    /* Allocate response buffer from FreeRTOS heap */
+    response_buf = (char *)pvPortMalloc(2048);
+    if (response_buf == NULL) {
+        /* Out of memory - close connection */
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return ERR_MEM;
+    }
+
     /* Get request data and check size */
     request = (char *)p->payload;
     if (p->len > 512) {  /* Reject oversized requests */
+        vPortFree(response_buf);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
         tcp_close(pcb);
@@ -190,7 +202,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
         const char *status_class = flash_test_ok ? "pass" : "fail";
         const char *status_text = flash_test_ok ? "PASS" : "FAIL";
 
-        html_len = snprintf(response_buf, sizeof(response_buf),
+        html_len = snprintf(response_buf, 2048,
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "\r\n"
@@ -211,8 +223,8 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             init_info, jedec_info, uid_info, erase_info, bl_api_test);
 
         /* Safety check */
-        if (html_len >= (int)sizeof(response_buf)) {
-            html_len = sizeof(response_buf) - 1;
+        if (html_len >= 2048) {
+            html_len = 2047;
         }
 
         /* Send response */
@@ -223,12 +235,14 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_close(pcb);
+            vPortFree(response_buf);  /* Free AFTER close */
             return ERR_OK;
         } else {
             /* Write failed, clean up and close */
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_abort(pcb);
+            vPortFree(response_buf);  /* Free AFTER abort */
             return ERR_ABRT;
         }
     } else if (strncmp(request, "GET /trigger_update", 19) == 0) {
@@ -252,7 +266,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
                         "<p><a href='/'>Back to Home</a></p>";
         }
 
-        html_len = snprintf(response_buf, sizeof(response_buf),
+        html_len = snprintf(response_buf, 2048,
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "\r\n"
@@ -272,11 +286,13 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_close(pcb);
+            vPortFree(response_buf);  /* Free AFTER close */
             return ERR_OK;
         } else {
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_abort(pcb);
+            vPortFree(response_buf);  /* Free AFTER abort */
             return ERR_ABRT;
         }
     } else {
@@ -288,12 +304,14 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_close(pcb);
+            vPortFree(response_buf);  /* Free AFTER close */
             return ERR_OK;
         } else {
             /* Write failed, clean up and abort */
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_abort(pcb);
+            vPortFree(response_buf);  /* Free AFTER abort */
             return ERR_ABRT;
         }
     }

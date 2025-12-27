@@ -1,0 +1,11 @@
+si SWD
+speed 4000
+device STM32F407VE
+r
+h
+erase 0x08008000 0x0807FFFF
+loadfile build/application.bin 0x08008000
+verifybin build/application.bin 0x08008000
+r
+go
+exit
