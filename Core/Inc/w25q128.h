@@ -66,13 +66,8 @@
 #define W25Q128_TIMEOUT_MS              1000
 #define W25Q128_ERASE_TIMEOUT_MS        5000
 
-/* External Flash Memory Map (from CLAUDE.md) */
-#define EXT_FLASH_FWU_STATUS_ADDR       0x00000000  /* 4KB - Firmware update status */
-#define EXT_FLASH_FWU_STATUS_SIZE       0x00001000
-#define EXT_FLASH_FWU_IMG_ADDR          0x00001000  /* 480KB - Downloaded firmware */
-#define EXT_FLASH_FWU_IMG_SIZE          0x00078000
-#define EXT_FLASH_GOLDEN_IMG_ADDR       0x00079000  /* 480KB - Factory/known-good */
-#define EXT_FLASH_GOLDEN_IMG_SIZE       0x00078000
+/* External Flash Memory Map - now defined in bl_app_contract.h */
+/* Removed duplicate definitions to avoid redefinition warnings */
 
 /* Return Codes */
 typedef enum {

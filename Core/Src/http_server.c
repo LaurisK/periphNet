@@ -19,6 +19,7 @@
 #include "main.h"
 #include "w25q128.h"
 #include "bl_app_contract.h"
+#include "update_manager.h"
 
 /* External network interface (defined in lwip.c) */
 extern struct netif gnetif;
@@ -193,7 +194,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "\r\n"
-            "<html><body><h1>PeriphNet - Phase 3 - BL-APP Contract</h1>"
+            "<html><body><h1>PeriphNet - Phase 4 - Update Mechanism</h1>"
             "<p>Status: <b>%s</b></p>"
             "<p>Result: %s</p>"
             "<hr><h3>Flash Tests:</h3>"
@@ -203,6 +204,8 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             "<p>4. Erase: %s</p>"
             "<hr><h3>Bootloader API Test:</h3>"
             "<p>5. BL API: %s</p>"
+            "<hr><h3>Phase 4 - Update Test:</h3>"
+            "<p><a href='/trigger_update'>Trigger Firmware Update (Test)</a></p>"
             "</body></html>",
             status_text, flash_test_result,
             init_info, jedec_info, uid_info, erase_info, bl_api_test);
@@ -223,6 +226,54 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             return ERR_OK;
         } else {
             /* Write failed, clean up and close */
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_abort(pcb);
+            return ERR_ABRT;
+        }
+    } else if (strncmp(request, "GET /trigger_update", 19) == 0) {
+        /* Phase 4: Trigger firmware update test endpoint */
+
+        /* Request a firmware update (with dummy data for now) */
+        uint32_t dummy_size = 245760;      /* 240KB dummy firmware */
+        uint32_t dummy_crc = 0x12345678;   /* Dummy CRC */
+        uint32_t dummy_version = 0x010001; /* v1.0.1 */
+
+        int update_result = update_status_request(dummy_size, dummy_crc, dummy_version);
+
+        const char *result_msg;
+        if (update_result == 0) {
+            result_msg = "<p style='color:green;'><b>SUCCESS:</b> Firmware update requested!</p>"
+                        "<p>Update status written to external flash.</p>"
+                        "<p><b>Next step:</b> Reboot device to trigger bootloader update process.</p>"
+                        "<p><a href='/'>Back to Home</a></p>";
+        } else {
+            result_msg = "<p style='color:red;'><b>FAILED:</b> Could not write update request to external flash.</p>"
+                        "<p><a href='/'>Back to Home</a></p>";
+        }
+
+        html_len = snprintf(response_buf, sizeof(response_buf),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "\r\n"
+            "<html><body>"
+            "<h1>PeriphNet - Trigger Firmware Update</h1>"
+            "%s"
+            "<hr>"
+            "<p><b>NOTE:</b> This is a Phase 4 stub - no actual firmware uploaded yet.</p>"
+            "<p>Bootloader will see update_requested=1 on next boot and run verification/installation stubs.</p>"
+            "</body></html>",
+            result_msg);
+
+        /* Send response */
+        ret_err = tcp_write(pcb, response_buf, html_len, TCP_WRITE_FLAG_COPY);
+        if (ret_err == ERR_OK) {
+            tcp_output(pcb);
+            tcp_recved(pcb, p->tot_len);
+            pbuf_free(p);
+            tcp_close(pcb);
+            return ERR_OK;
+        } else {
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
             tcp_abort(pcb);
@@ -318,6 +369,13 @@ void http_server_test_flash(void)
     strcpy(erase_info, "Not tested");
     strcpy(flash_test_result, "In Progress");
     flash_test_ok = false;
+
+    /* Step 0: Initialize W25Q128 flash driver */
+    if (W25Q128_Init() != W25Q128_OK) {
+        strcpy(init_info, "FAIL - W25Q128_Init() failed");
+        strcpy(flash_test_result, "STEP 0 FAILED - Flash initialization failed");
+        return;
+    }
 
     /* Step 1a: Check SPI peripheral state */
     extern SPI_HandleTypeDef hspi2;

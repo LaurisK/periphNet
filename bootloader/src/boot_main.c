@@ -21,6 +21,7 @@
 #include "spi.h"
 #include "gpio.h"
 #include "w25q128.h"
+#include "update_manager.h"
 #include <stdbool.h>
 
 /* Application start address */
@@ -116,9 +117,14 @@ static bool boot_test_external_flash(void)
         return false;
     }
 
-    /* Verify it's the correct chip */
-    if (flash_id.manufacturer_id != 0xEF || flash_id.capacity != 0x18) {
-        return false;  /* Wrong chip or communication error */
+    /* Verify it's a Winbond W25Qxx (accept W25Q64 or W25Q128) */
+    if (flash_id.manufacturer_id != 0xEF) {
+        return false;  /* Wrong manufacturer */
+    }
+
+    /* Accept both W25Q64 (0x17 = 8MB) and W25Q128 (0x18 = 16MB) */
+    if (flash_id.capacity != 0x17 && flash_id.capacity != 0x18) {
+        return false;  /* Wrong chip capacity */
     }
 
     /* Read STM32F407 Unique ID */
@@ -148,6 +154,62 @@ static bool boot_test_external_flash(void)
         return false;
     }
 
+    return true;
+}
+
+/**
+ * @brief  Verify firmware image in external flash (STUB - Phase 4)
+ * @param  status: Pointer to update status structure
+ * @retval true if valid, false if invalid
+ */
+static bool boot_verify_firmware(const sUpdateStatus *status)
+{
+    /* STUB: Phase 4 - No actual verification yet */
+    /* TODO Phase 5: Implement real CRC32 verification */
+    /*
+    1. Check magic number
+    2. Validate image_size is within bounds
+    3. Read firmware from external flash
+    4. Calculate CRC32 of firmware
+    5. Compare with status->image_crc32
+    6. Verify application header at offset 0x200
+    */
+
+    /* For now, just check basic fields */
+    if (status->magic != UPDATE_STATUS_MAGIC) {
+        return false;  /* Invalid magic */
+    }
+
+    if (status->image_size == 0 || status->image_size > (480 * 1024)) {
+        return false;  /* Invalid size */
+    }
+
+    /* STUB: Always return true for now */
+    return true;
+}
+
+/**
+ * @brief  Install firmware from external flash to internal flash (STUB - Phase 4)
+ * @param  status: Pointer to update status structure
+ * @retval true if success, false if failure
+ */
+static bool boot_install_firmware(const sUpdateStatus *status)
+{
+    /* STUB: Phase 4 - No actual installation yet */
+    /* TODO Phase 5: Implement real firmware installation */
+    /*
+    1. Unlock internal flash
+    2. Erase application sectors (2-7)
+    3. Read firmware from external flash (status->image_offset)
+    4. Program internal flash at APPLICATION_ADDRESS
+    5. Verify written data
+    6. Lock internal flash
+    */
+
+    /* For now, just simulate success */
+    (void)status;  /* Unused for now */
+
+    /* STUB: Return true (pretend installation succeeded) */
     return true;
 }
 
@@ -197,16 +259,72 @@ int main(void)
         HAL_Delay(300);
     }
 
-    /* TODO Phase 4: Check external flash for update request */
-    /*
-    if (update_requested) {
-        // Verify and install firmware
-        // If successful, clear flag and jump to new app
-        // If failed, try golden image or stay in bootloader
-    }
-    */
+    /* Phase 4: Check for pending firmware update */
+    sUpdateStatus update_status;
+    if (update_status_read(&update_status) == 0) {
+        /* Valid update status block found */
+        if (update_status.update_requested == 1) {
+            /* Update requested - blink LED 6 times to indicate update mode */
+            boot_blink_led(6);
 
-    /* Jump to application */
+            /* Verify firmware image */
+            bool verify_ok = boot_verify_firmware(&update_status);
+
+            if (verify_ok) {
+                /* Firmware verified - 2 fast blinks */
+                for (uint8_t i = 0; i < 2; i++) {
+                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
+                    HAL_Delay(100);
+                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
+                    HAL_Delay(100);
+                }
+
+                /* Install firmware */
+                bool install_ok = boot_install_firmware(&update_status);
+
+                if (install_ok) {
+                    /* Installation succeeded - 3 slow blinks */
+                    boot_blink_led(3);
+
+                    /* Clear update request flag */
+                    update_status_clear();
+
+                    /* Jump to new application */
+                    boot_jump_to_application(APPLICATION_ADDRESS);
+                } else {
+                    /* Installation failed - 7 fast blinks */
+                    for (uint8_t i = 0; i < 7; i++) {
+                        HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
+                        HAL_Delay(50);
+                        HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
+                        HAL_Delay(50);
+                    }
+
+                    /* Clear failed update request */
+                    update_status_clear();
+
+                    /* Jump to current application (fallback) */
+                    boot_jump_to_application(APPLICATION_ADDRESS);
+                }
+            } else {
+                /* Verification failed - 8 fast blinks */
+                for (uint8_t i = 0; i < 8; i++) {
+                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
+                    HAL_Delay(50);
+                    HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
+                    HAL_Delay(50);
+                }
+
+                /* Clear failed update request */
+                update_status_clear();
+
+                /* Jump to current application (fallback) */
+                boot_jump_to_application(APPLICATION_ADDRESS);
+            }
+        }
+    }
+
+    /* No update requested - jump to application normally */
     boot_jump_to_application(APPLICATION_ADDRESS);
 
     /* Should never reach here */
