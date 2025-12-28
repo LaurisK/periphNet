@@ -76,6 +76,7 @@ void trace_init(void)
 static void trace_task(void *argument)
 {
     err_t err;
+    uint32_t counter = 0;
 
     (void)argument;
 
@@ -119,6 +120,9 @@ static void trace_task(void *argument)
         TriceTransfer();
 
         /* Delay to prevent busy loop and set transfer rate */
+        counter++;
+        TRice("Counter is - %d\n", counter);
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -160,11 +164,7 @@ static err_t trace_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_err(newpcb, trace_err_callback);
 
     /* Send welcome message */
-    const char *welcome = "Trice trace server connected\r\n";
-    err_t write_err = tcp_write(newpcb, welcome, strlen(welcome), TCP_WRITE_FLAG_COPY);
-    if (write_err == ERR_OK) {
-        tcp_output(newpcb);
-    }
+    TRice("New client received for trice stream.");
 
     return ERR_OK;
 }
@@ -214,23 +214,19 @@ static void trace_err_callback(void *arg, err_t err)
 
 /**
  ******************************************************************************
- * Trice Integration Functions - Minimal Hooks
+ * Trice Integration Functions
  * These functions are called by the Trice library
- * TCP sending will be implemented later
  ******************************************************************************
  */
 
 /**
- * @brief  Trice auxiliary output function - hook for monitoring only
+ * @brief  Trice auxiliary output function - sends data to all connected TCP clients
  * @param  enc: Pointer to encoded trice data
  * @param  encLen: Length of encoded data
  * @note   Called by Trice library from TriceNonBlockingDeferredWrite8()
- * @note   Currently only sets flag and records length - sending not implemented yet
  */
 void TriceNonBlockingDeferredWrite8Auxiliary(const uint8_t* enc, size_t encLen)
 {
-    (void)enc;  /* Not used yet - sending will be implemented later */
-
     if (encLen == 0) {
         return;
     }
@@ -238,6 +234,24 @@ void TriceNonBlockingDeferredWrite8Auxiliary(const uint8_t* enc, size_t encLen)
     /* Set flag to indicate new trace data is available */
     trice_monitor.new_data_available = 1;
     trice_monitor.last_buffer_length = encLen;
+
+    /* Send data to all connected clients */
+    for (int i = 0; i < TRACE_MAX_CLIENTS; i++) {
+        if (trace_server.clients[i].active && trace_server.clients[i].pcb != NULL) {
+            /* Check if there's enough space in TCP send buffer */
+            uint16_t available = tcp_sndbuf(trace_server.clients[i].pcb);
+
+            if (available >= encLen) {
+                /* Write data to TCP buffer (copy mode for safety) */
+                err_t err = tcp_write(trace_server.clients[i].pcb, enc, encLen, TCP_WRITE_FLAG_COPY);
+
+                if (err == ERR_OK) {
+                    /* Flush the data */
+                    tcp_output(trace_server.clients[i].pcb);
+                }
+            }
+        }
+    }
 }
 
 /**

@@ -1,0 +1,10 @@
+{
+	"1019": {
+		"Type": "TRice",
+		"Strg": "New client received for trice stream."
+	},
+	"6862": {
+		"Type": "TRice",
+		"Strg": "Counter is - %d\\n"
+	}
+}
