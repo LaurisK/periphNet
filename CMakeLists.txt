@@ -141,6 +141,7 @@ set(BOOTLOADER_INCLUDES
 set(APP_INCLUDES
     Core/Inc
     Core/ThreadSafe
+    application/inc
     Drivers/CMSIS/Device/ST/STM32F4xx/Include
     Drivers/CMSIS/Include
     Drivers/STM32F4xx_HAL_Driver/Inc
