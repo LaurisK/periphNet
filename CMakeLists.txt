@@ -78,9 +78,9 @@ set(COMMON_DRIVER_SOURCES
 
 # Minimal system files for bootloader
 set(BOOTLOADER_SOURCES
-    bootloader/src/boot_main.c
-    bootloader/src/boot_api.c
-    bootloader/src/boot_stm32f4xx_it.c
+    bootloader/boot_main.c
+    bootloader/boot_api.c
+    bootloader/boot_stm32f4xx_it.c
     Core/Src/system_stm32f4xx.c
     Core/Src/stm32f4xx_hal_msp.c
     Core/Src/spi.c
@@ -98,7 +98,7 @@ set(BOOTLOADER_SOURCES
 file(GLOB_RECURSE APP_SOURCES
     "Core/Src/*.c"
     "Core/ThreadSafe/*.c"
-    "application/src/*.c"
+    "application/*.c"
 )
 
 # BSP Component sources (Ethernet PHY driver)
@@ -134,14 +134,14 @@ set(BOOTLOADER_INCLUDES
     Drivers/CMSIS/Include
     Drivers/STM32F4xx_HAL_Driver/Inc
     Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
-    bootloader/inc
+    bootloader
 )
 
 # Full includes for application
 set(APP_INCLUDES
     Core/Inc
     Core/ThreadSafe
-    application/inc
+    application
     Drivers/CMSIS/Device/ST/STM32F4xx/Include
     Drivers/CMSIS/Include
     Drivers/STM32F4xx_HAL_Driver/Inc
@@ -195,7 +195,7 @@ set(CMAKE_ASM_FLAGS "${CPU_FLAGS} -x assembler-with-cpp")
 # TARGET 1: BOOTLOADER (32KB at 0x08000000)
 # ==============================================================================
 
-set(BOOTLOADER_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/linker/bootloader.ld)
+set(BOOTLOADER_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/bootloader.ld)
 
 set(BOOTLOADER_LINKER_FLAGS
     "${CPU_FLAGS} \
@@ -233,7 +233,7 @@ add_custom_command(TARGET bootloader.elf POST_BUILD
 # TARGET 2: APPLICATION (480KB at 0x08008000)
 # ==============================================================================
 
-set(APPLICATION_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/application/linker/application.ld)
+set(APPLICATION_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/application/application.ld)
 
 set(APPLICATION_LINKER_FLAGS
     "${CPU_FLAGS} \
