@@ -115,35 +115,218 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - MQTT client integration
 - Data publishing to Home Assistant
 
-## Build System
+## Build and Flash Instructions
 
-**Current build system: CMake + ARM GCC** ✅
+**Build system: CMake + ARM GCC** ✅
+**Flash tool: J-Link (with clone popup workaround)** ✅
 
-The project uses CMake for building and J-Link for flashing.
+### Prerequisites
 
-**Build commands:**
+- ARM GCC toolchain installed
+- CMake 3.10+
+- J-Link software installed (JLinkExe)
+- STM32F407VET6 board connected via J-Link
+
+### Complete Workflow
+
+**All commands run from project root: `/home/laurynas/Projects/PeriphNet`**
+
+**Quick Reference:**
 ```bash
-cd build
-cmake ..
-make -j8                    # Build firmware
-make flash                  # Flash to board via J-Link
+# First time setup
+cmake -B build -S .
+
+# Daily workflow
+cmake --build build -j8                           # Build
+./flash_nokill.sh flash_application.jlink        # Flash
+
+# Or one-liner
+cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 ```
 
-**Build output:**
-- `PeriphNet.elf` - ELF executable with debug symbols
-- `PeriphNet.bin` - Raw binary for flashing
-- `PeriphNet.hex` - Intel HEX format
-- `PeriphNet.list` - Disassembly listing
+#### 1. Configure (First Time Only)
 
-**Linker scripts:**
-- Application: `STM32F407VETX_FLASH.ld` (0x08000000, 512KB)
-- Future bootloader: Custom script (0x08000000, 32KB)
-- Future application: Custom script (0x08008000, 480KB)
+```bash
+# From project root
+cmake -B build -S .
+```
 
-**Planned additions:**
-- Separate bootloader build target
-- CppUTest framework for unit testing
-- Automated size checks (ensure bootloader < 32KB)
+**Options:**
+- `-B build` - Build directory
+- `-S .` - Source directory (current directory)
+
+#### 2. Build Firmware
+
+**Build both bootloader and application:**
+```bash
+# From project root
+cmake --build build -j8
+```
+
+**Build specific targets:**
+```bash
+# Build bootloader only
+cmake --build build --target bootloader.elf -j8
+
+# Build application only
+cmake --build build --target application.elf -j8
+
+# Clean build
+cmake --build build --target clean
+```
+
+**Build output files** (in `build/` directory):
+- `bootloader.bin` - Bootloader binary (32KB max)
+- `bootloader.elf` - Bootloader with debug symbols
+- `application.bin` - Application binary (480KB max)
+- `application.elf` - Application with debug symbols
+
+#### 3. Flash to Board
+
+**⚠️ IMPORTANT: Clone J-Link Popup Issue**
+
+This project uses a clone J-Link which shows a popup warning that blocks flashing. Use the provided wrapper script to avoid manual intervention.
+
+**Flash both bootloader and application (recommended):**
+```bash
+# From project root
+./flash_nokill.sh flash_both.jlink
+```
+
+**Flash application only (during development):**
+```bash
+# From project root
+./flash_nokill.sh flash_application.jlink
+```
+
+**Flash bootloader only (rare):**
+```bash
+# From project root
+./flash_nokill.sh flash_bootloader.jlink
+```
+
+**Timing:**
+- Full flash (both): ~11 seconds
+- Application only: ~10 seconds
+- Bootloader only: ~10 seconds
+
+**What the script does:**
+1. Runs JLinkExe with specified .jlink script
+2. Monitors output for "Verify successful"
+3. Kills process after completion (avoids popup hang)
+4. Returns success/failure status
+
+**Alternative (not recommended):**
+```bash
+# Direct JLinkExe usage - will hang on popup, requires manual click
+JLinkExe -CommandFile flash_both.jlink
+```
+
+### J-Link Script Files
+
+The project includes three J-Link command scripts:
+
+**`flash_both.jlink`** - Flash both bootloader and application
+```
+si SWD                                      # Select SWD interface
+speed 4000                                  # 4MHz speed
+device STM32F407VE                          # Target MCU
+r                                           # Reset
+h                                           # Halt
+erase                                       # Full chip erase
+loadfile build/bootloader.bin 0x08000000    # Flash bootloader at 0x08000000
+loadfile build/application.bin 0x08008000   # Flash application at 0x08008000
+verifybin build/bootloader.bin 0x08000000   # Verify bootloader
+verifybin build/application.bin 0x08008000  # Verify application
+r                                           # Reset
+go                                          # Run
+exit
+```
+
+**`flash_application.jlink`** - Flash application only
+```
+erase 0x08008000 0x0807FFFF                 # Erase application sectors only
+loadfile build/application.bin 0x08008000
+verifybin build/application.bin 0x08008000
+```
+
+**`flash_bootloader.jlink`** - Flash bootloader only
+```
+erase                                       # Full chip erase
+loadfile build/bootloader.bin 0x08000000
+verifybin build/bootloader.bin 0x08000000
+```
+
+### Typical Development Cycle
+
+**All commands from project root:**
+
+```bash
+# 1. Make code changes
+vim Core/Src/http_server.c
+
+# 2. Build
+cmake --build build -j8
+
+# 3. Flash application only (faster during development)
+./flash_nokill.sh flash_application.jlink
+
+# 4. Test
+ping 10.42.0.203
+curl http://10.42.0.203/
+```
+
+**One-liner for quick iterations:**
+```bash
+cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
+```
+
+### Build Output Details
+
+**Bootloader:**
+- Size limit: 32 KB (sectors 0-1)
+- Current size: ~14 KB
+- Location: 0x08000000
+- No network stack (minimal code)
+
+**Application:**
+- Size limit: 480 KB (sectors 2-7)
+- Current size: ~125 KB
+- Location: 0x08008000
+- Full network stack (FreeRTOS + lwIP)
+
+**Memory usage check (from project root):**
+```bash
+arm-none-eabi-size build/bootloader.elf
+arm-none-eabi-size build/application.elf
+```
+
+### Troubleshooting
+
+**Build fails:**
+- Check ARM GCC toolchain: `arm-none-eabi-gcc --version`
+- Clean and rebuild: `cmake --build build --target clean && cmake -B build -S . && cmake --build build -j8`
+
+**Flash fails:**
+- Check J-Link connection: `JLinkExe` (should connect)
+- Verify USB cable connected
+- Check board power
+- Try manual reset button on board
+
+**Device doesn't boot after flash:**
+- Reflash both: `./flash_nokill.sh flash_both.jlink`
+- Check bootloader LED sequence (3 blinks = bootloader running)
+- Verify network: `ping 10.42.0.203`
+
+**Clone J-Link popup appears:**
+- Use `flash_nokill.sh` instead of direct JLinkExe
+- See `FLASH_CLONE_JLINK.md` for details
+
+### Documentation
+
+- `FLASH_CLONE_JLINK.md` - J-Link clone popup solution details
+- `CLAUDE.md` - This file (project overview and instructions)
+- `README.md` - Project README (if exists)
 
 ## Memory Architecture
 
