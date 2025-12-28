@@ -14,7 +14,6 @@
 
 /* Private Function Prototypes */
 static W25Q128_Status_t W25Q128_WriteEnable(void);
-static W25Q128_Status_t W25Q128_WriteDisable(void);
 static uint8_t W25Q128_ReadStatusReg1(void);
 
 /**
@@ -402,16 +401,6 @@ static W25Q128_Status_t W25Q128_WriteEnable(void)
 /**
  * @brief Disable write operations
  */
-static W25Q128_Status_t W25Q128_WriteDisable(void)
-{
-    uint8_t cmd = W25Q128_CMD_WRITE_DISABLE;
-
-    CS_LOW();
-    HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, &cmd, 1, W25Q128_TIMEOUT_MS);
-    CS_HIGH();
-
-    return W25Q128_OK;
-}
 
 /**
  * @brief Read status register 1

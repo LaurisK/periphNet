@@ -44,6 +44,9 @@
 Debug/
 Release/
 
+# Launch configurations (user-specific debug settings)
+*.launch
+
 # ----------------------------------------------------------------------------
 # STM32CubeMX Generated Code
 # ----------------------------------------------------------------------------
@@ -56,6 +59,8 @@ Release/
 # GDB debug files
 *.su
 *.cyclo
+.gdbinit_*
+debug_*.gdb
 
 # Core dumps
 core
