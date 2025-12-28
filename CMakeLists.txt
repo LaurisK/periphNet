@@ -230,6 +230,22 @@ add_custom_command(TARGET bootloader.elf POST_BUILD
 )
 
 # ==============================================================================
+# Third-Party Middleware Modules
+# ==============================================================================
+
+# Trice library (embedded trace system)
+add_subdirectory(Middlewares/Third_Party/trice)
+
+# Provide triceConfig.h and FreeRTOS includes to Trice library
+target_include_directories(trice PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/application
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
+)
+
+# ==============================================================================
 # TARGET 2: APPLICATION (480KB at 0x08008000)
 # ==============================================================================
 
@@ -259,6 +275,9 @@ add_executable(application.elf
 target_include_directories(application.elf PRIVATE
     ${APP_INCLUDES}
 )
+
+# Link against Trice library
+target_link_libraries(application.elf PRIVATE trice)
 
 # Define APPLICATION_BUILD for VTOR relocation
 target_compile_definitions(application.elf PRIVATE

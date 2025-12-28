@@ -1,11 +1,18 @@
 /**
  ******************************************************************************
  * @file    trace.c
- * @brief   Trice TCP/IP trace server implementation
+ * @brief   Trice TCP/IP trace server implementation with double buffer
+ ******************************************************************************
+ * Minimal Trice integration:
+ * - TriceTransfer() called periodically (every 50ms) to swap buffers
+ * - Hooks to detect when Trice writes data
+ * - Buffer fill level monitoring
+ * - TCP sending implementation to be added later
  ******************************************************************************
  */
 
 #include "trace.h"
+#include "trice.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "lwip/tcp.h"
@@ -19,11 +26,16 @@ typedef struct {
     uint8_t active;
 } trace_client_t;
 
+/* Trice buffer monitoring state */
+static struct {
+    volatile uint8_t new_data_available;  /* Flag: new trace data written */
+    volatile size_t last_buffer_length;    /* Length of last buffer received */
+} trice_monitor = {0};
+
 /* Trace server state */
 static struct {
     struct tcp_pcb *server_pcb;
     trace_client_t clients[TRACE_MAX_CLIENTS];
-    uint32_t message_counter;
 } trace_server = {0};
 
 /* Forward declarations */
@@ -31,7 +43,6 @@ static void trace_task(void *argument);
 static err_t trace_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err);
 static err_t trace_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);
 static void trace_err_callback(void *arg, err_t err);
-static void trace_broadcast_message(const char *msg, uint16_t len);
 
 /**
  * @brief  Initialize trace system
@@ -59,15 +70,12 @@ void trace_init(void)
 }
 
 /**
- * @brief  Trace task - manages TCP server and periodic messages
+ * @brief  Trace task - manages TCP server and Trice buffer transfers
  * @param  argument: Not used
  */
 static void trace_task(void *argument)
 {
     err_t err;
-    TickType_t last_message_time;
-    char message_buf[64];
-    uint16_t msg_len;
 
     (void)argument;
 
@@ -104,25 +112,14 @@ static void trace_task(void *argument)
         trace_server.clients[i].active = 0;
     }
 
-    last_message_time = xTaskGetTickCount();
-
     /* Main trace loop */
     while (1) {
-        /* Send periodic message every 1 second */
-        if ((xTaskGetTickCount() - last_message_time) >= pdMS_TO_TICKS(1000)) {
-            trace_server.message_counter++;
+        /* Call TriceTransfer() every 50ms to swap buffers and transmit */
+        /* This checks if transmission is complete and swaps double buffer */
+        TriceTransfer();
 
-            msg_len = snprintf(message_buf, sizeof(message_buf),
-                              "Trace message %lu: One second passed\r\n",
-                              trace_server.message_counter);
-
-            trace_broadcast_message(message_buf, msg_len);
-
-            last_message_time = xTaskGetTickCount();
-        }
-
-        /* Small delay to prevent busy loop */
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* Delay to prevent busy loop and set transfer rate */
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -164,8 +161,10 @@ static err_t trace_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     /* Send welcome message */
     const char *welcome = "Trice trace server connected\r\n";
-    tcp_write(newpcb, welcome, strlen(welcome), TCP_WRITE_FLAG_COPY);
-    tcp_output(newpcb);
+    err_t write_err = tcp_write(newpcb, welcome, strlen(welcome), TCP_WRITE_FLAG_COPY);
+    if (write_err == ERR_OK) {
+        tcp_output(newpcb);
+    }
 
     return ERR_OK;
 }
@@ -214,24 +213,93 @@ static void trace_err_callback(void *arg, err_t err)
 }
 
 /**
- * @brief  Broadcast message to all connected clients
+ ******************************************************************************
+ * Trice Integration Functions - Minimal Hooks
+ * These functions are called by the Trice library
+ * TCP sending will be implemented later
+ ******************************************************************************
  */
-static void trace_broadcast_message(const char *msg, uint16_t len)
+
+/**
+ * @brief  Trice auxiliary output function - hook for monitoring only
+ * @param  enc: Pointer to encoded trice data
+ * @param  encLen: Length of encoded data
+ * @note   Called by Trice library from TriceNonBlockingDeferredWrite8()
+ * @note   Currently only sets flag and records length - sending not implemented yet
+ */
+void TriceNonBlockingDeferredWrite8Auxiliary(const uint8_t* enc, size_t encLen)
 {
-    err_t err;
+    (void)enc;  /* Not used yet - sending will be implemented later */
 
-    for (int i = 0; i < TRACE_MAX_CLIENTS; i++) {
-        if (trace_server.clients[i].active && trace_server.clients[i].pcb != NULL) {
-            err = tcp_write(trace_server.clients[i].pcb, msg, len, TCP_WRITE_FLAG_COPY);
-
-            if (err == ERR_OK) {
-                tcp_output(trace_server.clients[i].pcb);
-            } else {
-                /* Write failed - close connection */
-                tcp_close(trace_server.clients[i].pcb);
-                trace_server.clients[i].pcb = NULL;
-                trace_server.clients[i].active = 0;
-            }
-        }
+    if (encLen == 0) {
+        return;
     }
+
+    /* Set flag to indicate new trace data is available */
+    trice_monitor.new_data_available = 1;
+    trice_monitor.last_buffer_length = encLen;
+}
+
+/**
+ * @brief  Trice output depth function - returns transmission state
+ * @return 0 (always ready - no actual transmission yet)
+ * @note   Called by TriceTransfer() to check if buffer swap is safe
+ * @note   Returns 0 to allow immediate buffer swap (sending not implemented yet)
+ */
+unsigned TriceOutDepth(void)
+{
+    /* Always return 0 - no transmission happening yet */
+    /* This allows Trice to swap buffers immediately */
+    return 0;
+}
+
+/**
+ ******************************************************************************
+ * Public API Functions - Buffer Monitoring
+ ******************************************************************************
+ */
+
+/**
+ * @brief  Check if new trace data is available
+ * @return 1 if new data available, 0 otherwise
+ * @note   Call trace_clear_data_flag() after processing to reset flag
+ */
+uint8_t trace_has_new_data(void)
+{
+    return trice_monitor.new_data_available;
+}
+
+/**
+ * @brief  Get length of last trace buffer received
+ * @return Length in bytes of last buffer from Trice
+ */
+size_t trace_get_last_buffer_length(void)
+{
+    return trice_monitor.last_buffer_length;
+}
+
+/**
+ * @brief  Clear the new data available flag
+ * @note   Call after processing new trace data
+ */
+void trace_clear_data_flag(void)
+{
+    trice_monitor.new_data_available = 0;
+}
+
+/**
+ * @brief  Get current Trice half-buffer fill level
+ * @return Number of bytes used in current half buffer
+ * @note   Accesses Trice internal variables - requires Trice library
+ */
+size_t trace_get_buffer_fill_level(void)
+{
+    /* Access Trice double buffer internal state */
+    /* These are defined in triceDoubleBuffer.c */
+    extern uint32_t* TriceBufferWritePosition;
+    extern uint32_t* TriceBufferWritePositionStart;
+
+    /* Calculate fill level in 32-bit words, convert to bytes */
+    size_t fill_words = TriceBufferWritePosition - TriceBufferWritePositionStart;
+    return fill_words * 4;  /* Convert words to bytes */
 }

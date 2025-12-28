@@ -535,13 +535,15 @@ PeriphNet/
 │   ├── app_info.c              # Application metadata
 │   ├── trace.c                 # Trace TCP server
 │   ├── trace.h
+│   ├── triceConfig.h           # Trice configuration
 │   └── application.ld          # 480KB at 0x08008000
 │
-├── third_party/                # External dependencies
-│   └── trice/                  # Trice tracing library (submodule)
-│
 ├── LWIP/                       # lwIP TCP/IP stack (STM32 integration)
-├── Middlewares/                # FreeRTOS and other middleware
+├── Middlewares/                # Middleware components
+│   └── Third_Party/            # Third-party middleware (IMPORTANT: submodules go here)
+│       ├── FreeRTOS/           # FreeRTOS RTOS
+│       ├── LwIP/               # lwIP TCP/IP stack
+│       └── trice/              # Trice tracing library (git submodule)
 │
 ├── flash_nokill.sh             # J-Link clone flash wrapper
 ├── flash_both.jlink            # Flash bootloader + application
@@ -636,7 +638,22 @@ application/
 - **Test-Driven Development (TDD)** with CppUTest
 - **Modular architecture**: Each HAL driver, middleware component independently testable
 - **Trice tracing**: Use Trice over TCP/IP for runtime diagnostics (not RTT/UART)
-- All third-party code goes in `third_party/` directory
+
+### Third-Party Module Integration
+
+**⚠️ IMPORTANT: All third-party libraries and submodules MUST go in `Middlewares/Third_Party/`**
+
+This follows the STM32CubeMX convention and keeps the project structure consistent:
+- ✅ `Middlewares/Third_Party/FreeRTOS/` - RTOS
+- ✅ `Middlewares/Third_Party/LwIP/` - TCP/IP stack
+- ✅ `Middlewares/Third_Party/trice/` - Trace library
+- ❌ `third_party/` - DO NOT use this directory
+
+**When adding a new third-party module:**
+1. Add as git submodule: `git submodule add <repo_url> Middlewares/Third_Party/<module_name>`
+2. Create `Middlewares/Third_Party/<module_name>/CMakeLists.txt` defining the library
+3. Use `add_subdirectory(Middlewares/Third_Party/<module_name>)` in root CMakeLists.txt
+4. Link against the library using `target_link_libraries()`
 
 ### Important Notes
 
