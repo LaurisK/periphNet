@@ -249,6 +249,22 @@ target_include_directories(trice PUBLIC
 # TARGET 2: APPLICATION (480KB at 0x08008000)
 # ==============================================================================
 
+# Trice ID management
+set(TRICE_TOOL ${CMAKE_CURRENT_SOURCE_DIR}/tools/trice)
+set(TRICE_TIL ${CMAKE_CURRENT_SOURCE_DIR}/til.json)
+set(TRICE_LI ${CMAKE_CURRENT_SOURCE_DIR}/li.json)
+
+# Pre-build: Insert Trice IDs into source code
+add_custom_target(trice-insert
+    COMMAND ${TRICE_TOOL} insert
+        -src ${CMAKE_CURRENT_SOURCE_DIR}/application
+        -src ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src
+        -i ${TRICE_TIL}
+        -li ${TRICE_LI}
+    COMMENT "Inserting Trice IDs into source code..."
+    VERBATIM
+)
+
 set(APPLICATION_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/application/application.ld)
 
 set(APPLICATION_LINKER_FLAGS
@@ -271,6 +287,9 @@ add_executable(application.elf
     ${LWIP_SOURCES}
     ${FREERTOS_SOURCES}
 )
+
+# Make application build depend on trice-insert
+add_dependencies(application.elf trice-insert)
 
 target_include_directories(application.elf PRIVATE
     ${APP_INCLUDES}
@@ -295,6 +314,17 @@ add_custom_command(TARGET application.elf POST_BUILD
     COMMAND ${CMAKE_OBJDUMP} -h -S $<TARGET_FILE:application.elf> > application.list
     COMMAND ${CMAKE_SIZE} --format=berkeley $<TARGET_FILE:application.elf>
     COMMENT "Application size:"
+)
+
+# Post-build: Clean Trice IDs from source code
+add_custom_command(TARGET application.elf POST_BUILD
+    COMMAND ${TRICE_TOOL} clean
+        -src ${CMAKE_CURRENT_SOURCE_DIR}/application
+        -src ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src
+        -i ${TRICE_TIL}
+        -li ${TRICE_LI}
+    COMMENT "Cleaning Trice IDs from source code..."
+    VERBATIM
 )
 
 # ==============================================================================

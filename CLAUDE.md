@@ -328,6 +328,70 @@ arm-none-eabi-size build/application.elf
 - `CLAUDE.md` - This file (project overview and instructions)
 - `README.md` - Project README (if exists)
 
+## Trice Debug Logging
+
+**Trice** is the real-time trace system used for debugging over TCP/IP (no UART needed).
+
+### Build Integration (Automatic)
+
+The CMake build system automatically manages Trice IDs:
+1. **Before build:** Inserts IDs into TRICE macros in source code
+2. **After build:** Removes IDs, returning source to clean state
+3. **ID database:** Maintained in `til.json` and `li.json`
+
+**No manual intervention needed** - just build normally:
+```bash
+cmake --build build -j8
+```
+
+### Viewing Trace Output
+
+To view real-time logs from the device, run from project root:
+
+```bash
+./tools/trice log \
+    -p TCP4 \
+    -args "10.42.0.203:61486" \
+    -i ./til.json \
+    -li ./li.json \
+    -color default \
+    -showID "ID:%5d " \
+    -ts "ms" \
+    -prefix "time: "
+```
+
+**Parameters:**
+- `-p TCP4` - Protocol: TCP over IPv4
+- `-args "10.42.0.203:61486"` - Device IP and trace server port
+- `-i ./til.json` - Trice ID list (maps IDs to format strings)
+- `-li ./li.json` - Location information (file:line mappings)
+- `-color default` - Color output for readability
+- `-showID "ID:%5d "` - Display Trice ID before each message
+- `-ts "ms"` - Show timestamps in milliseconds
+- `-prefix "time: "` - Timestamp prefix
+
+**Usage:**
+```bash
+# Check device is reachable
+ping 10.42.0.203
+
+# Start trace viewer (press Ctrl+C to exit)
+./tools/trice log -p TCP4 -args "10.42.0.203:61486" -i ./til.json -li ./li.json
+```
+
+**Expected output:**
+```
+time: 1234 ID:  123 HTTP_INIT: Starting HTTP server on port 80
+time: 1235 ID:  124 HTTP_INIT: Bind OK, starting listen
+time: 1236 ID:  125 HTTP_INIT: HTTP server ready
+time: 1240 ID:  126 HTTP_ACCEPT: New connection, pcb=0x20001234, err=0
+```
+
+**Troubleshooting:**
+- **Connection refused:** Device not running or network issue - check `ping 10.42.0.203`
+- **No output:** No TRICE calls executed yet - trigger some action (e.g., access HTTP server)
+- **Garbled output:** Wrong til.json/li.json - rebuild application to regenerate IDs
+
 ## Memory Architecture
 
 ### Internal Flash (512KB)
