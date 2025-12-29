@@ -1018,6 +1018,190 @@ typedef struct {
 - **Testing:** CppUTest (manual execution)
 - **Build:** CMake (planned migration from STM32CubeIDE)
 
+## Trice Debug Tracing
+
+**Trice** is a fast, binary trace system for embedded systems. This project uses Trice over TCP/IP for remote debugging.
+
+### How to Use Trice in Code
+
+**✅ CORRECT Usage:**
+
+```c
+#include "trice.h"
+
+void my_function(void) {
+    uint32_t value = 42;
+    const char *status = "ready";
+
+    TRice("Simple message\n");                          // String only
+    TRice("Value: %d\n", value);                        // One parameter
+    TRice("Status: %s, Value: %d\n", status, value);    // Multiple parameters
+}
+```
+
+**❌ INCORRECT Usage:**
+
+```c
+// ❌ DO NOT use ID() wrapper - trice tool inserts IDs automatically
+TRICE(ID(0), "message\n");
+
+// ❌ DO NOT use all-caps TRICE - only lowercase/capitalized versions
+TRICE("message\n");
+TRICE0("message\n");
+
+// ❌ DO NOT manually specify IDs
+TRice(ID(12345), "message\n");
+```
+
+### Valid Trice Macros
+
+- `TRice("format", ...)` - Standard trace (most common)
+- `trice("format", ...)` - Alternative lowercase version
+- `Trice("format", ...)` - Alternative capitalized version
+
+**Note:** The `trice insert` command automatically adds unique IDs to source code before compilation. You write simple `TRice(...)` statements, and the tool modifies them to include IDs like `TRice(iD(12345), ...)` during the build process.
+
+### Critical Limitation: lwIP Callback Context
+
+**⚠️ TRICE CANNOT BE USED IN lwIP CALLBACKS!**
+
+Trice uses FreeRTOS critical sections (`taskENTER_CRITICAL`/`taskEXIT_CRITICAL`) which conflict with lwIP's `tcpip_thread` context and **WILL CAUSE CRASHES**.
+
+**Where you CANNOT use Trice:**
+- HTTP server callbacks (`http_recv_callback`, `http_accept_callback`, etc.)
+- TCP/UDP callbacks (`tcp_recv`, `tcp_sent`, `udp_recv`, etc.)
+- Any function called from lwIP's `tcpip_thread`
+
+**Where you CAN use Trice:**
+- FreeRTOS tasks (application tasks, custom threads)
+- Interrupt Service Routines (ISRs)
+- Main loop code outside lwIP context
+- Hardfault handlers and exception handlers
+
+**Example - Safe vs Unsafe:**
+
+```c
+// ✅ SAFE - FreeRTOS task context
+void my_task(void *argument) {
+    while (1) {
+        TRice("Task running, counter=%d\n", counter++);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// ❌ UNSAFE - lwIP callback context (WILL CRASH!)
+static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
+    TRice("HTTP request received\n");  // ❌ DO NOT DO THIS!
+    // ... rest of handler
+}
+
+// ✅ SAFE - Hardfault handler (exception context)
+void HardFault_Handler_C(exception_stack_frame_t *frame, uint32_t lr) {
+    TRice("HardFault: PC=0x%08X\n", frame->pc);  // ✅ OK in exception handler
+    while (1);
+}
+```
+
+### Viewing Trice Output
+
+**Connect to device trice stream:**
+
+```bash
+# From project root
+./tools/trice log \
+    -p TCP4 \
+    -args "10.42.0.203:61486" \
+    -i ./til.json \
+    -li ./li.json \
+    -color default \
+    -ts "ms" \
+    -prefix "time: "
+```
+
+**Parameters:**
+- `-p TCP4` - Use TCP/IPv4 connection
+- `-args "IP:PORT"` - Device IP and trice port (default 61486)
+- `-i ./til.json` - Trice ID list (auto-generated)
+- `-li ./li.json` - Location information (auto-generated)
+- `-color default` - Enable colorized output
+- `-ts "ms"` - Show millisecond timestamps
+- `-prefix "time: "` - Timestamp prefix
+
+**Save to file:**
+```bash
+./tools/trice log -p TCP4 -args "10.42.0.203:61486" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
+```
+
+### Build Integration
+
+Trice IDs are automatically managed by CMake:
+
+1. **Pre-build:** `trice insert` adds IDs to source files
+2. **Compilation:** Source files compiled with embedded IDs
+3. **Post-build:** `trice clean` removes IDs from source (keeps code clean in git)
+
+**CMake targets:**
+- `trice-insert` - Insert IDs before build (runs automatically)
+- Application build - Compiles with IDs embedded
+- Post-build clean - Removes IDs after successful build
+
+**Manual control (if needed):**
+```bash
+# Insert IDs manually
+./tools/trice insert -src application -src Core/Src -i til.json -li li.json
+
+# Clean IDs manually
+./tools/trice clean -src application -src Core/Src -i til.json -li li.json
+```
+
+### Configuration
+
+Trice configuration is in `application/triceConfig.h`:
+
+- **Buffer mode:** Double buffer (1072 bytes total)
+- **Output:** TCP/IP via custom `TriceNonBlockingDeferredWrite8()`
+- **Framing:** TCOBS (efficient zero-delimiter framing)
+- **Timestamp:** FreeRTOS tick count (32-bit)
+- **Critical sections:** FreeRTOS `taskENTER_CRITICAL`/`taskEXIT_CRITICAL`
+
+**Why double buffer?**
+- Fast trice execution (no blocking on TCP send)
+- Background transmission via `TriceTransfer()` called every 50ms
+- Buffer swap allows continuous tracing while transmitting
+
+### Common Patterns
+
+**Progress tracking:**
+```c
+void flash_erase(uint32_t sectors) {
+    for (uint32_t i = 0; i < sectors; i++) {
+        TRice("Erasing sector %d/%d...\n", i+1, sectors);
+        erase_sector(i);
+    }
+    TRice("Erase complete\n");
+}
+```
+
+**Error reporting:**
+```c
+if (result != HAL_OK) {
+    TRice("ERROR: SPI init failed, code=%d\n", result);
+}
+```
+
+**State machine debugging:**
+```c
+TRice("State: %s -> %s\n", state_names[old_state], state_names[new_state]);
+```
+
+**Performance measurement:**
+```c
+uint32_t start = xTaskGetTickCount();
+process_data();
+uint32_t elapsed = xTaskGetTickCount() - start;
+TRice("Processing took %d ms\n", elapsed);
+```
+
 ## Linker Script Notes
 
 When modifying linker scripts:
