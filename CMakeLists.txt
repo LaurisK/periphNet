@@ -101,6 +101,9 @@ file(GLOB_RECURSE APP_SOURCES
     "application/*.c"
 )
 
+# Explicitly add DMA init (STM32CubeMX generated)
+list(APPEND APP_SOURCES "Core/Src/dma.c")
+
 # BSP Component sources (Ethernet PHY driver)
 file(GLOB_RECURSE BSP_SOURCES
     "Drivers/BSP/Components/*/*.c"
