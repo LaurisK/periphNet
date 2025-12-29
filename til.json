@@ -3,8 +3,112 @@
 		"Type": "TRice",
 		"Strg": "New client received for trice stream."
 	},
+	"1559": {
+		"Type": "TRICE",
+		"Strg": "ERR: Bind FAILED, err=%d\\n"
+	},
+	"2455": {
+		"Type": "TRICE",
+		"Strg": "DBG: tcp_write OK, calling tcp_output\\n"
+	},
+	"2469": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTML built, len=%d, sending...\\n"
+	},
+	"3046": {
+		"Type": "TRICE",
+		"Strg": "ERR: pvPortMalloc FAILED - out of memory!\\n"
+	},
+	"3753": {
+		"Type": "TRICE",
+		"Strg": "WARN: Request too large (%u \u003e 512), rejecting\\n"
+	},
+	"3831": {
+		"Type": "TRICE",
+		"Strg": "DBG: Processing /trigger_update request\\n"
+	},
+	"3929": {
+		"Type": "TRICE",
+		"Strg": "INFO: HTTP server ready\\n"
+	},
+	"3948": {
+		"Type": "TRICE",
+		"Strg": "DBG: Unknown path, sending 404\\n"
+	},
+	"4801": {
+		"Type": "TRICE",
+		"Strg": "DBG: Connection accepted\\n"
+	},
+	"4951": {
+		"Type": "TRICE",
+		"Strg": "ERR: Accept rejected\\n"
+	},
+	"5841": {
+		"Type": "TRICE",
+		"Strg": "ERR: HTTP error callback, err=%d\\n"
+	},
+	"6045": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTTP accept, pcb=%p, err=%d\\n"
+	},
+	"6253": {
+		"Type": "TRICE",
+		"Strg": "DBG: Buffer allocated at %p\\n"
+	},
+	"6284": {
+		"Type": "TRICE",
+		"Strg": "INFO: Bind OK, listening...\\n"
+	},
+	"6484": {
+		"Type": "TRICE",
+		"Strg": "ERR: tcp_new FAILED - no PCBs!\\n"
+	},
+	"6525": {
+		"Type": "TRICE",
+		"Strg": "DBG: Client closed connection\\n"
+	},
 	"6862": {
 		"Type": "TRice",
 		"Strg": "Counter is - %d\\n"
+	},
+	"6990": {
+		"Type": "TRICE",
+		"Strg": "DBG: Request completed successfully\\n"
+	},
+	"7205": {
+		"Type": "TRICE",
+		"Strg": "WARN: HTML truncated! len=%d \u003e= 2048\\n"
+	},
+	"7223": {
+		"Type": "TRICE",
+		"Strg": "DBG: Processing GET / request\\n"
+	},
+	"7314": {
+		"Type": "TRICE",
+		"Strg": "INFO: HTTP server init, port=%d\\n"
+	},
+	"7396": {
+		"Type": "TRICE",
+		"Strg": "ERR: tcp_write FAILED, err=%d\\n"
+	},
+	"7509": {
+		"Type": "TRICE",
+		"Strg": "DBG: Request size=%u, allocating 2048 bytes...\\n"
+	},
+	"7652": {
+		"Type": "TRICE",
+		"Strg": "DBG: Parsing request (len=%u)\\n"
+	},
+	"7752": {
+		"Type": "TRICE",
+		"Strg": "DBG: Building HTML (status=%s)\\n"
+	},
+	"7754": {
+		"Type": "TRICE",
+		"Strg": "DBG: Cleanup and close\\n"
+	},
+	"7755": {
+		"Type": "TRICE",
+		"Strg": "DBG: HTTP recv enter, p=%p, err=%d\\n"
 	}
 }

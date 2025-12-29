@@ -20,6 +20,7 @@
 #include "w25q128.h"
 #include "bl_app_contract.h"
 #include "update_manager.h"
+#include "firmware_update_http.h"  /* Firmware upload/download */
 #include "FreeRTOS.h"  /* For pvPortMalloc/vPortFree */
 
 /* External network interface (defined in lwip.c) */
@@ -104,8 +105,34 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
         return ERR_OK;
     }
 
+    /* Route to firmware upload handler */
+    if (strncmp(request, "POST /api/firmware/upload", 26) == 0) {
+        err_t result = firmware_upload_handler(pcb, p);
+        /* Upload handler manages pbuf lifecycle */
+        vPortFree(response_buf);
+        pbuf_free(p);  /* Free pbuf after handler processes it */
+        return result;
+    }
+    /* Route to firmware download handler */
+    else if (strncmp(request, "GET /api/firmware/download", 27) == 0) {
+        err_t result = firmware_download_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        vPortFree(response_buf);
+        tcp_close(pcb);
+        return result;
+    }
+    /* Route to firmware status handler */
+    else if (strncmp(request, "GET /api/firmware/status", 24) == 0) {
+        err_t result = firmware_status_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        vPortFree(response_buf);
+        tcp_close(pcb);
+        return result;
+    }
     /* Simple parsing - check if it's a GET request for root */
-    if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
+    else if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
         /* Build HTML with flash test result */
         const char *status_class = flash_test_ok ? "pass" : "fail";
         const char *status_text = flash_test_ok ? "PASS" : "FAIL";
@@ -253,6 +280,9 @@ static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
 void http_server_init(void)
 {
     struct tcp_pcb *pcb;
+
+    /* Initialize firmware update module */
+    firmware_update_http_init();
 
     /* Create new TCP PCB */
     pcb = tcp_new();
