@@ -161,6 +161,7 @@ $RECYCLE.BIN/
 # ----------------------------------------------------------------------------
 # CppUTest
 /tests/build/
+/build_tests/
 *.gcov
 *.gcda
 *.gcno
