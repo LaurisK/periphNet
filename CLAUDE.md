@@ -719,6 +719,17 @@ This follows the STM32CubeMX convention and keeps the project structure consiste
 3. Use `add_subdirectory(Middlewares/Third_Party/<module_name>)` in root CMakeLists.txt
 4. Link against the library using `target_link_libraries()`
 
+**Trice Submodule Branch:**
+The trice library is on the `uartDma` branch to support UART DMA output functions:
+```bash
+cd Middlewares/Third_Party/trice
+git status  # Should show: HEAD detached at bdc043ab
+# Branch: origin/uartDma
+# Provides: TriceNonBlockingWriteUartA(), TriceOutDepthUartA()
+```
+
+This branch adds weak implementations for UART DMA-based trice output, which we override in `Core/Src/usart.c` with STM32 HAL DMA functions.
+
 ### Important Notes
 
 **Code examples in this documentation are guidance only:**
@@ -1020,7 +1031,7 @@ typedef struct {
 
 ## Trice Debug Tracing
 
-**Trice** is a fast, binary trace system for embedded systems. This project uses Trice over TCP/IP for remote debugging.
+**Trice** is a fast, binary trace system for embedded systems. This project uses Trice over UART with DMA for high-speed debug output.
 
 ### How to Use Trice in Code
 
@@ -1104,13 +1115,16 @@ void HardFault_Handler_C(exception_stack_frame_t *frame, uint32_t lr) {
 
 ### Viewing Trice Output
 
-**Connect to device trice stream:**
+**Connect to device UART trice stream:**
 
 ```bash
-# From project root
+# First, identify the USB-to-serial device
+ls /dev/ttyUSB* /dev/ttyACM*
+
+# From project root - connect to USART3 @ 920800 baud
 ./tools/trice log \
-    -p TCP4 \
-    -args "10.42.0.203:61486" \
+    -p COM \
+    -args "/dev/ttyUSB0:920800" \
     -i ./til.json \
     -li ./li.json \
     -color default \
@@ -1119,17 +1133,22 @@ void HardFault_Handler_C(exception_stack_frame_t *frame, uint32_t lr) {
 ```
 
 **Parameters:**
-- `-p TCP4` - Use TCP/IPv4 connection
-- `-args "IP:PORT"` - Device IP and trice port (default 61486)
+- `-p COM` - Use serial COM port connection
+- `-args "PORT:BAUD"` - Serial device and baud rate (USART3 @ 920800)
 - `-i ./til.json` - Trice ID list (auto-generated)
 - `-li ./li.json` - Location information (auto-generated)
 - `-color default` - Enable colorized output
 - `-ts "ms"` - Show millisecond timestamps
 - `-prefix "time: "` - Timestamp prefix
 
+**Hardware connection:**
+- USART3 TX (PD8) connects to USB-to-serial RX
+- Baud rate: 920800 (high speed for minimal trace overhead)
+- DMA transmission for non-blocking output
+
 **Save to file:**
 ```bash
-./tools/trice log -p TCP4 -args "10.42.0.203:61486" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
+./tools/trice log -p COM -args "/dev/ttyUSB0:920800" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
 ```
 
 ### Build Integration
@@ -1159,15 +1178,23 @@ Trice IDs are automatically managed by CMake:
 Trice configuration is in `application/triceConfig.h`:
 
 - **Buffer mode:** Double buffer (1072 bytes total)
-- **Output:** TCP/IP via custom `TriceNonBlockingDeferredWrite8()`
+- **Output:** UART DMA (USART3 @ 920800 baud)
+- **Hardware:** STM32 USART3 with DMA1_Stream3
+- **Functions:** `TriceNonBlockingWriteUartA()` / `TriceOutDepthUartA()` in `Core/Src/usart.c`
 - **Framing:** TCOBS (efficient zero-delimiter framing)
 - **Timestamp:** FreeRTOS tick count (32-bit)
 - **Critical sections:** FreeRTOS `taskENTER_CRITICAL`/`taskEXIT_CRITICAL`
 
-**Why double buffer?**
-- Fast trice execution (no blocking on TCP send)
-- Background transmission via `TriceTransfer()` called every 50ms
-- Buffer swap allows continuous tracing while transmitting
+**Implementation (based on Lusety project):**
+- `TriceNonBlockingWriteUartA()` - Starts DMA transfer via `HAL_UART_Transmit_DMA()`
+- `TriceOutDepthUartA()` - Returns bytes remaining in DMA transfer (`huart.TxXferCount`)
+- Non-blocking transmission: Trice never waits for UART, uses DMA for background output
+
+**Why double buffer + DMA?**
+- Fast trice execution (no blocking on UART send)
+- Background transmission via DMA (CPU-free output)
+- Buffer swap via `TriceTransfer()` called every 50ms from trace task
+- High-speed output (920800 baud) with minimal overhead
 
 ### Common Patterns
 

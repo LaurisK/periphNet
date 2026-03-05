@@ -1,50 +1,32 @@
-/**
-  ******************************************************************************
-  * @file           : w25q128.c
-  * @brief          : W25Q128 16MB SPI Flash Driver Implementation
-  ******************************************************************************
-  */
-
 #include "w25q128.h"
 #include "spi.h"
 
-/* Private Macros */
 #define CS_LOW()    HAL_GPIO_WritePin(W25Q128_CS_GPIO_PORT, W25Q128_CS_GPIO_PIN, GPIO_PIN_RESET)
 #define CS_HIGH()   HAL_GPIO_WritePin(W25Q128_CS_GPIO_PORT, W25Q128_CS_GPIO_PIN, GPIO_PIN_SET)
 
-/* Private Function Prototypes */
 static W25Q128_Status_t W25Q128_WriteEnable(void);
 static uint8_t W25Q128_ReadStatusReg1(void);
 
 /**
- * @brief Initialize W25Q128 flash
+ * @brief Initialize the W25Q128 flash device.
+ * @return W25Q128_OK if a supported Winbond W25Q64 or W25Q128 is detected.
  */
 W25Q128_Status_t W25Q128_Init(void)
 {
-    /* CS pin should already be initialized by MX_GPIO_Init() */
     CS_HIGH();
-
-    /* Delay after power-up */
     HAL_Delay(10);
-
-    /* Wake up from potential power-down state */
     W25Q128_WakeUp();
-
-    /* Additional delay after wake-up */
     HAL_Delay(50);
 
-    /* Try to read ID to verify communication */
     W25Q128_ID_t id;
     if (W25Q128_ReadID(&id) != W25Q128_OK) {
         return W25Q128_ERROR;
     }
 
-    /* Verify it's a Winbond W25Qxx (accept W25Q64 or W25Q128) */
     if (id.manufacturer_id != 0xEF || id.memory_type != 0x40) {
         return W25Q128_ERROR;
     }
 
-    /* Accept both W25Q64 (0x17 = 8MB) and W25Q128 (0x18 = 16MB) */
     if (id.capacity != 0x17 && id.capacity != 0x18) {
         return W25Q128_ERROR;
     }
@@ -53,7 +35,9 @@ W25Q128_Status_t W25Q128_Init(void)
 }
 
 /**
- * @brief Read JEDEC ID
+ * @brief Read the JEDEC ID from the flash device.
+ * @param id Pointer to structure to receive manufacturer ID, memory type, and capacity.
+ * @return W25Q128_OK on success, W25Q128_ERROR on SPI failure.
  */
 W25Q128_Status_t W25Q128_ReadID(W25Q128_ID_t *id)
 {
@@ -82,7 +66,11 @@ W25Q128_Status_t W25Q128_ReadID(W25Q128_ID_t *id)
 }
 
 /**
- * @brief Read data from flash
+ * @brief Read data from flash.
+ * @param addr Start address (0 to 0xFFFFFF).
+ * @param buffer Buffer to receive the read data.
+ * @param len Number of bytes to read.
+ * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
 W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
 {
@@ -92,12 +80,10 @@ W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
         return W25Q128_ERROR;
     }
 
-    /* Wait until flash is ready */
     if (W25Q128_WaitReady(W25Q128_TIMEOUT_MS) != W25Q128_OK) {
         return W25Q128_TIMEOUT;
     }
 
-    /* Prepare command: READ + 24-bit address */
     cmd[0] = W25Q128_CMD_READ_DATA;
     cmd[1] = (addr >> 16) & 0xFF;
     cmd[2] = (addr >> 8) & 0xFF;
@@ -121,7 +107,11 @@ W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
 }
 
 /**
- * @brief Write page (max 256 bytes)
+ * @brief Write up to one page (256 bytes) to flash.
+ * @param addr Destination address; the sector must be erased before writing.
+ * @param buffer Data to write.
+ * @param len Number of bytes to write (max 256).
+ * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
 W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
 {
@@ -131,17 +121,14 @@ W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_
         return W25Q128_ERROR;
     }
 
-    /* Wait until flash is ready */
     if (W25Q128_WaitReady(W25Q128_TIMEOUT_MS) != W25Q128_OK) {
         return W25Q128_TIMEOUT;
     }
 
-    /* Enable write */
     if (W25Q128_WriteEnable() != W25Q128_OK) {
         return W25Q128_ERROR;
     }
 
-    /* Prepare command: PAGE_PROGRAM + 24-bit address */
     cmd[0] = W25Q128_CMD_PAGE_PROGRAM;
     cmd[1] = (addr >> 16) & 0xFF;
     cmd[2] = (addr >> 8) & 0xFF;
@@ -161,7 +148,6 @@ W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_
 
     CS_HIGH();
 
-    /* Wait for write to complete */
     if (W25Q128_WaitReady(W25Q128_TIMEOUT_MS) != W25Q128_OK) {
         return W25Q128_TIMEOUT;
     }
@@ -170,7 +156,9 @@ W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_
 }
 
 /**
- * @brief Erase 4KB sector
+ * @brief Erase the 4KB sector containing addr.
+ * @param addr Any address within the target sector.
+ * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
 W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
 {
@@ -180,17 +168,14 @@ W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
         return W25Q128_ERROR;
     }
 
-    /* Wait until flash is ready */
     if (W25Q128_WaitReady(W25Q128_ERASE_TIMEOUT_MS) != W25Q128_OK) {
         return W25Q128_TIMEOUT;
     }
 
-    /* Enable write */
     if (W25Q128_WriteEnable() != W25Q128_OK) {
         return W25Q128_ERROR;
     }
 
-    /* Prepare command: SECTOR_ERASE + 24-bit address */
     cmd[0] = W25Q128_CMD_SECTOR_ERASE;
     cmd[1] = (addr >> 16) & 0xFF;
     cmd[2] = (addr >> 8) & 0xFF;
@@ -205,7 +190,6 @@ W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
 
     CS_HIGH();
 
-    /* Wait for erase to complete (can take up to 400ms) */
     if (W25Q128_WaitReady(W25Q128_ERASE_TIMEOUT_MS) != W25Q128_OK) {
         return W25Q128_TIMEOUT;
     }
@@ -214,7 +198,9 @@ W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
 }
 
 /**
- * @brief Erase 32KB block
+ * @brief Erase the 32KB block containing addr.
+ * @param addr Any address within the target block.
+ * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
 W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr)
 {
@@ -245,7 +231,9 @@ W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr)
 }
 
 /**
- * @brief Erase 64KB block
+ * @brief Erase the 64KB block containing addr.
+ * @param addr Any address within the target block.
+ * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
 W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr)
 {
@@ -276,7 +264,9 @@ W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr)
 }
 
 /**
- * @brief Erase entire chip
+ * @brief Erase the entire flash chip.
+ * @return W25Q128_OK on success, W25Q128_TIMEOUT if the operation exceeds 60 seconds.
+ * @warning This operation takes several seconds to complete.
  */
 W25Q128_Status_t W25Q128_EraseChip(void)
 {
@@ -294,12 +284,12 @@ W25Q128_Status_t W25Q128_EraseChip(void)
     HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, &cmd, 1, W25Q128_TIMEOUT_MS);
     CS_HIGH();
 
-    /* Chip erase can take many seconds - use long timeout */
     return W25Q128_WaitReady(60000);
 }
 
 /**
- * @brief Check if flash is busy
+ * @brief Check whether the flash is currently busy with an internal operation.
+ * @return true if busy, false if ready.
  */
 bool W25Q128_IsBusy(void)
 {
@@ -308,7 +298,9 @@ bool W25Q128_IsBusy(void)
 }
 
 /**
- * @brief Wait until flash is ready
+ * @brief Poll until the flash is ready or the timeout expires.
+ * @param timeout_ms Maximum time to wait in milliseconds.
+ * @return W25Q128_OK if ready before timeout, W25Q128_TIMEOUT otherwise.
  */
 W25Q128_Status_t W25Q128_WaitReady(uint32_t timeout_ms)
 {
@@ -324,7 +316,8 @@ W25Q128_Status_t W25Q128_WaitReady(uint32_t timeout_ms)
 }
 
 /**
- * @brief Power down
+ * @brief Put the flash into low-power power-down mode.
+ * @return W25Q128_OK always.
  */
 W25Q128_Status_t W25Q128_PowerDown(void)
 {
@@ -338,7 +331,8 @@ W25Q128_Status_t W25Q128_PowerDown(void)
 }
 
 /**
- * @brief Wake up from power down
+ * @brief Wake the flash from power-down mode.
+ * @return W25Q128_OK always.
  */
 W25Q128_Status_t W25Q128_WakeUp(void)
 {
@@ -348,41 +342,37 @@ W25Q128_Status_t W25Q128_WakeUp(void)
     HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, &cmd, 1, W25Q128_TIMEOUT_MS);
     CS_HIGH();
 
-    /* tRES1 = 3us typical */
     HAL_Delay(1);
 
     return W25Q128_OK;
 }
 
 /**
- * @brief Software reset
+ * @brief Issue a software reset to the flash device.
+ * @return W25Q128_OK always.
  */
 W25Q128_Status_t W25Q128_Reset(void)
 {
     uint8_t cmd;
 
-    /* Enable reset */
     cmd = W25Q128_CMD_ENABLE_RESET;
     CS_LOW();
     HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, &cmd, 1, W25Q128_TIMEOUT_MS);
     CS_HIGH();
 
-    /* Reset device */
     cmd = W25Q128_CMD_RESET_DEVICE;
     CS_LOW();
     HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, &cmd, 1, W25Q128_TIMEOUT_MS);
     CS_HIGH();
 
-    /* tRST = 30us typical */
     HAL_Delay(1);
 
     return W25Q128_OK;
 }
 
-/* Private Functions */
-
 /**
- * @brief Enable write operations
+ * @brief Send the Write Enable command to the flash.
+ * @return W25Q128_OK on success, W25Q128_ERROR on SPI failure.
  */
 static W25Q128_Status_t W25Q128_WriteEnable(void)
 {
@@ -399,11 +389,8 @@ static W25Q128_Status_t W25Q128_WriteEnable(void)
 }
 
 /**
- * @brief Disable write operations
- */
-
-/**
- * @brief Read status register 1
+ * @brief Read Status Register 1 from the flash.
+ * @return Raw byte value of Status Register 1.
  */
 static uint8_t W25Q128_ReadStatusReg1(void)
 {
