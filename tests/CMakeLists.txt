@@ -56,7 +56,23 @@ endfunction()
 # Tests
 # ==============================================================================
 
+set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 add_cpputest(
     NAME test_simple
     SOURCES test_simple.cpp
 )
+
+add_cpputest(
+    NAME test_image_transfer
+    SOURCES
+        test_image_transfer.cpp
+        mocks/mock_support.c
+    INCLUDES
+        ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+        ${PROJECT_ROOT}/Core/Inc
+        ${PROJECT_ROOT}/Core/Src
+)
+
+# Suppress %lu warnings on 64-bit host (uint32_t is unsigned int, not unsigned long)
+target_compile_options(test_image_transfer PRIVATE -Wno-format)

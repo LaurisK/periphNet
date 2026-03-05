@@ -20,7 +20,7 @@
 #include "w25q128.h"
 #include "bl_app_contract.h"
 #include "update_manager.h"
-#include "firmware_update_http.h"  /* Firmware upload/download */
+#include "image_transfer.h"  /* Image upload/download */
 #include "FreeRTOS.h"  /* For pvPortMalloc/vPortFree */
 
 /* External network interface (defined in lwip.c) */
@@ -62,7 +62,7 @@ static void http_err_callback(void *arg, err_t err)
     (void)err;
     /* If an upload session was active, free it (pcb already freed by lwIP) */
     if (arg != NULL) {
-        firmware_upload_abort_session_ptr(arg);
+        image_upload_abort_session_ptr(arg);
     }
 }
 
@@ -84,7 +84,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     /* Client closed connection */
     if (p == NULL) {
         if (arg != NULL) {
-            firmware_upload_abort_session(pcb);
+            image_upload_abort_session(pcb);
         }
         tcp_close(pcb);
         return ERR_OK;
@@ -96,7 +96,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
      * arg is set to the upload session via tcp_arg() when upload starts.
      * These packets contain raw firmware data, not HTTP headers. */
     if (arg != NULL) {
-        err_t result = firmware_upload_handler(pcb, p);
+        err_t result = image_upload_handler(pcb, p);
         pbuf_free(p);
         return result;
     }
@@ -104,7 +104,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     /* PRIORITY 2: New upload request - must check BEFORE the size guard
      * because the first TCP segment includes headers + body and exceeds 512B. */
     if (p->len >= 25 && strncmp(request, "POST /api/firmware/upload", 25) == 0) {
-        err_t result = firmware_upload_handler(pcb, p);
+        err_t result = image_upload_handler(pcb, p);
         pbuf_free(p);
         return result;
     }
@@ -112,7 +112,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     /* PRIORITY 3: Download request - handler manages connection lifecycle
      * via tcp_sent callback, so caller must NOT call tcp_close. */
     if (p->len >= 26 && strncmp(request, "GET /api/firmware/download", 26) == 0) {
-        err_t result = firmware_download_handler(pcb);
+        err_t result = image_download_handler(pcb);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
         return result;
@@ -120,7 +120,7 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
 
     /* Status request */
     if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
-        err_t result = firmware_status_handler(pcb);
+        err_t result = image_status_handler(pcb);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
         tcp_close(pcb);
@@ -296,7 +296,7 @@ void http_server_init(void)
     struct tcp_pcb *pcb;
 
     /* Initialize firmware update module */
-    firmware_update_http_init();
+    image_transfer_init();
 
     /* Create new TCP PCB */
     pcb = tcp_new();

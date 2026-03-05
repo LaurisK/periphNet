@@ -1,11 +1,11 @@
 /**
  ******************************************************************************
- * @file    firmware_update_http.c
- * @brief   HTTP-based firmware update implementation
+ * @file    image_transfer.c
+ * @brief   HTTP-based image transfer implementation
  ******************************************************************************
  */
 
-#include "firmware_update_http.h"
+#include "image_transfer.h"
 #include "w25q128.h"
 #include "bl_app_contract.h"
 #include "lwip/tcp.h"
@@ -14,18 +14,18 @@
 #include <stdio.h>
 
 /* External flash firmware update image location */
-#define FW_UPDATE_FLASH_ADDR    EXT_FLASH_FWU_IMG_ADDR  /* 0x00001000 */
-#define FW_MAX_SIZE             (480 * 1024)            /* 480KB max */
+#define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR  /* 0x00001000 */
+#define IMG_MAX_SIZE            (480 * 1024)             /* 480KB max */
 
 /* Download chunk size - fits in lwIP send buffer */
 #define DOWNLOAD_CHUNK_SIZE     512
 
 /* Upload state tracking */
-static firmware_state_t fw_state = {
-    .status = FW_STATUS_IDLE,
+static image_state_t fw_state = {
+    .status = IMG_STATUS_IDLE,
     .bytes_transferred = 0,
     .total_bytes = 0,
-    .flash_address = FW_UPDATE_FLASH_ADDR,
+    .flash_address = IMG_UPDATE_FLASH_ADDR,
     .crc32 = 0,
     .error_message = {0}
 };
@@ -53,14 +53,14 @@ typedef struct {
 static download_ctx_t dl_ctx;
 
 /**
- * @brief  Initialize firmware update HTTP module
+ * @brief  Initialize image transfer module
  */
-void firmware_update_http_init(void)
+void image_transfer_init(void)
 {
-    fw_state.status = FW_STATUS_IDLE;
+    fw_state.status = IMG_STATUS_IDLE;
     fw_state.bytes_transferred = 0;
     fw_state.total_bytes = 0;
-    fw_state.flash_address = FW_UPDATE_FLASH_ADDR;
+    fw_state.flash_address = IMG_UPDATE_FLASH_ADDR;
     fw_state.crc32 = 0;
     memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
 
@@ -69,9 +69,9 @@ void firmware_update_http_init(void)
 }
 
 /**
- * @brief  Get current firmware update status
+ * @brief  Get current image transfer status
  */
-const firmware_state_t* firmware_update_get_status(void)
+const image_state_t* image_transfer_get_status(void)
 {
     return &fw_state;
 }
@@ -79,7 +79,7 @@ const firmware_state_t* firmware_update_get_status(void)
 /**
  * @brief  Returns 1 if an upload session is active on this pcb
  */
-int firmware_upload_has_active_session(struct tcp_pcb *pcb)
+int image_upload_has_active_session(struct tcp_pcb *pcb)
 {
     return (active_upload != NULL && active_upload->pcb == pcb) ? 1 : 0;
 }
@@ -87,12 +87,12 @@ int firmware_upload_has_active_session(struct tcp_pcb *pcb)
 /**
  * @brief  Abort upload session by pcb (call when pcb is still valid)
  */
-void firmware_upload_abort_session(struct tcp_pcb *pcb)
+void image_upload_abort_session(struct tcp_pcb *pcb)
 {
     if (active_upload != NULL && active_upload->pcb == pcb) {
         vPortFree(active_upload);
         active_upload = NULL;
-        fw_state.status = FW_STATUS_ERROR;
+        fw_state.status = IMG_STATUS_ERROR;
         strcpy(fw_state.error_message, "Connection aborted");
     }
 }
@@ -101,12 +101,12 @@ void firmware_upload_abort_session(struct tcp_pcb *pcb)
  * @brief  Abort upload session by session pointer (call from err callback
  *         where pcb is already freed but arg still holds the session)
  */
-void firmware_upload_abort_session_ptr(void *session_ptr)
+void image_upload_abort_session_ptr(void *session_ptr)
 {
     if (active_upload != NULL && active_upload == (upload_session_t *)session_ptr) {
         vPortFree(active_upload);
         active_upload = NULL;
-        fw_state.status = FW_STATUS_ERROR;
+        fw_state.status = IMG_STATUS_ERROR;
         strcpy(fw_state.error_message, "Connection aborted");
     }
 }
@@ -203,7 +203,7 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
         if (session->buffer_pos >= sizeof(session->buffer)) {
             if (flush_upload_buffer(session) != W25Q128_OK) {
                 strcpy(fw_state.error_message, "Flash write error");
-                fw_state.status = FW_STATUS_ERROR;
+                fw_state.status = IMG_STATUS_ERROR;
                 return ERR_ABRT;
             }
         }
@@ -214,14 +214,14 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
 }
 
 /**
- * @brief  Handle firmware upload (POST /api/firmware/upload)
+ * @brief  Handle image upload (POST /api/firmware/upload)
  *
  * Called for both the first packet (session==NULL) and all subsequent
  * data packets (session attached to pcb via tcp_arg).
  * Caller must call pbuf_free(p) after this returns.
  * This function calls tcp_recved() internally on all paths.
  */
-err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
+err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 {
     upload_session_t *session = active_upload;
     char *data = (char *)p->payload;
@@ -232,7 +232,7 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         session = (upload_session_t *)pvPortMalloc(sizeof(upload_session_t));
         if (session == NULL) {
             strcpy(fw_state.error_message, "Out of memory");
-            fw_state.status = FW_STATUS_ERROR;
+            fw_state.status = IMG_STATUS_ERROR;
             tcp_recved(pcb, p->tot_len);
             tcp_close(pcb);
             return ERR_MEM;
@@ -240,13 +240,13 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 
         memset(session, 0, sizeof(upload_session_t));
         session->pcb = pcb;
-        session->flash_write_addr = FW_UPDATE_FLASH_ADDR;
+        session->flash_write_addr = IMG_UPDATE_FLASH_ADDR;
 
         session->content_length = parse_content_length(data, data_len);
-        if (session->content_length == 0 || session->content_length > FW_MAX_SIZE) {
+        if (session->content_length == 0 || session->content_length > IMG_MAX_SIZE) {
             vPortFree(session);
             strcpy(fw_state.error_message, "Invalid content length");
-            fw_state.status = FW_STATUS_ERROR;
+            fw_state.status = IMG_STATUS_ERROR;
 
             const char *err_resp =
                 "HTTP/1.1 400 Bad Request\r\n"
@@ -262,10 +262,10 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         /* Erase flash sectors for the incoming firmware */
         uint32_t sectors_needed = (session->content_length + 4095) / 4096;
         for (uint32_t i = 0; i < sectors_needed; i++) {
-            if (W25Q128_EraseSector(FW_UPDATE_FLASH_ADDR + (i * 4096)) != W25Q128_OK) {
+            if (W25Q128_EraseSector(IMG_UPDATE_FLASH_ADDR + (i * 4096)) != W25Q128_OK) {
                 vPortFree(session);
                 strcpy(fw_state.error_message, "Flash erase failed");
-                fw_state.status = FW_STATUS_ERROR;
+                fw_state.status = IMG_STATUS_ERROR;
 
                 const char *err_resp =
                     "HTTP/1.1 500 Internal Server Error\r\n"
@@ -279,10 +279,10 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             }
         }
 
-        fw_state.status = FW_STATUS_UPLOADING;
+        fw_state.status = IMG_STATUS_UPLOADING;
         fw_state.bytes_transferred = 0;
         fw_state.total_bytes = session->content_length;
-        fw_state.flash_address = FW_UPDATE_FLASH_ADDR;
+        fw_state.flash_address = IMG_UPDATE_FLASH_ADDR;
 
         active_upload = session;
 
@@ -326,7 +326,7 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
     if (session->bytes_received >= session->content_length) {
         if (flush_upload_buffer(session) != W25Q128_OK) {
             strcpy(fw_state.error_message, "Final flash write failed");
-            fw_state.status = FW_STATUS_ERROR;
+            fw_state.status = IMG_STATUS_ERROR;
 
             tcp_arg(pcb, NULL);
             vPortFree(session);
@@ -343,7 +343,7 @@ err_t firmware_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_ABRT;
         }
 
-        fw_state.status = FW_STATUS_UPLOAD_COMPLETE;
+        fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
         fw_state.bytes_transferred = session->bytes_received;
 
         /* Detach session from pcb before freeing */
@@ -383,7 +383,7 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
     if (dl_ctx.pcb != pcb) return ERR_OK;  /* Stale, ignore */
 
     if (dl_ctx.bytes_sent >= dl_ctx.total_bytes) {
-        fw_state.status = FW_STATUS_DOWNLOAD_READY;
+        fw_state.status = IMG_STATUS_DOWNLOAD_READY;
         dl_ctx.pcb = NULL;
         tcp_close(pcb);
         return ERR_OK;
@@ -400,9 +400,9 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
     }
 
     uint8_t read_buf[DOWNLOAD_CHUNK_SIZE];
-    if (W25Q128_Read(FW_UPDATE_FLASH_ADDR + dl_ctx.bytes_sent, read_buf, chunk) != W25Q128_OK) {
+    if (W25Q128_Read(IMG_UPDATE_FLASH_ADDR + dl_ctx.bytes_sent, read_buf, chunk) != W25Q128_OK) {
         strcpy(fw_state.error_message, "Flash read error");
-        fw_state.status = FW_STATUS_ERROR;
+        fw_state.status = IMG_STATUS_ERROR;
         dl_ctx.pcb = NULL;
         tcp_abort(pcb);
         return ERR_ABRT;
@@ -414,7 +414,7 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
         if (err == ERR_MEM) return ERR_OK;
 
         strcpy(fw_state.error_message, "TCP write error");
-        fw_state.status = FW_STATUS_ERROR;
+        fw_state.status = IMG_STATUS_ERROR;
         dl_ctx.pcb = NULL;
         tcp_abort(pcb);
         return ERR_ABRT;
@@ -430,7 +430,7 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
 /**
  * @brief  tcp_sent callback for download - sends next chunk when buffer drains
  */
-static err_t firmware_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
+static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
     (void)arg;
     (void)len;
@@ -438,16 +438,16 @@ static err_t firmware_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 }
 
 /**
- * @brief  Handle firmware download (GET /api/firmware/download)
+ * @brief  Handle image download (GET /api/firmware/download)
  *
  * Sets up tcp_sent callback for flow-controlled streaming.
  * The connection is closed by send_download_chunk when all data is sent.
  * Caller must NOT call tcp_close after this returns.
  */
-err_t firmware_download_handler(struct tcp_pcb *pcb)
+err_t image_download_handler(struct tcp_pcb *pcb)
 {
-    if (fw_state.status != FW_STATUS_UPLOAD_COMPLETE &&
-        fw_state.status != FW_STATUS_DOWNLOAD_READY) {
+    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
+        fw_state.status != IMG_STATUS_DOWNLOAD_READY) {
         const char *response =
             "HTTP/1.1 404 Not Found\r\n"
             "Content-Type: text/plain\r\nConnection: close\r\n\r\n"
@@ -463,11 +463,11 @@ err_t firmware_download_handler(struct tcp_pcb *pcb)
     dl_ctx.bytes_sent = 0;
     dl_ctx.total_bytes = fw_state.total_bytes;
 
-    fw_state.status = FW_STATUS_DOWNLOADING;
+    fw_state.status = IMG_STATUS_DOWNLOADING;
     fw_state.bytes_transferred = 0;
 
     /* Register sent callback for flow control */
-    tcp_sent(pcb, firmware_download_sent);
+    tcp_sent(pcb, image_download_sent);
 
     /* Send HTTP headers */
     char headers[256];
@@ -483,7 +483,7 @@ err_t firmware_download_handler(struct tcp_pcb *pcb)
     err_t err = tcp_write(pcb, headers, header_len, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK) {
         dl_ctx.pcb = NULL;
-        fw_state.status = FW_STATUS_ERROR;
+        fw_state.status = IMG_STATUS_ERROR;
         strcpy(fw_state.error_message, "Header write error");
         tcp_abort(pcb);
         return ERR_ABRT;
@@ -494,20 +494,20 @@ err_t firmware_download_handler(struct tcp_pcb *pcb)
 }
 
 /**
- * @brief  Handle firmware status query (GET /api/firmware/status)
+ * @brief  Handle image status query (GET /api/firmware/status)
  */
-err_t firmware_status_handler(struct tcp_pcb *pcb)
+err_t image_status_handler(struct tcp_pcb *pcb)
 {
     char response[512];
     const char *status_str;
 
     switch (fw_state.status) {
-        case FW_STATUS_IDLE:            status_str = "idle"; break;
-        case FW_STATUS_UPLOADING:       status_str = "uploading"; break;
-        case FW_STATUS_UPLOAD_COMPLETE: status_str = "upload_complete"; break;
-        case FW_STATUS_DOWNLOAD_READY:  status_str = "download_ready"; break;
-        case FW_STATUS_DOWNLOADING:     status_str = "downloading"; break;
-        case FW_STATUS_ERROR:           status_str = "error"; break;
+        case IMG_STATUS_IDLE:            status_str = "idle"; break;
+        case IMG_STATUS_UPLOADING:       status_str = "uploading"; break;
+        case IMG_STATUS_UPLOAD_COMPLETE: status_str = "upload_complete"; break;
+        case IMG_STATUS_DOWNLOAD_READY:  status_str = "download_ready"; break;
+        case IMG_STATUS_DOWNLOADING:     status_str = "downloading"; break;
+        case IMG_STATUS_ERROR:           status_str = "error"; break;
         default:                        status_str = "unknown"; break;
     }
 
