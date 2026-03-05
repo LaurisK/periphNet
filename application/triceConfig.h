@@ -27,6 +27,11 @@
 extern "C" {
 #endif
 
+// Define __weak attribute for ARM GCC (used by triceUart.c weak functions)
+#ifndef __weak
+#define __weak __attribute__((weak))
+#endif
+
 // ===========================================================================
 // Buffer Configuration
 // ===========================================================================
@@ -86,16 +91,20 @@ extern "C" {
 // Feature Configuration
 // ===========================================================================
 
-//! We use custom TCP output via TriceNonBlockingDeferredWrite8()
-//! Enable AUXILIARY8 output channel
-#define TRICE_DEFERRED_AUXILIARY8 1
+//! Use UART A for Trice output via DMA (USART3)
+//! Functions: TriceNonBlockingWriteUartA(), TriceOutDepthUartA()
+//! Implemented in Core/Src/usart.c
+#define TRICE_UARTA USART3
+#define TRICE_DEFERRED_UARTA 1
+
+//! Disable TCP output (was AUXILIARY8)
+#define TRICE_DEFERRED_AUXILIARY8 0
 
 //! Disable features not needed
 #define TRICE_DEFERRED_XTEA_ENCRYPT 0
 #define TRICE_DIRECT_XTEA_ENCRYPT 0
 #define TRICE_CGO 0
 #define TRICE_SEGGER_RTT 0
-#define TRICE_DEFERRED_UARTA 0
 #define TRICE_DEFERRED_UARTB 0
 
 // ===========================================================================

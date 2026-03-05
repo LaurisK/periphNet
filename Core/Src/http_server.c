@@ -59,9 +59,11 @@ static const char http_404_header[] =
  */
 static void http_err_callback(void *arg, err_t err)
 {
-    /* Connection aborted - PCB already freed by lwIP, nothing to do */
-    (void)arg;
     (void)err;
+    /* If an upload session was active, free it (pcb already freed by lwIP) */
+    if (arg != NULL) {
+        firmware_upload_abort_session_ptr(arg);
+    }
 }
 
 /**
@@ -75,29 +77,67 @@ static void http_err_callback(void *arg, err_t err)
 static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
     char *request;
-    char *response_buf;  /* Dynamically allocated response buffer */
+    char *response_buf;
     int html_len;
     err_t ret_err;
 
     /* Client closed connection */
     if (p == NULL) {
+        if (arg != NULL) {
+            firmware_upload_abort_session(pcb);
+        }
         tcp_close(pcb);
         return ERR_OK;
     }
 
-    /* Allocate response buffer from FreeRTOS heap */
+    request = (char *)p->payload;
+
+    /* PRIORITY 1: Ongoing upload - route subsequent binary data packets.
+     * arg is set to the upload session via tcp_arg() when upload starts.
+     * These packets contain raw firmware data, not HTTP headers. */
+    if (arg != NULL) {
+        err_t result = firmware_upload_handler(pcb, p);
+        pbuf_free(p);
+        return result;
+    }
+
+    /* PRIORITY 2: New upload request - must check BEFORE the size guard
+     * because the first TCP segment includes headers + body and exceeds 512B. */
+    if (p->len >= 25 && strncmp(request, "POST /api/firmware/upload", 25) == 0) {
+        err_t result = firmware_upload_handler(pcb, p);
+        pbuf_free(p);
+        return result;
+    }
+
+    /* PRIORITY 3: Download request - handler manages connection lifecycle
+     * via tcp_sent callback, so caller must NOT call tcp_close. */
+    if (p->len >= 26 && strncmp(request, "GET /api/firmware/download", 26) == 0) {
+        err_t result = firmware_download_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        return result;
+    }
+
+    /* Status request */
+    if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
+        err_t result = firmware_status_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return result;
+    }
+
+    /* For remaining routes, allocate response buffer */
     response_buf = (char *)pvPortMalloc(2048);
     if (response_buf == NULL) {
-        /* Out of memory - close connection */
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
         tcp_close(pcb);
         return ERR_MEM;
     }
 
-    /* Get request data and check size */
-    request = (char *)p->payload;
-    if (p->len > 512) {  /* Reject oversized requests */
+    /* Reject oversized non-API requests */
+    if (p->len > 512) {
         vPortFree(response_buf);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
@@ -105,34 +145,8 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
         return ERR_OK;
     }
 
-    /* Route to firmware upload handler */
-    if (strncmp(request, "POST /api/firmware/upload", 26) == 0) {
-        err_t result = firmware_upload_handler(pcb, p);
-        /* Upload handler manages pbuf lifecycle */
-        vPortFree(response_buf);
-        pbuf_free(p);  /* Free pbuf after handler processes it */
-        return result;
-    }
-    /* Route to firmware download handler */
-    else if (strncmp(request, "GET /api/firmware/download", 27) == 0) {
-        err_t result = firmware_download_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        vPortFree(response_buf);
-        tcp_close(pcb);
-        return result;
-    }
-    /* Route to firmware status handler */
-    else if (strncmp(request, "GET /api/firmware/status", 24) == 0) {
-        err_t result = firmware_status_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        vPortFree(response_buf);
-        tcp_close(pcb);
-        return result;
-    }
     /* Simple parsing - check if it's a GET request for root */
-    else if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
+    if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
         /* Build HTML with flash test result */
         const char *status_class = flash_test_ok ? "pass" : "fail";
         const char *status_text = flash_test_ok ? "PASS" : "FAIL";

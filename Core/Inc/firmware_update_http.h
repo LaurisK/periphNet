@@ -46,6 +46,22 @@ typedef struct {
 void firmware_update_http_init(void);
 
 /**
+ * @brief  Returns 1 if an upload session is active on this pcb
+ */
+int firmware_upload_has_active_session(struct tcp_pcb *pcb);
+
+/**
+ * @brief  Abort upload session by pcb (call when pcb is still valid)
+ */
+void firmware_upload_abort_session(struct tcp_pcb *pcb);
+
+/**
+ * @brief  Abort upload session by session pointer from tcp_arg
+ *         (call from err callback where pcb is already freed)
+ */
+void firmware_upload_abort_session_ptr(void *session_ptr);
+
+/**
  * @brief  Get current firmware update status
  * @return Pointer to current state (read-only)
  */

@@ -1,0 +1,80 @@
+digraph PeriphNet {
+    rankdir=TB
+    node [shape=record fontname="Helvetica" fontsize=10]
+    edge [fontname="Helvetica" fontsize=9]
+
+    // ─── Bootloader binary ───────────────────────────────────────────────────
+    Bootloader [label="{Bootloader\n0x08000000 / 32KB|boot_main.c\lboot_api.c\l}" style=filled fillcolor="#cce5ff"]
+
+    sBootloaderApi [label="{sBootloaderApi\n\<\<at 0x08007F00\>\>|magic = \"BLAP\"\luint32_t version\l|+verify_image(addr,size,crc) int\l+calculate_crc32(addr,size,ext) uint32_t\l+get_bootloader_version(maj,min,pat)\l+verify_internal_app() int\l}" style=filled fillcolor="#cce5ff"]
+
+    // ─── Application binary ──────────────────────────────────────────────────
+    Application [label="{Application\n0x08008000 / 480KB|FreeRTOS tasks\llwIP stack\l}" style=filled fillcolor="#d4edda"]
+
+    sAppInfo [label="{sAppInfo\n\<\<at 0x08008200\>\>|magic = \"APPI\"\luint32_t version\luint32_t build_time\luint32_t image_size\luint32_t image_crc32\luint32_t features\luint32_t min_bl_version\l}" style=filled fillcolor="#d4edda"]
+
+    // ─── Shared contract ─────────────────────────────────────────────────────
+    sUpdateStatus [label="{sUpdateStatus\n\<\<ext flash 0x00000000\>\>|magic = \"FWUP\"\luint32_t update_requested\luint32_t image_size\luint32_t image_crc32\luint32_t image_offset\luint8_t  image_sha256[32]\luint32_t app_version\luint32_t header_crc32\l}" style=filled fillcolor="#fff3cd"]
+
+    // ─── Shared drivers (compiled into both) ─────────────────────────────────
+    W25Q128Driver [label="{W25Q128Driver\n\<\<Core/Inc/w25q128.h\>\>|SPI2, CS=PE3\lW25Q64/W25Q128 support\l|+Init() Status\l+ReadID(id) Status\l+Read(addr,buf,len) Status\l+WritePage(addr,buf,len) Status\l+EraseSector(addr) Status\l+EraseBlock32K(addr) Status\l+EraseBlock64K(addr) Status\l+EraseChip() Status\l+IsBusy() bool\l+WaitReady(ms) Status\l}" style=filled fillcolor="#e2e3e5"]
+
+    UpdateManager [label="{UpdateManager\n\<\<Core/Inc/update_manager.h\>\>||+update_status_read(s) int\l+update_status_write(s) int\l+update_status_clear() int\l+update_status_request(sz,crc,v) int\l+update_status_is_pending() int\l}" style=filled fillcolor="#e2e3e5"]
+
+    // ─── Application modules ─────────────────────────────────────────────────
+    HttpServer [label="{HttpServer\n\<\<Core/Inc/http_server.h\>\>|PORT = 80\l|+http_server_init()\l+http_server_test_flash()\l}" style=filled fillcolor="#d4edda"]
+
+    firmware_state_t [label="{firmware_state_t||firmware_status_t status\luint32_t bytes_transferred\luint32_t total_bytes\luint32_t flash_address\luint32_t crc32\lchar error_message[64]\l}" style=filled fillcolor="#d4edda"]
+
+    FirmwareUpdateHttp [label="{FirmwareUpdateHttp\n\<\<Core/Inc/firmware_update_http.h\>\>|POST /api/firmware/upload\lGET  /api/firmware/status\lPOST /api/firmware/install\lDEL  /api/firmware/staged\l|+firmware_update_http_init()\l+firmware_upload_handler(pcb,p) err_t\l+firmware_download_handler(pcb) err_t\l+firmware_status_handler(pcb) err_t\l+firmware_update_get_status() state*\l}" style=filled fillcolor="#d4edda"]
+
+    TraceServer [label="{TraceServer\n\<\<application/trace.h\>\>|PORT = 61486 / max 2 clients\l|+trace_init()\l+trace_has_new_data() uint8_t\l+trace_get_last_buffer_length() size_t\l+trace_clear_data_flag()\l}" style=filled fillcolor="#d4edda"]
+
+    // ─── Edges: Bootloader ───────────────────────────────────────────────────
+    Bootloader -> sBootloaderApi  [label="exposes at\n0x08007F00" style=bold color="#0066cc"]
+    Bootloader -> sUpdateStatus   [label="reads" color="#0066cc"]
+    Bootloader -> sAppInfo        [label="validates" color="#0066cc"]
+    Bootloader -> W25Q128Driver   [label="uses" color="#0066cc"]
+    Bootloader -> UpdateManager   [label="uses" color="#0066cc"]
+
+    // ─── Edges: Application ──────────────────────────────────────────────────
+    Application -> sAppInfo           [label="provides at\n0x08008200" style=bold color="#28a745"]
+    Application -> sBootloaderApi     [label="calls via\nfunc ptr" style=dashed color="#28a745"]
+    Application -> UpdateManager      [label="arms update" color="#28a745"]
+    Application -> HttpServer         [label="hosts" color="#28a745"]
+    Application -> FirmwareUpdateHttp [label="routes /api/firmware/*" color="#28a745"]
+    Application -> TraceServer        [label="runs task" color="#28a745"]
+
+    // ─── Edges: FirmwareUpdateHttp ───────────────────────────────────────────
+    FirmwareUpdateHttp -> firmware_state_t [label="owns"]
+    FirmwareUpdateHttp -> W25Q128Driver    [label="streams binary"]
+    FirmwareUpdateHttp -> sBootloaderApi  [label="verify_image()\nbefore staging" style=dashed]
+    FirmwareUpdateHttp -> UpdateManager   [label="set pending"]
+
+    // ─── Edges: UpdateManager ────────────────────────────────────────────────
+    UpdateManager -> sUpdateStatus  [label="manages"]
+    UpdateManager -> W25Q128Driver  [label="r/w"]
+
+    // ─── Contract cross-link ─────────────────────────────────────────────────
+    sBootloaderApi -> sAppInfo [label="verify_internal_app\nreads header" style=dashed color="#6c757d"]
+    sAppInfo -> sBootloaderApi [label="min_bl_version\nconstraint" style=dashed color="#6c757d"]
+
+    // ─── Subgraphs for grouping ──────────────────────────────────────────────
+    subgraph cluster_bl {
+        label="Bootloader binary (32KB)"
+        style=dashed color="#0066cc"
+        Bootloader; sBootloaderApi
+    }
+
+    subgraph cluster_app {
+        label="Application binary (480KB)"
+        style=dashed color="#28a745"
+        Application; sAppInfo; HttpServer; FirmwareUpdateHttp; firmware_state_t; TraceServer
+    }
+
+    subgraph cluster_shared {
+        label="Shared (compiled into both)"
+        style=dashed color="#6c757d"
+        W25Q128Driver; UpdateManager; sUpdateStatus
+    }
+}

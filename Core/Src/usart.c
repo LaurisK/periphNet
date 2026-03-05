@@ -100,7 +100,7 @@ void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-  huart3.Init.BaudRate = 920800;
+  huart3.Init.BaudRate = 921600;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_NONE;
@@ -292,5 +292,33 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+ * @brief  Trice UART DMA output functions (USART3)
+ * @note   Similar to Lusety project implementation
+ *         Uses DMA for non-blocking transmission
+ */
+#include "trice.h"
+
+/**
+ * @brief  Non-blocking write for Trice output via UART DMA
+ * @param  buf: Pointer to data buffer
+ * @param  nByte: Number of bytes to transmit
+ * @note   Aborts current transmission and starts new DMA transfer
+ */
+void TriceNonBlockingWriteUartA(const void* buf, size_t nByte)
+{
+    HAL_UART_Abort(&huart3);
+    HAL_UART_Transmit_DMA(&huart3, (uint8_t*)buf, nByte);
+}
+
+/**
+ * @brief  Get number of bytes remaining in Trice UART transmission
+ * @retval Number of bytes not yet transmitted (0 = done)
+ */
+unsigned TriceOutDepthUartA(void)
+{
+    return huart3.TxXferCount;
+}
 
 /* USER CODE END 1 */
