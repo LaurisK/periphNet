@@ -57,6 +57,11 @@ static download_ctx_t dl_ctx;
  */
 void image_transfer_init(void)
 {
+    if (active_upload != NULL) {
+        vPortFree(active_upload);
+        active_upload = NULL;
+    }
+
     fw_state.status = IMG_STATUS_IDLE;
     fw_state.bytes_transferred = 0;
     fw_state.total_bytes = 0;
@@ -64,7 +69,6 @@ void image_transfer_init(void)
     fw_state.crc32 = 0;
     memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
 
-    active_upload = NULL;
     dl_ctx.pcb = NULL;
 }
 
@@ -119,7 +123,10 @@ static uint32_t parse_content_length(const char *header, uint16_t header_len)
     const char *pattern = "Content-Length:";
     const uint16_t pattern_len = 15;
 
-    for (uint16_t i = 0; i < header_len - pattern_len; i++) {
+    if (header_len < pattern_len)
+        return 0;
+
+    for (uint16_t i = 0; i <= header_len - pattern_len; i++) {
         uint8_t match = 1;
         for (uint16_t j = 0; j < pattern_len; j++) {
             char c1 = header[i + j];
@@ -224,6 +231,8 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
 err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 {
     upload_session_t *session = active_upload;
+
+    /* First pbuf used for header parsing */
     char *data = (char *)p->payload;
     uint16_t data_len = p->len;
 
@@ -290,36 +299,41 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         tcp_arg(pcb, session);
     }
 
-    /* Find body start (skip HTTP headers in first packet) */
-    const char *body_start = data;
-    uint16_t body_len = data_len;
+    /* Walk entire pbuf chain */
+    for (struct pbuf *q = p; q != NULL; q = q->next) {
+        char *seg_data = (char *)q->payload;
+        uint16_t seg_len = q->len;
 
-    if (!session->header_parsed) {
-        body_start = find_http_body(data, data_len);
-        if (body_start == NULL) {
-            /* Headers span multiple packets - wait for more data */
-            tcp_recved(pcb, p->tot_len);
-            return ERR_OK;
+        /* Find body start (skip HTTP headers) */
+        const char *body_start = seg_data;
+        uint16_t body_len = seg_len;
+
+        if (!session->header_parsed) {
+            body_start = find_http_body(seg_data, seg_len);
+            if (body_start == NULL) {
+                /* Headers not complete in this segment - continue to next */
+                continue;
+            }
+            body_len = seg_len - (uint16_t)(body_start - seg_data);
+            session->header_parsed = 1;
         }
-        body_len = data_len - (uint16_t)(body_start - data);
-        session->header_parsed = 1;
-    }
 
-    /* Process the firmware data */
-    if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
-        tcp_arg(pcb, NULL);
-        vPortFree(session);
-        active_upload = NULL;
+        /* Process the firmware data */
+        if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
+            tcp_arg(pcb, NULL);
+            vPortFree(session);
+            active_upload = NULL;
 
-        const char *err_resp =
-            "HTTP/1.1 500 Internal Server Error\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"error\":\"flash write error\"}\r\n";
-        tcp_recved(pcb, p->tot_len);
-        tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_ABRT;
+            const char *err_resp =
+                "HTTP/1.1 500 Internal Server Error\r\n"
+                "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+                "{\"error\":\"flash write error\"}\r\n";
+            tcp_recved(pcb, p->tot_len);
+            tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
+            tcp_output(pcb);
+            tcp_close(pcb);
+            return ERR_ABRT;
+        }
     }
 
     /* Check if upload complete */

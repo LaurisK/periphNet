@@ -390,18 +390,14 @@ TEST_GROUP(Upload_MultiPbuf) {
     }
 };
 
-TEST(Upload_MultiPbuf, ChainedPbufs_DataLoss)
+TEST(Upload_MultiPbuf, ChainedPbufs_AllDataProcessed)
 {
-    /*
-     * BUG DETECTOR: image_upload_handler only processes p->payload/p->len,
-     * ignoring p->next. When lwIP delivers chained pbufs, data from
-     * subsequent pbufs is silently dropped.
-     */
+    /* Verify handler walks entire pbuf chain */
     const uint32_t total_body = 200;
     uint8_t body1[100], body2[100];
     for (int i = 0; i < 100; i++) { body1[i] = (uint8_t)i; body2[i] = (uint8_t)(i + 100); }
 
-    /* Build first packet with headers + first 100 bytes body */
+    /* Build first pbuf with headers + first 100 bytes body */
     char buf[512];
     int total = build_upload_request(buf, sizeof(buf), total_body, body1, 100);
 
@@ -412,16 +408,16 @@ TEST(Upload_MultiPbuf, ChainedPbufs_DataLoss)
     pb1.next = &pb2;
     pb1.tot_len = pb1.len + pb2.len;
 
-    image_upload_handler(&test_pcb, &pb1);
+    err_t err = image_upload_handler(&test_pcb, &pb1);
+    CHECK_EQUAL(ERR_OK, err);
+    CHECK_EQUAL(total_body, fw_state.bytes_transferred);
+    CHECK_EQUAL(IMG_STATUS_UPLOAD_COMPLETE, fw_state.status);
 
-    /* If multi-pbuf is handled correctly, all 200 bytes should be in flash.
-     * BUG: only 100 bytes from first pbuf reach flash, second pbuf is lost. */
+    /* Verify all data reached flash */
     uint8_t expected[200];
     memcpy(expected, body1, 100);
     memcpy(expected + 100, body2, 100);
-
-    /* This check will FAIL if the multi-pbuf bug exists */
-    CHECK_EQUAL(total_body, fw_state.bytes_transferred);
+    MEMCMP_EQUAL(expected, &mock_flash[IMG_UPDATE_FLASH_ADDR], total_body);
 }
 
 /* ============================================================================
@@ -590,13 +586,9 @@ TEST(Upload_SessionManagement, HasActiveSession)
     CHECK_EQUAL(0, image_upload_has_active_session(&other_pcb));
 }
 
-TEST(Upload_SessionManagement, InitWhileActive_LeaksBug)
+TEST(Upload_SessionManagement, InitWhileActive_FreesSession)
 {
-    /*
-     * BUG DETECTOR: image_transfer_init() sets active_upload = NULL
-     * without freeing. If called during active upload → memory leak.
-     * CppUTest leak detector should catch this.
-     */
+    /* Verify image_transfer_init() frees active session (no leak) */
     char buf[512];
     uint8_t body[10] = {0};
     int total = build_upload_request(buf, sizeof(buf), 1000, body, 10);
@@ -604,15 +596,10 @@ TEST(Upload_SessionManagement, InitWhileActive_LeaksBug)
     image_upload_handler(&test_pcb, &pb);
 
     CHECK(active_upload != NULL);
-
-    /* Save pointer so we can free it to avoid failing on the leak in teardown.
-     * In production this IS a leak — the test documents the bug. */
-    void *leaked = active_upload;
     image_transfer_init();
     CHECK(active_upload == NULL);
-
-    /* Free to avoid CppUTest leak failure — comment out to see the bug */
-    free(leaked);
+    CHECK_EQUAL(IMG_STATUS_IDLE, fw_state.status);
+    /* CppUTest leak detector verifies no leak */
 }
 
 /* ============================================================================
