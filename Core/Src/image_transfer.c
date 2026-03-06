@@ -448,20 +448,31 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             session->header_parsed = 1;
         }
 
-        if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
-            tcp_arg(pcb, NULL);
-            vPortFree(session);
-            active_upload = NULL;
+        if (session->bytes_received < session->content_length) {
+            uint32_t remaining = session->content_length - session->bytes_received;
+            if (body_len > remaining) {
+                body_len = (uint16_t)remaining;
+            }
+        } else {
+            body_len = 0;
+        }
 
-            const char *err_resp =
-                "HTTP/1.1 500 Internal Server Error\r\n"
-                "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-                "{\"error\":\"flash write error\"}\r\n";
-            tcp_recved(pcb, p->tot_len);
-            tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
-            tcp_output(pcb);
-            tcp_close(pcb);
-            return ERR_ABRT;
+        if (body_len > 0) {
+            if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
+                tcp_arg(pcb, NULL);
+                vPortFree(session);
+                active_upload = NULL;
+
+                const char *err_resp =
+                    "HTTP/1.1 500 Internal Server Error\r\n"
+                    "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+                    "{\"error\":\"flash write error\"}\r\n";
+                tcp_recved(pcb, p->tot_len);
+                tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
+                tcp_output(pcb);
+                tcp_close(pcb);
+                return ERR_ABRT;
+            }
         }
     }
 
