@@ -21,7 +21,7 @@ static char init_info[64] = "Not tested";
 
 static char bl_api_test[128] = "Not tested";
 
-static const char http_200_header[] =
+__attribute__((unused)) static const char http_200_header[] =
     "HTTP/1.1 200 OK\r\n"
     "Content-Type: text/html; charset=utf-8\r\n"
     "Connection: close\r\n"
@@ -116,7 +116,6 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     }
 
     if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /index", 10) == 0) {
-        const char *status_class = flash_test_ok ? "pass" : "fail";
         const char *status_text = flash_test_ok ? "PASS" : "FAIL";
 
         html_len = snprintf(response_buf, 2048,
@@ -276,7 +275,6 @@ void http_server_test_flash(void)
     uint8_t uid_from_flash[12];
     uint8_t uid_current[12];
     HAL_StatusTypeDef spi_status;
-    W25Q128_Status_t w25_status;
 
     strcpy(init_info, "Testing...");
     strcpy(jedec_info, "Not tested");
@@ -450,8 +448,8 @@ void http_server_test_flash(void)
 
     if (bl_api->magic != BL_API_MAGIC) {
         snprintf(bl_api_test, sizeof(bl_api_test),
-                "FAIL - Wrong magic 0x%08lX (expected 0x%08lX)",
-                bl_api->magic, BL_API_MAGIC);
+                "FAIL - Wrong magic 0x%08X (expected 0x%08X)",
+                (unsigned int)bl_api->magic, (unsigned int)BL_API_MAGIC);
         strcpy(flash_test_result, "STEP 5 FAILED - BL API magic invalid");
         return;
     }

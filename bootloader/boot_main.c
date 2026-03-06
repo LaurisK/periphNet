@@ -5,6 +5,8 @@
 #include "update_manager.h"
 #include <stdbool.h>
 
+void SystemClock_Config(void);
+
 #define APPLICATION_ADDRESS     0x08008000
 #define BOOT_LED_PORT           GPIOA
 #define BOOT_LED_PIN            GPIO_PIN_6
@@ -116,7 +118,7 @@ static bool boot_test_external_flash(void)
  * @param status Pointer to the update status read from external flash.
  * @return true if basic field validation passes, false otherwise.
  */
-static bool boot_verify_firmware(const sUpdateStatus *status)
+__attribute__((unused)) static bool boot_verify_firmware(const sUpdateStatus *status)
 {
     if (status->magic != UPDATE_STATUS_MAGIC) {
         return false;
@@ -134,7 +136,7 @@ static bool boot_verify_firmware(const sUpdateStatus *status)
  * @param status Pointer to the update status describing the image location and size.
  * @return true always (installation not yet implemented).
  */
-static bool boot_install_firmware(const sUpdateStatus *status)
+__attribute__((unused)) static bool boot_install_firmware(const sUpdateStatus *status)
 {
     (void)status;
     return true;

@@ -206,6 +206,7 @@ set(BOOTLOADER_LINKER_FLAGS
     -Wl,-Map=bootloader.map,--cref \
     -Wl,--gc-sections \
     -Wl,--print-memory-usage \
+    -Wl,--no-warn-rwx-segments \
     --specs=nano.specs"
 )
 
@@ -274,6 +275,7 @@ set(APPLICATION_LINKER_FLAGS
     -Wl,-Map=application.map,--cref \
     -Wl,--gc-sections \
     -Wl,--print-memory-usage \
+    -Wl,--no-warn-rwx-segments \
     --specs=nano.specs"
 )
 
