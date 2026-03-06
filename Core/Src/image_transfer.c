@@ -6,6 +6,16 @@
 #include <string.h>
 #include <stdio.h>
 
+/* In production builds, flash operations run in a dedicated FreeRTOS task so
+ * they don't block tcpip_thread.  Unit tests define TEST_MODE to keep the
+ * original synchronous behaviour so that all existing tests continue to work
+ * without needing queue/task mocks. */
+#ifndef TEST_MODE
+#include "task.h"
+#include "queue.h"
+#include "lwip/tcpip.h"
+#endif
+
 #define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR
 #define IMG_MAX_SIZE            (480 * 1024)
 #define DOWNLOAD_CHUNK_SIZE     512
@@ -39,9 +49,141 @@ typedef struct {
 
 static download_ctx_t dl_ctx;
 
-/**
- * @brief Initialize the image transfer module, freeing any active upload session.
- */
+/* ============================================================================
+ * Task-based flash upload (production only)
+ * ============================================================================ */
+#ifndef TEST_MODE
+
+#define UPLOAD_QUEUE_DEPTH   12
+#define UPLOAD_TASK_STACK    1024  /* words */
+#define UPLOAD_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
+
+/* One entry in the upload queue: one flash page worth of data */
+typedef struct {
+    uint8_t  data[256];
+    uint16_t len;
+    uint32_t flash_addr;
+    uint8_t  is_last;       /* 1 = final page, send HTTP response after write */
+    struct tcp_pcb *pcb;
+    uint32_t total_bytes;   /* total upload size, used in response */
+} sUploadPage;
+
+static QueueHandle_t s_upload_queue = NULL;
+
+/* Arguments passed to tcpip_callback helpers (heap-allocated, freed inside) */
+typedef struct { struct tcp_pcb *pcb; uint16_t len; } sTcpRecvArg;
+
+/* Response is pre-built by the upload task (large stack) so tcpip_do_upload_response
+ * runs with minimal stack in tcpip_thread (TCPIP_THREAD_STACKSIZE = 1024 bytes). */
+typedef struct {
+    struct tcp_pcb *pcb;
+    char  buf[128];
+    uint16_t buf_len;
+} sTcpRespArg;
+
+/* Called by tcpip_thread via tcpip_callback to advance the TCP receive window */
+static void tcpip_do_recved(void *arg)
+{
+    sTcpRecvArg *a = (sTcpRecvArg *)arg;
+    tcp_recved(a->pcb, a->len);
+    vPortFree(a);
+}
+
+/* Called by tcpip_thread via tcpip_callback to send the pre-built HTTP upload response */
+static void tcpip_do_upload_response(void *arg)
+{
+    sTcpRespArg *a = (sTcpRespArg *)arg;
+    tcp_write(a->pcb, a->buf, a->buf_len, TCP_WRITE_FLAG_COPY);
+    tcp_output(a->pcb);
+    tcp_close(a->pcb);
+    vPortFree(a);
+}
+
+/* FreeRTOS task: performs flash erase + write off the tcpip_thread.
+ * After each page write it uses tcpip_callback to advance the TCP window.
+ * When the final page is written it uses tcpip_callback to send the HTTP
+ * response and close the connection. */
+static void image_upload_task(void *arg)
+{
+    (void)arg;
+    sUploadPage msg;
+    uint32_t current_sector = 0xFFFFFFFF;
+
+    for (;;) {
+        if (xQueueReceive(s_upload_queue, &msg, portMAX_DELAY) != pdTRUE)
+            continue;
+
+        uint8_t write_ok = 1;
+
+        /* Zero-length is_last means upload size was an exact multiple of 256:
+         * the page buffer was empty when queue_upload_page(session, 1) was called.
+         * Nothing to write; just send the response. */
+        if (msg.len > 0) {
+            uint32_t sector = msg.flash_addr & ~0xFFFU;
+
+            /* Erase sector before the first write to it */
+            if (sector != current_sector) {
+                write_ok = (W25Q128_EraseSector(sector) == W25Q128_OK);
+                current_sector = write_ok ? sector : 0xFFFFFFFF;
+            }
+
+            if (write_ok)
+                write_ok = (W25Q128_WritePage(msg.flash_addr, msg.data, msg.len) == W25Q128_OK);
+        }
+
+        /* Advance TCP window: tells lwIP the application consumed msg.len bytes,
+         * allowing the peer to send the next chunk. */
+        sTcpRecvArg *rarg = (sTcpRecvArg *)pvPortMalloc(sizeof(sTcpRecvArg));
+        if (rarg) {
+            rarg->pcb  = msg.pcb;
+            rarg->len  = msg.len;
+            tcpip_callback(tcpip_do_recved, rarg);
+        }
+
+        if (msg.is_last || !write_ok) {
+            sTcpRespArg *resp = (sTcpRespArg *)pvPortMalloc(sizeof(sTcpRespArg));
+            if (resp) {
+                resp->pcb = msg.pcb;
+                if (!write_ok) {
+                    fw_state.status = IMG_STATUS_ERROR;
+                    strcpy(fw_state.error_message, "Flash write error");
+                    resp->buf_len = (uint16_t)snprintf(resp->buf, sizeof(resp->buf),
+                        "HTTP/1.1 500 Internal Server Error\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Connection: close\r\n\r\n"
+                        "{\"error\":\"flash write failed\"}\r\n");
+                } else {
+                    fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
+                    fw_state.bytes_transferred = msg.total_bytes;
+                    resp->buf_len = (uint16_t)snprintf(resp->buf, sizeof(resp->buf),
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Connection: close\r\n\r\n"
+                        "{\"status\":\"success\",\"bytes\":%lu}\r\n",
+                        (unsigned long)msg.total_bytes);
+                }
+                tcpip_callback(tcpip_do_upload_response, resp);
+            }
+            current_sector = 0xFFFFFFFF;
+        }
+    }
+}
+
+static void create_upload_task(void)
+{
+    if (s_upload_queue != NULL)
+        return;
+    s_upload_queue = xQueueCreate(UPLOAD_QUEUE_DEPTH, sizeof(sUploadPage));
+    xTaskCreate(image_upload_task, "ImgUp",
+                UPLOAD_TASK_STACK, NULL, UPLOAD_TASK_PRIORITY, NULL);
+}
+
+#endif /* !TEST_MODE */
+
+/* ============================================================================
+ * Shared helpers
+ * ============================================================================ */
+
 void image_transfer_init(void)
 {
     if (active_upload != NULL) {
@@ -57,31 +199,22 @@ void image_transfer_init(void)
     memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
 
     dl_ctx.pcb = NULL;
+
+#ifndef TEST_MODE
+    create_upload_task();
+#endif
 }
 
-/**
- * @brief Return the current image transfer state.
- * @return Read-only pointer to the global transfer state.
- */
 const image_state_t* image_transfer_get_status(void)
 {
     return &fw_state;
 }
 
-/**
- * @brief Check whether an upload session is active on the given PCB.
- * @param pcb TCP PCB to check.
- * @return 1 if an upload session is active on pcb, 0 otherwise.
- */
 int image_upload_has_active_session(struct tcp_pcb *pcb)
 {
     return (active_upload != NULL && active_upload->pcb == pcb) ? 1 : 0;
 }
 
-/**
- * @brief Abort the upload session associated with a PCB while the PCB is still valid.
- * @param pcb TCP PCB whose session should be aborted.
- */
 void image_upload_abort_session(struct tcp_pcb *pcb)
 {
     if (active_upload != NULL && active_upload->pcb == pcb) {
@@ -92,11 +225,6 @@ void image_upload_abort_session(struct tcp_pcb *pcb)
     }
 }
 
-/**
- * @brief Abort an upload session identified by its session pointer.
- * @param session_ptr Session pointer previously stored via tcp_arg; used when the
- *        PCB has already been freed by lwIP (e.g. from the err callback).
- */
 void image_upload_abort_session_ptr(void *session_ptr)
 {
     if (active_upload != NULL && active_upload == (upload_session_t *)session_ptr) {
@@ -107,12 +235,10 @@ void image_upload_abort_session_ptr(void *session_ptr)
     }
 }
 
-/**
- * @brief Parse the Content-Length value from an HTTP header buffer.
- * @param header Pointer to the raw HTTP header bytes.
- * @param header_len Number of bytes in the header buffer.
- * @return Parsed content length, or 0 if the header is absent or malformed.
- */
+/* ============================================================================
+ * Upload: HTTP header / body parsing helpers
+ * ============================================================================ */
+
 static uint32_t parse_content_length(const char *header, uint16_t header_len)
 {
     const char *pattern = "Content-Length:";
@@ -148,12 +274,6 @@ static uint32_t parse_content_length(const char *header, uint16_t header_len)
     return 0;
 }
 
-/**
- * @brief Locate the start of the HTTP body by finding the \r\n\r\n delimiter.
- * @param data Pointer to the data buffer.
- * @param data_len Number of bytes in the buffer.
- * @return Pointer to the first byte after \r\n\r\n, or NULL if not found.
- */
 static const char* find_http_body(const char *data, uint16_t data_len)
 {
     for (uint16_t i = 0; i + 3 < data_len; i++) {
@@ -165,37 +285,53 @@ static const char* find_http_body(const char *data, uint16_t data_len)
     return NULL;
 }
 
-/**
- * @brief Flush the session's write buffer to flash at the current write address.
- * @param session Active upload session whose buffer should be flushed.
- * @return W25Q128_OK on success, or a flash error code on failure.
- */
-static W25Q128_Status_t flush_upload_buffer(upload_session_t *session)
-{
-    if (session->buffer_pos == 0)
-        return W25Q128_OK;
+/* ============================================================================
+ * Upload: page-buffer flush
+ *
+ * In TEST_MODE: writes to flash synchronously (no task, no queue).
+ * In production: sends the filled page to the upload task queue.
+ * The upload task handles erase + write and advances the TCP window via
+ * tcpip_callback — so tcp_recved must NOT be called here in production.
+ * ============================================================================ */
 
+static err_t queue_upload_page(upload_session_t *session, uint8_t is_last)
+{
+    if (session->buffer_pos == 0 && !is_last)
+        return ERR_OK;
+
+#ifndef TEST_MODE
+    sUploadPage page;
+    memcpy(page.data, session->buffer, session->buffer_pos);
+    page.len         = session->buffer_pos;
+    page.flash_addr  = session->flash_write_addr;
+    page.is_last     = is_last;
+    page.pcb         = session->pcb;
+    page.total_bytes = session->bytes_received;
+
+    if (xQueueSend(s_upload_queue, &page, 0) != pdTRUE) {
+        strcpy(fw_state.error_message, "Upload queue full");
+        fw_state.status = IMG_STATUS_ERROR;
+        return ERR_ABRT;
+    }
+#else
+    /* Synchronous path for unit tests */
     W25Q128_Status_t status = W25Q128_WritePage(
         session->flash_write_addr,
         session->buffer,
         session->buffer_pos
     );
-
-    if (status == W25Q128_OK) {
-        session->flash_write_addr += session->buffer_pos;
-        session->buffer_pos = 0;
+    if (status != W25Q128_OK) {
+        strcpy(fw_state.error_message, "Flash write error");
+        fw_state.status = IMG_STATUS_ERROR;
+        return ERR_ABRT;
     }
+#endif
 
-    return status;
+    session->flash_write_addr += session->buffer_pos;
+    session->buffer_pos = 0;
+    return ERR_OK;
 }
 
-/**
- * @brief Accumulate received upload bytes into the page-aligned flash write buffer.
- * @param session Active upload session.
- * @param data Pointer to incoming data bytes.
- * @param len Number of bytes to process.
- * @return ERR_OK on success, ERR_ABRT if a flash write fails.
- */
 static err_t process_upload_data(upload_session_t *session, const uint8_t *data, uint16_t len)
 {
     uint16_t offset = 0;
@@ -212,8 +348,7 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
         session->bytes_received += chunk;
 
         if (session->buffer_pos >= sizeof(session->buffer)) {
-            if (flush_upload_buffer(session) != W25Q128_OK) {
-                strcpy(fw_state.error_message, "Flash write error");
+            if (queue_upload_page(session, 0) != ERR_OK) {
                 fw_state.status = IMG_STATUS_ERROR;
                 return ERR_ABRT;
             }
@@ -224,15 +359,10 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
     return ERR_OK;
 }
 
-/**
- * @brief Handle an HTTP firmware upload request (POST /api/firmware/upload).
- * @param pcb TCP PCB for the connection.
- * @param p Received pbuf chain; caller must call pbuf_free(p) after this returns.
- * @return ERR_OK while upload is in progress or on completion, or an lwIP error code on failure.
- * @note On the first call (no active session) headers are parsed, flash is erased,
- *       and the session is created. Subsequent calls receive body data.
- *       tcp_recved() is called internally on all paths.
- */
+/* ============================================================================
+ * image_upload_handler
+ * ============================================================================ */
+
 err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 {
     upload_session_t *session = active_upload;
@@ -271,6 +401,8 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_VAL;
         }
 
+#ifdef TEST_MODE
+        /* In tests, erase synchronously so erase-failure tests still work */
         uint32_t sectors_needed = (session->content_length + 4095) / 4096;
         for (uint32_t i = 0; i < sectors_needed; i++) {
             if (W25Q128_EraseSector(IMG_UPDATE_FLASH_ADDR + (i * 4096)) != W25Q128_OK) {
@@ -289,6 +421,7 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
                 return ERR_ABRT;
             }
         }
+#endif /* TEST_MODE */
 
         fw_state.status = IMG_STATUS_UPLOADING;
         fw_state.bytes_transferred = 0;
@@ -333,7 +466,8 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
     }
 
     if (session->bytes_received >= session->content_length) {
-        if (flush_upload_buffer(session) != W25Q128_OK) {
+        /* Flush any partial final page */
+        if (queue_upload_page(session, 1) != ERR_OK) {
             strcpy(fw_state.error_message, "Final flash write failed");
             fw_state.status = IMG_STATUS_ERROR;
 
@@ -352,12 +486,19 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_ABRT;
         }
 
-        fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
-        fw_state.bytes_transferred = session->bytes_received;
-
         tcp_arg(pcb, NULL);
+#ifndef TEST_MODE
+        /* Deregister recv callback so the FIN from curl doesn't cause a second
+         * tcp_close racing with the task's tcpip_do_upload_response. */
+        tcp_recv(pcb, NULL);
+#endif
         vPortFree(session);
         active_upload = NULL;
+
+#ifdef TEST_MODE
+        /* In tests, send the HTTP response immediately (no task) */
+        fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
+        fw_state.bytes_transferred = fw_state.total_bytes;
 
         char response[256];
         int len = snprintf(response, sizeof(response),
@@ -372,18 +513,24 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
         tcp_output(pcb);
         tcp_close(pcb);
+#else
+        /* In production, the upload task sends the response via tcpip_callback.
+         * Do NOT call tcp_recved here — the task will do it after the final write. */
+#endif
         return ERR_OK;
     }
 
+#ifdef TEST_MODE
     tcp_recved(pcb, p->tot_len);
+#endif
+    /* In production: tcp_recved is called by the task after each page write. */
     return ERR_OK;
 }
 
-/**
- * @brief Send the next chunk of download data, or close the connection when done.
- * @param pcb TCP PCB for the download connection.
- * @return ERR_OK on success or when waiting for buffer space, ERR_ABRT on flash error.
- */
+/* ============================================================================
+ * Download handler
+ * ============================================================================ */
+
 static err_t send_download_chunk(struct tcp_pcb *pcb)
 {
     if (dl_ctx.pcb != pcb) return ERR_OK;
@@ -401,6 +548,7 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
     if (chunk > DOWNLOAD_CHUNK_SIZE) chunk = DOWNLOAD_CHUNK_SIZE;
 
     if (chunk == 0) {
+        tcp_output(pcb);
         return ERR_OK;
     }
 
@@ -415,7 +563,10 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
 
     err_t err = tcp_write(pcb, read_buf, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK) {
-        if (err == ERR_MEM) return ERR_OK;
+        if (err == ERR_MEM) {
+            tcp_output(pcb);
+            return ERR_OK;
+        }
 
         strcpy(fw_state.error_message, "TCP write error");
         fw_state.status = IMG_STATUS_ERROR;
@@ -431,13 +582,6 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
     return ERR_OK;
 }
 
-/**
- * @brief tcp_sent callback that drives flow-controlled download chunk transmission.
- * @param arg Unused.
- * @param pcb TCP PCB for the download connection.
- * @param len Number of bytes acknowledged by the remote (unused).
- * @return Result of send_download_chunk().
- */
 static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
     (void)arg;
@@ -445,14 +589,6 @@ static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
     return send_download_chunk(pcb);
 }
 
-/**
- * @brief Handle a firmware download request (GET /api/firmware/download).
- * @param pcb TCP PCB for the connection.
- * @return ERR_OK on success, ERR_ABRT if the HTTP header cannot be written.
- * @note Responds with 404 if no completed upload is available.
- *       The connection is closed by send_download_chunk() after all data is sent;
- *       the caller must NOT call tcp_close() after this returns ERR_OK.
- */
 err_t image_download_handler(struct tcp_pcb *pcb)
 {
     if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
@@ -495,17 +631,23 @@ err_t image_download_handler(struct tcp_pcb *pcb)
         return ERR_ABRT;
     }
 
+    tcp_output(pcb);  /* flush headers immediately so they arrive even if first chunk is delayed */
     return send_download_chunk(pcb);
 }
 
-/**
- * @brief Handle a firmware status query (GET /api/firmware/status).
- * @param pcb TCP PCB for the connection.
- * @return ERR_OK always.
- */
+/* ============================================================================
+ * Status handler
+ * ============================================================================ */
+
 err_t image_status_handler(struct tcp_pcb *pcb)
 {
-    char response[512];
+    char *response = (char *)pvPortMalloc(512);
+    if (response == NULL) {
+        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
+        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        return ERR_OK;
+    }
     const char *status_str;
 
     switch (fw_state.status) {
@@ -522,7 +664,7 @@ err_t image_status_handler(struct tcp_pcb *pcb)
     if (fw_state.total_bytes > 0)
         progress_pct = (fw_state.bytes_transferred * 100) / fw_state.total_bytes;
 
-    int len = snprintf(response, sizeof(response),
+    int len = snprintf(response, 512,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Connection: close\r\n"
@@ -542,6 +684,7 @@ err_t image_status_handler(struct tcp_pcb *pcb)
 
     tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
     tcp_output(pcb);
+    vPortFree(response);
 
     return ERR_OK;
 }

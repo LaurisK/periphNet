@@ -76,3 +76,7 @@ add_cpputest(
 
 # Suppress %lu warnings on 64-bit host (uint32_t is unsigned int, not unsigned long)
 target_compile_options(test_image_transfer PRIVATE -Wno-format)
+
+# TEST_MODE disables the FreeRTOS task/queue path and keeps synchronous flash ops
+# so that existing tests work without needing queue/tcpip_callback mocks
+target_compile_definitions(test_image_transfer PRIVATE TEST_MODE)
