@@ -46,7 +46,8 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
+void HardFault_Handler_C(void *hardfault_args, uint32_t lr_value);
+__attribute__((naked)) void HardFault_Handler(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -88,7 +89,14 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  __asm volatile (
+      "tst lr, #4              \n"
+      "ite eq                  \n"
+      "mrseq r0, msp           \n"
+      "mrsne r0, psp           \n"
+      "mov r1, lr              \n"
+      "b HardFault_Handler_C   \n"
+  );
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {

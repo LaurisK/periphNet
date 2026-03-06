@@ -206,9 +206,7 @@ set(BOOTLOADER_LINKER_FLAGS
     -Wl,-Map=bootloader.map,--cref \
     -Wl,--gc-sections \
     -Wl,--print-memory-usage \
-    --specs=nano.specs \
-    -lc \
-    -lm"
+    --specs=nano.specs"
 )
 
 add_executable(bootloader.elf
@@ -276,10 +274,7 @@ set(APPLICATION_LINKER_FLAGS
     -Wl,-Map=application.map,--cref \
     -Wl,--gc-sections \
     -Wl,--print-memory-usage \
-    -Wl,--allow-multiple-definition \
-    --specs=nano.specs \
-    -lc \
-    -lm"
+    --specs=nano.specs"
 )
 
 add_executable(application.elf

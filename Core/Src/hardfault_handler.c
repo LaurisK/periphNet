@@ -155,21 +155,3 @@ void HardFault_Handler_C(exception_stack_frame_t *hardfault_args, uint32_t lr_va
     }
 }
 
-/**
- * @brief HardFault exception entry point — naked assembly wrapper.
- * @note Must be naked to avoid corrupting the CPU-saved stack frame.
- *       Determines which stack was active, then branches to HardFault_Handler_C.
- */
-__attribute__((naked))
-void HardFault_Handler(void)
-{
-    __asm volatile (
-        "tst lr, #4              \n"
-        "ite eq                  \n"
-        "mrseq r0, msp           \n"
-        "mrsne r0, psp           \n"
-        "mov r1, lr              \n"
-        "b HardFault_Handler_C   \n"
-        ::: "r0", "r1"
-    );
-}

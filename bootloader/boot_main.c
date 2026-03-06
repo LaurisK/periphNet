@@ -1,22 +1,3 @@
-/**
- ******************************************************************************
- * @file    boot_main.c
- * @brief   PeriphNet Bootloader - Minimal implementation
- * @author  PeriphNet Project
- * @date    2024-12-26
- ******************************************************************************
- * @attention
- *
- * Bootloader functions:
- * 1. Initialize minimal hardware (clocks, GPIO, SPI)
- * 2. Test external flash (write test pattern)
- * 3. Visual indication (blink LED)
- * 4. Check for update request (future - Phase 4)
- * 5. Jump to application at 0x08008000
- *
- ******************************************************************************
- */
-
 #include "main.h"
 #include "spi.h"
 #include "gpio.h"
@@ -24,22 +5,16 @@
 #include "update_manager.h"
 #include <stdbool.h>
 
-/* Application start address */
 #define APPLICATION_ADDRESS     0x08008000
-
-/* LED GPIO (same as application - gpio_led1_Pin on GPIOA) */
 #define BOOT_LED_PORT           GPIOA
 #define BOOT_LED_PIN            GPIO_PIN_6
-
-/* External Flash Test */
 #define FLASH_TEST_ADDR         EXT_FLASH_FWU_STATUS_ADDR
 #define FLASH_TEST_PATTERN      "BOOTLOADER_WAS_HERE_2024"
 #define FLASH_TEST_SIZE         24
 
 /**
- * @brief  Jump to application
- * @param  app_address: Address of application (0x08008000)
- * @retval None (never returns)
+ * @brief Jump to the application at app_address; never returns.
+ * @param app_address Start address of the application vector table.
  */
 static void boot_jump_to_application(uint32_t app_address)
 {
@@ -47,43 +22,30 @@ static void boot_jump_to_application(uint32_t app_address)
     pFunction app_reset_handler;
     uint32_t app_stack_pointer;
 
-    /* Get application stack pointer (first entry in vector table) */
     app_stack_pointer = *(__IO uint32_t*)app_address;
-
-    /* Get application reset handler (second entry in vector table) */
     app_reset_handler = (pFunction) (*(__IO uint32_t*)(app_address + 4));
 
-    /* Deinitialize HAL */
     HAL_DeInit();
-
-    /* Disable all interrupts */
     __disable_irq();
 
-    /* Disable SysTick */
     SysTick->CTRL = 0;
     SysTick->LOAD = 0;
     SysTick->VAL = 0;
 
-    /* Clear all pending interrupts */
     for (uint32_t i = 0; i < 8; i++) {
         NVIC->ICER[i] = 0xFFFFFFFF;
         NVIC->ICPR[i] = 0xFFFFFFFF;
     }
 
-    /* Set application stack pointer */
     __set_MSP(app_stack_pointer);
-
-    /* Jump to application */
     app_reset_handler();
 
-    /* Should never reach here */
     while (1);
 }
 
 /**
- * @brief  Blink LED to indicate bootloader is running
- * @param  count: Number of blinks
- * @retval None
+ * @brief Blink the boot LED a given number of times.
+ * @param count Number of blink cycles.
  */
 static void boot_blink_led(uint8_t count)
 {
@@ -93,41 +55,35 @@ static void boot_blink_led(uint8_t count)
         HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_RESET);
         HAL_Delay(150);
     }
-    /* Pause after blinking */
     HAL_Delay(300);
 }
 
 /**
- * @brief  Test external flash (Phase 2)
- * @retval true if success, false if failure
+ * @brief Initialize the external flash, read the JEDEC ID, and perform a write/read test.
+ * @return true if all checks pass, false on any failure.
  */
 static bool boot_test_external_flash(void)
 {
     W25Q128_ID_t flash_id;
     const uint8_t pattern[] = FLASH_TEST_PATTERN;
-    uint8_t uid[12];  /* STM32F407 has 96-bit unique ID = 12 bytes */
-    
-    /* Initialize W25Q128 */
+    uint8_t uid[12];
+
     if (W25Q128_Init() != W25Q128_OK) {
-        return false;  /* Flash init failed */
+        return false;
     }
 
-    /* Read flash ID (JEDEC info) */
     if (W25Q128_ReadID(&flash_id) != W25Q128_OK) {
         return false;
     }
 
-    /* Verify it's a Winbond W25Qxx (accept W25Q64 or W25Q128) */
     if (flash_id.manufacturer_id != 0xEF) {
-        return false;  /* Wrong manufacturer */
+        return false;
     }
 
-    /* Accept both W25Q64 (0x17 = 8MB) and W25Q128 (0x18 = 16MB) */
     if (flash_id.capacity != 0x17 && flash_id.capacity != 0x18) {
-        return false;  /* Wrong chip capacity */
+        return false;
     }
 
-    /* Read STM32F407 Unique ID */
     uid[0] = *(uint8_t*)(0x1FFF7A10);
     uid[1] = *(uint8_t*)(0x1FFF7A10 + 1);
     uid[2] = *(uint8_t*)(0x1FFF7A10 + 2);
@@ -141,12 +97,10 @@ static bool boot_test_external_flash(void)
     uid[10] = *(uint8_t*)(0x1FFF7A10 + 10);
     uid[11] = *(uint8_t*)(0x1FFF7A10 + 11);
 
-    /* Erase test sector */
     if (W25Q128_EraseSector(FLASH_TEST_ADDR) != W25Q128_OK) {
         return false;
     }
 
-    /* Write UID + test pattern (4 bytes pattern + 12 bytes UID) */
     if (W25Q128_WritePage(FLASH_TEST_ADDR, pattern, 4) != W25Q128_OK) {
         return false;
     }
@@ -158,98 +112,57 @@ static bool boot_test_external_flash(void)
 }
 
 /**
- * @brief  Verify firmware image in external flash (STUB - Phase 4)
- * @param  status: Pointer to update status structure
- * @retval true if valid, false if invalid
+ * @brief Verify a pending firmware image against the update status block (stub).
+ * @param status Pointer to the update status read from external flash.
+ * @return true if basic field validation passes, false otherwise.
  */
 static bool boot_verify_firmware(const sUpdateStatus *status)
 {
-    /* STUB: Phase 4 - No actual verification yet */
-    /* TODO Phase 5: Implement real CRC32 verification */
-    /*
-    1. Check magic number
-    2. Validate image_size is within bounds
-    3. Read firmware from external flash
-    4. Calculate CRC32 of firmware
-    5. Compare with status->image_crc32
-    6. Verify application header at offset 0x200
-    */
-
-    /* For now, just check basic fields */
     if (status->magic != UPDATE_STATUS_MAGIC) {
-        return false;  /* Invalid magic */
+        return false;
     }
 
     if (status->image_size == 0 || status->image_size > (480 * 1024)) {
-        return false;  /* Invalid size */
+        return false;
     }
 
-    /* STUB: Always return true for now */
     return true;
 }
 
 /**
- * @brief  Install firmware from external flash to internal flash (STUB - Phase 4)
- * @param  status: Pointer to update status structure
- * @retval true if success, false if failure
+ * @brief Install firmware from external flash into internal flash (stub).
+ * @param status Pointer to the update status describing the image location and size.
+ * @return true always (installation not yet implemented).
  */
 static bool boot_install_firmware(const sUpdateStatus *status)
 {
-    /* STUB: Phase 4 - No actual installation yet */
-    /* TODO Phase 5: Implement real firmware installation */
-    /*
-    1. Unlock internal flash
-    2. Erase application sectors (2-7)
-    3. Read firmware from external flash (status->image_offset)
-    4. Program internal flash at APPLICATION_ADDRESS
-    5. Verify written data
-    6. Lock internal flash
-    */
-
-    /* For now, just simulate success */
-    (void)status;  /* Unused for now */
-
-    /* STUB: Return true (pretend installation succeeded) */
+    (void)status;
     return true;
 }
 
 /**
- * @brief  Bootloader main function
- * @retval int (never returns)
+ * @brief Bootloader entry point; initializes hardware, tests flash, then jumps to application.
+ * @return Never returns.
  */
 int main(void)
 {
     bool flash_test_ok = false;
 
-    /* Reset of all peripherals, Initializes the Flash interface and the Systick */
     HAL_Init();
-
-    /* Configure the system clock */
     SystemClock_Config();
-
-    /* Initialize peripherals */
     MX_GPIO_Init();
     MX_SPI2_Init();
 
-    /* Give flash time to power up */
     HAL_Delay(100);
 
-/* Visual indication: Bootloader is running */
-    /* Blink LED 3 times = "I'm bootloader" */
     boot_blink_led(3);
-    
-    /* Extra delay to make it clear bootloader ran */
     HAL_Delay(2000);
 
-    /* Phase 2: Test external flash communication */
     flash_test_ok = boot_test_external_flash();
 
-    /* Indicate flash test result */
     if (flash_test_ok) {
-        /* 2 slow blinks = Flash test OK */
         boot_blink_led(2);
     } else {
-        /* 5 fast blinks = Flash test FAILED */
         for (uint8_t i = 0; i < 5; i++) {
             HAL_GPIO_WritePin(BOOT_LED_PORT, BOOT_LED_PIN, GPIO_PIN_SET);
             HAL_Delay(50);
@@ -259,36 +172,25 @@ int main(void)
         HAL_Delay(300);
     }
 
-    /* Phase 4: Firmware update DISABLED - bootloader cannot write to MCU flash */
-    /* Bootloader can only: read external flash, write UID to external flash, jump to app */
-    /* Firmware installation must be done via J-Link for now */
-
-    /* Skip update check entirely - just jump to application */
     boot_jump_to_application(APPLICATION_ADDRESS);
 
-    /* Should never reach here */
     while (1) {
-        /* If we get here, application failed to start */
         HAL_GPIO_TogglePin(BOOT_LED_PORT, BOOT_LED_PIN);
-        HAL_Delay(100);  /* Fast blink = error */
+        HAL_Delay(100);
     }
 }
 
 /**
- * @brief  System Clock Configuration
- * @note   Same as application - 168MHz from 25MHz HSE
- * @retval None
+ * @brief Configure the system clock to 168 MHz from a 25 MHz HSE crystal.
  */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
     RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    /* Configure the main internal regulator output voltage */
     __HAL_RCC_PWR_CLK_ENABLE();
     __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-    /* Initializes the RCC Oscillators */
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     RCC_OscInitStruct.HSEState = RCC_HSE_ON;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -301,7 +203,6 @@ void SystemClock_Config(void)
         Error_Handler();
     }
 
-    /* Initializes the CPU, AHB and APB buses clocks */
     RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                                 |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -315,27 +216,22 @@ void SystemClock_Config(void)
 }
 
 /**
- * @brief  This function is executed in case of error occurrence
- * @retval None
+ * @brief Error handler; disables interrupts and halts in an infinite loop.
  */
 void Error_Handler(void)
 {
     __disable_irq();
     while (1) {
-        /* Error: stay here */
     }
 }
 
 #ifdef  USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the line number
- *         where the assert_param error has occurred
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
+ * @brief Report the file name and line number where an assert_param failure occurred.
+ * @param file Pointer to the source file name string.
+ * @param line Line number of the failed assertion.
  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-    /* User can add implementation to report the file name and line number */
 }
 #endif /* USE_FULL_ASSERT */

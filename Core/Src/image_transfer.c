@@ -1,10 +1,3 @@
-/**
- ******************************************************************************
- * @file    image_transfer.c
- * @brief   HTTP-based image transfer implementation
- ******************************************************************************
- */
-
 #include "image_transfer.h"
 #include "w25q128.h"
 #include "bl_app_contract.h"
@@ -13,14 +6,10 @@
 #include <string.h>
 #include <stdio.h>
 
-/* External flash firmware update image location */
-#define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR  /* 0x00001000 */
-#define IMG_MAX_SIZE            (480 * 1024)             /* 480KB max */
-
-/* Download chunk size - fits in lwIP send buffer */
+#define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR
+#define IMG_MAX_SIZE            (480 * 1024)
 #define DOWNLOAD_CHUNK_SIZE     512
 
-/* Upload state tracking */
 static image_state_t fw_state = {
     .status = IMG_STATUS_IDLE,
     .bytes_transferred = 0,
@@ -30,20 +19,18 @@ static image_state_t fw_state = {
     .error_message = {0}
 };
 
-/* Upload session state - pointer stored in tcp_arg for routing */
 typedef struct {
     struct tcp_pcb *pcb;
     uint32_t content_length;
     uint32_t bytes_received;
     uint32_t flash_write_addr;
     uint8_t header_parsed;
-    uint8_t buffer[256];  /* Write buffer for flash page alignment */
+    uint8_t buffer[256];
     uint16_t buffer_pos;
 } upload_session_t;
 
 static upload_session_t *active_upload = NULL;
 
-/* Download state - uses tcp_sent callback for flow control */
 typedef struct {
     struct tcp_pcb *pcb;
     uint32_t bytes_sent;
@@ -53,7 +40,7 @@ typedef struct {
 static download_ctx_t dl_ctx;
 
 /**
- * @brief  Initialize image transfer module
+ * @brief Initialize the image transfer module, freeing any active upload session.
  */
 void image_transfer_init(void)
 {
@@ -73,7 +60,8 @@ void image_transfer_init(void)
 }
 
 /**
- * @brief  Get current image transfer status
+ * @brief Return the current image transfer state.
+ * @return Read-only pointer to the global transfer state.
  */
 const image_state_t* image_transfer_get_status(void)
 {
@@ -81,7 +69,9 @@ const image_state_t* image_transfer_get_status(void)
 }
 
 /**
- * @brief  Returns 1 if an upload session is active on this pcb
+ * @brief Check whether an upload session is active on the given PCB.
+ * @param pcb TCP PCB to check.
+ * @return 1 if an upload session is active on pcb, 0 otherwise.
  */
 int image_upload_has_active_session(struct tcp_pcb *pcb)
 {
@@ -89,7 +79,8 @@ int image_upload_has_active_session(struct tcp_pcb *pcb)
 }
 
 /**
- * @brief  Abort upload session by pcb (call when pcb is still valid)
+ * @brief Abort the upload session associated with a PCB while the PCB is still valid.
+ * @param pcb TCP PCB whose session should be aborted.
  */
 void image_upload_abort_session(struct tcp_pcb *pcb)
 {
@@ -102,8 +93,9 @@ void image_upload_abort_session(struct tcp_pcb *pcb)
 }
 
 /**
- * @brief  Abort upload session by session pointer (call from err callback
- *         where pcb is already freed but arg still holds the session)
+ * @brief Abort an upload session identified by its session pointer.
+ * @param session_ptr Session pointer previously stored via tcp_arg; used when the
+ *        PCB has already been freed by lwIP (e.g. from the err callback).
  */
 void image_upload_abort_session_ptr(void *session_ptr)
 {
@@ -116,7 +108,10 @@ void image_upload_abort_session_ptr(void *session_ptr)
 }
 
 /**
- * @brief  Parse Content-Length from HTTP header (safe, no strstr/atoi)
+ * @brief Parse the Content-Length value from an HTTP header buffer.
+ * @param header Pointer to the raw HTTP header bytes.
+ * @param header_len Number of bytes in the header buffer.
+ * @return Parsed content length, or 0 if the header is absent or malformed.
  */
 static uint32_t parse_content_length(const char *header, uint16_t header_len)
 {
@@ -154,7 +149,10 @@ static uint32_t parse_content_length(const char *header, uint16_t header_len)
 }
 
 /**
- * @brief  Find HTTP body start (after \r\n\r\n)
+ * @brief Locate the start of the HTTP body by finding the \r\n\r\n delimiter.
+ * @param data Pointer to the data buffer.
+ * @param data_len Number of bytes in the buffer.
+ * @return Pointer to the first byte after \r\n\r\n, or NULL if not found.
  */
 static const char* find_http_body(const char *data, uint16_t data_len)
 {
@@ -168,7 +166,9 @@ static const char* find_http_body(const char *data, uint16_t data_len)
 }
 
 /**
- * @brief  Write buffer to flash (handles page alignment)
+ * @brief Flush the session's write buffer to flash at the current write address.
+ * @param session Active upload session whose buffer should be flushed.
+ * @return W25Q128_OK on success, or a flash error code on failure.
  */
 static W25Q128_Status_t flush_upload_buffer(upload_session_t *session)
 {
@@ -190,7 +190,11 @@ static W25Q128_Status_t flush_upload_buffer(upload_session_t *session)
 }
 
 /**
- * @brief  Process received upload data into flash write buffer
+ * @brief Accumulate received upload bytes into the page-aligned flash write buffer.
+ * @param session Active upload session.
+ * @param data Pointer to incoming data bytes.
+ * @param len Number of bytes to process.
+ * @return ERR_OK on success, ERR_ABRT if a flash write fails.
  */
 static err_t process_upload_data(upload_session_t *session, const uint8_t *data, uint16_t len)
 {
@@ -221,22 +225,21 @@ static err_t process_upload_data(upload_session_t *session, const uint8_t *data,
 }
 
 /**
- * @brief  Handle image upload (POST /api/firmware/upload)
- *
- * Called for both the first packet (session==NULL) and all subsequent
- * data packets (session attached to pcb via tcp_arg).
- * Caller must call pbuf_free(p) after this returns.
- * This function calls tcp_recved() internally on all paths.
+ * @brief Handle an HTTP firmware upload request (POST /api/firmware/upload).
+ * @param pcb TCP PCB for the connection.
+ * @param p Received pbuf chain; caller must call pbuf_free(p) after this returns.
+ * @return ERR_OK while upload is in progress or on completion, or an lwIP error code on failure.
+ * @note On the first call (no active session) headers are parsed, flash is erased,
+ *       and the session is created. Subsequent calls receive body data.
+ *       tcp_recved() is called internally on all paths.
  */
 err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 {
     upload_session_t *session = active_upload;
 
-    /* First pbuf used for header parsing */
     char *data = (char *)p->payload;
     uint16_t data_len = p->len;
 
-    /* First packet - create session and parse headers */
     if (session == NULL) {
         session = (upload_session_t *)pvPortMalloc(sizeof(upload_session_t));
         if (session == NULL) {
@@ -268,7 +271,6 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_VAL;
         }
 
-        /* Erase flash sectors for the incoming firmware */
         uint32_t sectors_needed = (session->content_length + 4095) / 4096;
         for (uint32_t i = 0; i < sectors_needed; i++) {
             if (W25Q128_EraseSector(IMG_UPDATE_FLASH_ADDR + (i * 4096)) != W25Q128_OK) {
@@ -294,31 +296,25 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         fw_state.flash_address = IMG_UPDATE_FLASH_ADDR;
 
         active_upload = session;
-
-        /* Attach session to pcb so subsequent data packets route here */
         tcp_arg(pcb, session);
     }
 
-    /* Walk entire pbuf chain */
     for (struct pbuf *q = p; q != NULL; q = q->next) {
         char *seg_data = (char *)q->payload;
         uint16_t seg_len = q->len;
 
-        /* Find body start (skip HTTP headers) */
         const char *body_start = seg_data;
         uint16_t body_len = seg_len;
 
         if (!session->header_parsed) {
             body_start = find_http_body(seg_data, seg_len);
             if (body_start == NULL) {
-                /* Headers not complete in this segment - continue to next */
                 continue;
             }
             body_len = seg_len - (uint16_t)(body_start - seg_data);
             session->header_parsed = 1;
         }
 
-        /* Process the firmware data */
         if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
             tcp_arg(pcb, NULL);
             vPortFree(session);
@@ -336,7 +332,6 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         }
     }
 
-    /* Check if upload complete */
     if (session->bytes_received >= session->content_length) {
         if (flush_upload_buffer(session) != W25Q128_OK) {
             strcpy(fw_state.error_message, "Final flash write failed");
@@ -360,12 +355,10 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
         fw_state.bytes_transferred = session->bytes_received;
 
-        /* Detach session from pcb before freeing */
         tcp_arg(pcb, NULL);
         vPortFree(session);
         active_upload = NULL;
 
-        /* Send success response and close connection */
         char response[256];
         int len = snprintf(response, sizeof(response),
             "HTTP/1.1 200 OK\r\n"
@@ -382,19 +375,18 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         return ERR_OK;
     }
 
-    /* More data expected - acknowledge this packet */
     tcp_recved(pcb, p->tot_len);
     return ERR_OK;
 }
 
-/* ---- Download with tcp_sent flow control ---- */
-
 /**
- * @brief  Send next download chunk; called by tcp_sent callback and initially
+ * @brief Send the next chunk of download data, or close the connection when done.
+ * @param pcb TCP PCB for the download connection.
+ * @return ERR_OK on success or when waiting for buffer space, ERR_ABRT on flash error.
  */
 static err_t send_download_chunk(struct tcp_pcb *pcb)
 {
-    if (dl_ctx.pcb != pcb) return ERR_OK;  /* Stale, ignore */
+    if (dl_ctx.pcb != pcb) return ERR_OK;
 
     if (dl_ctx.bytes_sent >= dl_ctx.total_bytes) {
         fw_state.status = IMG_STATUS_DOWNLOAD_READY;
@@ -409,7 +401,6 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
     if (chunk > DOWNLOAD_CHUNK_SIZE) chunk = DOWNLOAD_CHUNK_SIZE;
 
     if (chunk == 0) {
-        /* Send buffer full - wait for tcp_sent callback */
         return ERR_OK;
     }
 
@@ -424,7 +415,6 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
 
     err_t err = tcp_write(pcb, read_buf, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK) {
-        /* If buffer full, tcp_sent callback will retry */
         if (err == ERR_MEM) return ERR_OK;
 
         strcpy(fw_state.error_message, "TCP write error");
@@ -442,7 +432,11 @@ static err_t send_download_chunk(struct tcp_pcb *pcb)
 }
 
 /**
- * @brief  tcp_sent callback for download - sends next chunk when buffer drains
+ * @brief tcp_sent callback that drives flow-controlled download chunk transmission.
+ * @param arg Unused.
+ * @param pcb TCP PCB for the download connection.
+ * @param len Number of bytes acknowledged by the remote (unused).
+ * @return Result of send_download_chunk().
  */
 static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
@@ -452,11 +446,12 @@ static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
 }
 
 /**
- * @brief  Handle image download (GET /api/firmware/download)
- *
- * Sets up tcp_sent callback for flow-controlled streaming.
- * The connection is closed by send_download_chunk when all data is sent.
- * Caller must NOT call tcp_close after this returns.
+ * @brief Handle a firmware download request (GET /api/firmware/download).
+ * @param pcb TCP PCB for the connection.
+ * @return ERR_OK on success, ERR_ABRT if the HTTP header cannot be written.
+ * @note Responds with 404 if no completed upload is available.
+ *       The connection is closed by send_download_chunk() after all data is sent;
+ *       the caller must NOT call tcp_close() after this returns ERR_OK.
  */
 err_t image_download_handler(struct tcp_pcb *pcb)
 {
@@ -472,7 +467,6 @@ err_t image_download_handler(struct tcp_pcb *pcb)
         return ERR_OK;
     }
 
-    /* Initialize download context */
     dl_ctx.pcb = pcb;
     dl_ctx.bytes_sent = 0;
     dl_ctx.total_bytes = fw_state.total_bytes;
@@ -480,10 +474,8 @@ err_t image_download_handler(struct tcp_pcb *pcb)
     fw_state.status = IMG_STATUS_DOWNLOADING;
     fw_state.bytes_transferred = 0;
 
-    /* Register sent callback for flow control */
     tcp_sent(pcb, image_download_sent);
 
-    /* Send HTTP headers */
     char headers[256];
     int header_len = snprintf(headers, sizeof(headers),
         "HTTP/1.1 200 OK\r\n"
@@ -503,12 +495,13 @@ err_t image_download_handler(struct tcp_pcb *pcb)
         return ERR_ABRT;
     }
 
-    /* Kick off first chunk */
     return send_download_chunk(pcb);
 }
 
 /**
- * @brief  Handle image status query (GET /api/firmware/status)
+ * @brief Handle a firmware status query (GET /api/firmware/status).
+ * @param pcb TCP PCB for the connection.
+ * @return ERR_OK always.
  */
 err_t image_status_handler(struct tcp_pcb *pcb)
 {
@@ -522,7 +515,7 @@ err_t image_status_handler(struct tcp_pcb *pcb)
         case IMG_STATUS_DOWNLOAD_READY:  status_str = "download_ready"; break;
         case IMG_STATUS_DOWNLOADING:     status_str = "downloading"; break;
         case IMG_STATUS_ERROR:           status_str = "error"; break;
-        default:                        status_str = "unknown"; break;
+        default:                         status_str = "unknown"; break;
     }
 
     uint32_t progress_pct = 0;

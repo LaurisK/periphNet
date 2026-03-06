@@ -226,5 +226,31 @@ cmake .. && make -j4
 
 ---
 
+## Unit Tests
+
+Tests run on the host (no ARM toolchain needed) using CppUTest.
+
+### Build
+
+```bash
+cmake -B build_tests -S tests
+cmake --build build_tests -j8
+```
+
+### Run
+
+```bash
+ctest --test-dir build_tests -V
+```
+
+### Notes
+
+- Test sources live in `tests/`
+- Mocks for lwIP, FreeRTOS, and W25Q128 are in `tests/mocks/`
+- `image_transfer.c` is compiled directly into the test binary via `#include` to access static functions
+- Build is independent of the firmware build; no `build/` directory needed
+
+---
+
 **Last Updated:** 2024-12-26
 **Status:** Milestone 0 Complete ✅
