@@ -14,6 +14,7 @@
 #include "task.h"
 #include "queue.h"
 #include "lwip/tcpip.h"
+#include "trice.h"
 #endif
 
 #define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR
@@ -113,6 +114,11 @@ static void image_upload_task(void *arg)
         if (xQueueReceive(s_upload_queue, &msg, portMAX_DELAY) != pdTRUE)
             continue;
 
+        /* SEQ: page dequeued — Phase 1→2 transition */
+        TRice("FWU: page addr=0x%X len=%u last=%u total=%lu\n",
+              (unsigned)msg.flash_addr, (unsigned)msg.len,
+              (unsigned)msg.is_last, (unsigned long)msg.total_bytes);
+
         uint8_t write_ok = 1;
 
         /* Zero-length is_last means upload size was an exact multiple of 256:
@@ -123,16 +129,33 @@ static void image_upload_task(void *arg)
 
             /* Erase sector before the first write to it */
             if (sector != current_sector) {
+                /* SEQ: Phase 2 — sector erase start; TCP window stalls here (~50ms) */
+                TRice("FWU: erase_start 0x%X\n", (unsigned)sector);
                 write_ok = (W25Q128_EraseSector(sector) == W25Q128_OK);
+                /* SEQ: Phase 2→3 transition — erase done, writes can now proceed */
+                if (write_ok)
+                    TRice("FWU: erase_done 0x%X\n", (unsigned)sector);
+                else
+                    TRice("FWU: erase_FAIL 0x%X\n", (unsigned)sector);
                 current_sector = write_ok ? sector : 0xFFFFFFFF;
             }
 
-            if (write_ok)
+            if (write_ok) {
                 write_ok = (W25Q128_WritePage(msg.flash_addr, msg.data, msg.len) == W25Q128_OK);
+                /* SEQ: Phase 3 — page written; tcp_recved will follow to open the window */
+                if (write_ok)
+                    TRice("FWU: write_ok 0x%X %uB\n", (unsigned)msg.flash_addr, (unsigned)msg.len);
+                else
+                    TRice("FWU: write_FAIL 0x%X\n", (unsigned)msg.flash_addr);
+            }
         }
 
         /* Advance TCP window: tells lwIP the application consumed msg.len bytes,
          * allowing the peer to send the next chunk. */
+        /* SEQ: Phase 3 — dispatch tcp_recved to tcpip_thread; window opens by len bytes.
+         * lwIP only sends a window-update ACK once cumulative freed >= TCP_WND_UPDATE_THRESHOLD
+         * (536B), so the client unblocks after every 3rd call here (3*256=768 >= 536). */
+        TRice("FWU: tcp_recved %u -> tcpip_thread\n", (unsigned)msg.len);
         sTcpRecvArg *rarg = (sTcpRecvArg *)pvPortMalloc(sizeof(sTcpRecvArg));
         if (rarg) {
             rarg->pcb  = msg.pcb;
@@ -145,6 +168,8 @@ static void image_upload_task(void *arg)
             if (resp) {
                 resp->pcb = msg.pcb;
                 if (!write_ok) {
+                    /* SEQ: Phase 6 error — dispatch HTTP 500 via tcpip_thread */
+                    TRice("FWU: upload_err -> HTTP 500\n");
                     fw_state.status = IMG_STATUS_ERROR;
                     strcpy(fw_state.error_message, "Flash write error");
                     resp->buf_len = (uint16_t)snprintf(resp->buf, sizeof(resp->buf),
@@ -153,6 +178,8 @@ static void image_upload_task(void *arg)
                         "Connection: close\r\n\r\n"
                         "{\"error\":\"flash write failed\"}\r\n");
                 } else {
+                    /* SEQ: Phase 6 — all pages written; dispatch HTTP 200 via tcpip_thread */
+                    TRice("FWU: upload_done %lu bytes -> HTTP 200\n", (unsigned long)msg.total_bytes);
                     fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
                     fw_state.bytes_transferred = msg.total_bytes;
                     resp->buf_len = (uint16_t)snprintf(resp->buf, sizeof(resp->buf),

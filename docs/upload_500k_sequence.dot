@@ -1,0 +1,213 @@
+// POST /api/firmware/upload  —  500 KB  —  sequence diagram
+// Layout: neato with pinned positions (pos="x,y!") for exact column control
+// Columns:  Phase labels x=0 | CLIENT x=3 | lwIP x=8.5 | Flash Task x=14
+// Annotation notes x=17.5
+// Y: 0=top, decreasing downward (neato default = y-up, so negative = down)
+
+digraph upload_500k {
+
+    graph [
+        layout    = neato
+        overlap   = false
+        splines   = polyline
+        fontname  = "Helvetica"
+        fontsize  = 13
+        bgcolor   = "#F5F5F5"
+        pad       = 0.5
+        label     = <<font face="Helvetica-Bold" point-size="14">POST /api/firmware/upload — 500 KB (512 000 B) firmware file</font><br align="left"/>
+<font face="Courier" point-size="11">TCP_WND=2144B · MSS=536B · page=256B · sector=4096B · queue_depth=12 · erase≈50ms · write≈2ms/page</font><br align="left"/>>
+        labelloc  = t
+        labeljust = l
+    ]
+
+    node [fontname="Courier" fontsize=10 shape=box style=filled width=3.6 height=0.42 fixedsize=true]
+    edge [fontname="Courier" fontsize=9]
+
+    // ─── Column headers ────────────────────────────────────────────────────
+    node [shape=box style="filled,bold" fontname="Helvetica" fontsize=12 height=0.55 width=3.6 fixedsize=true]
+
+    HDR_C  [label="CLIENT\n(curl)"              fillcolor="#1A3F8F" fontcolor=white pos="3,0!"]
+    HDR_L  [label="lwIP / tcpip_thread"         fillcolor="#1A6E3A" fontcolor=white pos="8.5,0!"]
+    HDR_F  [label="Flash Task  (ImgUp)"         fillcolor="#7A5900" fontcolor=white pos="14,0!"]
+
+    // ─── Phase label column  (x=0) ────────────────────────────────────────
+    node [shape=plaintext style="" fontname="Helvetica-Bold" fontsize=10 fontcolor="#444444"
+          width=2.2 height=0.5 fixedsize=false]
+
+    PH0 [label="── PHASE 0 ──\nHandshake"           pos="0,-1.6!"]
+    PH1 [label="── PHASE 1 ──\nFirst burst\nwin=2144B" pos="0,-4.0!"]
+    PH2 [label="── PHASE 2 ──\nSector 1 erase\n~50ms ⚠"
+         fontcolor="#AA0000"                          pos="0,-8.5!"]
+    PH3 [label="── PHASE 3 ──\nPage writes\n+win updates" pos="0,-11.0!"]
+    PH4 [label="── PHASE 4 ──\nRepeat\n×125 sectors"  pos="0,-19.2!"]
+    PH5 [label="── PHASE 5 ──\nLast sector\n+final segs"  pos="0,-25.5!"]
+    PH6 [label="── PHASE 6 ──\nHTTP response\n+teardown"  pos="0,-31.0!"]
+
+    // ─── Annotation notes  (x=17.5) ───────────────────────────────────────
+    node [shape=note fontname="Courier" fontsize=9 style=filled
+          width=2.8 height=1.5 fixedsize=false]
+
+    NOTE_Q [label="Queue depth = 12  (3072B)\nTCP_WND = 2144B → ≤8 pages\nin-flight at once.\nQueue never overflows."
+            fillcolor="#E8EEFF" fontcolor="#333388" pos="17.5,-6.5!"]
+
+    NOTE_THRESH [label="TCP_WND_UPDATE_THRESHOLD\n= 536B\nWindow update only sent\nwhen ≥536B freed.\n3×tcp_recved(256)=768 ≥ 536\n→ 1 update per 3 writes"
+                 fillcolor="#FFFFF0" fontcolor="#666600" pos="17.5,-12.5!"]
+
+    NOTE_ERASE [label="⚠ Sector erase STALLS\nentire pipeline.\nNo tcp_recved during\nerase → hard block\n~50ms every 4096B\n(every 16 pages)"
+                fillcolor="#FFEEEE" fontcolor="#880000" pos="17.5,-8.5!"]
+
+    // ─── All content nodes  (shape=box, fixed width/height per column) ─────
+    node [shape=box style=filled fontname="Courier" fontsize=10 width=3.6 height=0.42 fixedsize=true]
+
+    // ── PHASE 0: TCP handshake ─────────────────────────────────────────────
+    C_SYN    [label="SYN  (60B)"              fillcolor="#C8DCF8" pos="3,-1.2!"]
+    L_SYNACK [label="SYN+ACK  win=2144  (60B)" fillcolor="#C8ECD8" pos="8.5,-1.2!"]
+    C_ACK0   [label="ACK  (54B)"              fillcolor="#C8DCF8" pos="3,-2.0!"]
+
+    // ── PHASE 1: First burst  (4 segments fill TCP_WND=2144B) ─────────────
+    C_S1 [label="PSH+ACK #1  536B\n[headers 200B + body 336B]" fillcolor="#C8DCF8" pos="3,-3.3!" height=0.50]
+    L_S1 [label="http_recv_callback()\nqueue page 1  [256B, last=0]" fillcolor="#C8ECD8" pos="8.5,-3.3!" height=0.50]
+
+    C_S2 [label="PSH+ACK #2  536B  [body 337–872]"  fillcolor="#C8DCF8" pos="3,-4.3!"]
+    L_S2 [label="queue pages 2–3  [256B each]"        fillcolor="#C8ECD8" pos="8.5,-4.3!"]
+
+    C_S3 [label="PSH+ACK #3  536B  [body 873–1408]" fillcolor="#C8DCF8" pos="3,-5.1!"]
+    L_S3 [label="queue pages 4–5  [256B each]"        fillcolor="#C8ECD8" pos="8.5,-5.1!"]
+
+    C_S4 [label="PSH+ACK #4  536B  ← win=0\n[body 1409–1944]" fillcolor="#C8DCF8" pos="3,-5.9!" height=0.50]
+    L_S4 [label="queue pages 6–7  [256B each]\ntcp_recved NOT called yet" fillcolor="#C8ECD8" pos="8.5,-5.9!" height=0.50]
+
+    L_WIN0A [label="ACK  win=0  (window full — client BLOCKED)" fillcolor="#FFD8A8" pos="8.5,-6.9!"]
+
+    // ── PHASE 2: Sector 1 erase (~50ms stall) ─────────────────────────────
+    F_ERASE1 [label="EraseSector(0x00001000)\n▓▓▓▓▓▓▓▓  ~50ms  ▓▓▓▓▓▓▓▓\nNO tcp_recved → client BLOCKED"
+              fillcolor="#FFBBBB" fontcolor="#880000" pos="14,-8.3!" height=0.60]
+
+    // ── PHASE 3: Page writes + window update cadence ───────────────────────
+    F_W1 [label="WritePage #1  [256B]  ~2ms\ntcp_recved(256)  cumul=256 < 536  no update" fillcolor="#FFF3CC" pos="14,-9.6!" height=0.50]
+    F_W2 [label="WritePage #2  [256B]  ~2ms\ntcp_recved(256)  cumul=512 < 536  no update" fillcolor="#FFF3CC" pos="14,-10.5!" height=0.50]
+    F_W3 [label="WritePage #3  [256B]  ~2ms\ntcp_recved(256)  cumul=768 ≥ 536 → WINDOW UPDATE!" fillcolor="#FFE866" pos="14,-11.4!" fixedsize=false height=0.55]
+
+    L_WIN1 [label="ACK  win=768  (768B freed, threshold 536 met)" fillcolor="#AAFFAA" pos="8.5,-12.3!" fixedsize=false]
+
+    C_S5 [label="PSH+ACK #5  536B  (232B left)"  fillcolor="#C8DCF8" pos="3,-13.1!"]
+    L_S5 [label="queue pages 8–9"                 fillcolor="#C8ECD8" pos="8.5,-13.1!"]
+
+    C_S6 [label="PSH+ACK #6  232B  ← win=0 again" fillcolor="#C8DCF8" pos="3,-13.9!"]
+    L_S6 [label="queue page 10  [232B partial]"    fillcolor="#C8ECD8" pos="8.5,-13.9!"]
+
+    L_WIN0B [label="ACK  win=0" fillcolor="#FFD8A8" pos="8.5,-14.7!"]
+
+    F_W4 [label="WritePage #4  [256B]  ~2ms\ntcp_recved(256)  cumul=256" fillcolor="#FFF3CC" pos="14,-14.7!" height=0.50]
+    F_W5 [label="WritePage #5  [256B]  ~2ms\ntcp_recved(256)  cumul=512" fillcolor="#FFF3CC" pos="14,-15.6!" height=0.50]
+    F_W6 [label="WritePage #6  [256B]  ~2ms\ntcp_recved(256)  cumul=768 → WINDOW UPDATE!" fillcolor="#FFE866" pos="14,-16.5!" height=0.50]
+
+    L_WIN2 [label="ACK  win=768  (2nd update)" fillcolor="#AAFFAA" pos="8.5,-17.3!"]
+    C_S7   [label="PSH+ACK #7  536B"           fillcolor="#C8DCF8" pos="3,-17.3!"]
+
+    // ── PHASE 4: Repeat box ────────────────────────────────────────────────
+    REPEAT [label=<
+<table border="0" cellpadding="6">
+<tr><td align="left"><font face="Helvetica-Bold" point-size="11"> Pattern repeats for remaining 994 segments / 124 more sectors:</font></td></tr>
+<tr><td><font face="Courier" point-size="9">   </font></td></tr>
+<tr><td align="left"><font face="Courier" point-size="9">  Every 3 page writes (768B freed)  →  ACK win+=768  →  client sends 1–4 segments</font></td></tr>
+<tr><td align="left"><font face="Courier" point-size="9">  Client window fills to 0 → waits for next update</font></td></tr>
+<tr><td><font face="Courier" point-size="9">   </font></td></tr>
+<tr><td align="left"><font face="Courier" color="#AA0000" point-size="9">  Every 16 pages (4096B = 1 sector boundary)  →  EraseSector ~50ms</font></td></tr>
+<tr><td align="left"><font face="Courier" color="#AA0000" point-size="9">  No tcp_recved during erase  →  window stays at 0  →  client BLOCKED</font></td></tr>
+<tr><td><font face="Courier" point-size="9">   </font></td></tr>
+<tr><td align="left"><font face="Courier" point-size="9">  Window update cadence:  every ~6ms   (3 × 2ms writes)</font></td></tr>
+<tr><td align="left"><font face="Courier" point-size="9">  Erase stall cadence:    every ~82ms  (16 × 2ms writes + 50ms erase per sector)</font></td></tr>
+<tr><td align="left"><font face="Courier" point-size="9">  125 sector erases × 50ms  =  6.25s  total erase time alone</font></td></tr>
+</table>>
+               shape=box style="filled" fillcolor="#EEEEFF" width=9.0 fixedsize=false
+               pos="8.5,-20.5!"]
+
+    // ── PHASE 5: Last sector + final segments ──────────────────────────────
+    F_ERASE125 [label="EraseSector(0x0007D000)  [sector 125/125]\n▓▓▓▓▓▓▓▓  ~50ms  ▓▓▓▓▓▓▓▓\nNO tcp_recved → client BLOCKED"
+                fillcolor="#FFBBBB" fontcolor="#880000" pos="14,-25.0!" height=0.60]
+
+    F_WLAST [label="WritePage #1998,1999,2000  [256B each]\ntcp_recved(256)×3  →  WINDOW UPDATE" fillcolor="#FFE866" pos="14,-26.2!" height=0.50]
+
+    L_WIN_LAST [label="ACK  win=768"     fillcolor="#AAFFAA" pos="8.5,-27.1!"]
+    C_S955     [label="PSH+ACK #955  536B" fillcolor="#C8DCF8" pos="3,-27.1!"]
+
+    C_S956 [label="PSH+ACK #956  (last segment)\nbytes_received → 512 000" fillcolor="#C8DCF8" pos="3,-28.0!" height=0.50]
+    L_S956 [label="http_recv_callback()\nbytes_received == content_length\nqueue [0B, is_last=1] ← DONE SIGNAL\ntcp_recv(pcb,NULL)  ← deregister recv"
+            fillcolor="#C8ECD8" pos="8.5,-28.0!" height=0.70]
+
+    L_ACK_LAST [label="ACK  (final data ack)" fillcolor="#C8ECD8" pos="8.5,-29.0!"]
+
+    // ── PHASE 6: HTTP response + teardown ─────────────────────────────────
+    F_LAST [label="msg [0B, is_last=1] dequeued\ntcpip_callback(tcp_recved, 0)\ntcpip_callback(send_response)"
+            fillcolor="#FFF3CC" pos="14,-30.2!" height=0.60]
+
+    L_RESP [label="tcp_write(HTTP 200 OK ~120B)\ntcp_output()\ntcp_close()" fillcolor="#C8ECD8" pos="8.5,-31.3!" height=0.60]
+
+    C_RESP   [label="◄ HTTP/1.1 200 OK\n  {\"status\":\"success\",\"bytes\":512000}" fillcolor="#C8DCF8" pos="3,-32.3!" height=0.50]
+    L_FIN    [label="FIN+ACK"           fillcolor="#C8ECD8" pos="8.5,-32.3!"]
+
+    C_ACKFIN [label="ACK + FIN+ACK"     fillcolor="#C8DCF8" pos="3,-33.2!"]
+    L_ACKFIN [label="ACK"               fillcolor="#C8ECD8" pos="8.5,-33.2!"]
+
+    // ── Summary ────────────────────────────────────────────────────────────
+    SUMMARY [label="956 TCP segments · 2000 page writes · 125 sector erases\n667 window updates (every 768B) · 668 win=0 stalls\nErase: 125×50ms=6.25s   Writes: 2000×2ms=4s   Total: ~10–12s"
+             shape=box style="filled,bold" fillcolor="#222222" fontcolor="white"
+             width=11.0 fixedsize=false fontname="Courier" fontsize=11
+             pos="8.5,-35.0!"]
+
+    // ─────────────────────────────────────────────────────────────────────
+    // MESSAGE ARROWS
+    // ─────────────────────────────────────────────────────────────────────
+
+    // Handshake
+    C_SYN    -> L_SYNACK [label=" SYN"       color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    L_SYNACK -> C_ACK0   [label=" SYN+ACK"   color="#2255AA" penwidth=1.8 arrowsize=0.8 dir=back]
+    C_ACK0   -> L_S1     [label=" ACK"       color="#2255AA" penwidth=1.8 arrowsize=0.8]
+
+    // First burst
+    C_S1 -> L_S1 [label=" #1  536B"          color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    C_S2 -> L_S2 [label=" #2  536B"          color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    C_S3 -> L_S3 [label=" #3  536B"          color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    C_S4 -> L_S4 [label=" #4  536B  win→0"   color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    L_WIN0A -> C_S4 [label=" ACK win=0 "     color="#CC4400" penwidth=2.2 arrowsize=0.9 dir=back style=bold]
+
+    // Queue to flash task
+    L_S4 -> F_ERASE1  [label=" xQueueSend(pages 1–7)" color="#B8860B" penwidth=1.4 arrowsize=0.8 style=dashed]
+
+    // Writes → window update #1
+    F_W3 -> L_WIN1 [label=" tcpip_callback\ntcp_recved(256)×3" color="#CC6600" penwidth=2.0 arrowsize=0.9 style=dashed]
+    L_WIN1 -> C_S5 [label=" ACK win=768 "  color="#007700" penwidth=2.4 arrowsize=1.0 dir=back style=bold]
+
+    C_S5 -> L_S5 [label=" #5  536B"        color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    C_S6 -> L_S6 [label=" #6  232B win→0"  color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    L_WIN0B -> C_S6 [label=" ACK win=0 "   color="#CC4400" penwidth=2.2 arrowsize=0.9 dir=back style=bold]
+    L_S6 -> F_W4 [label=" xQueueSend(pages 8–10)" color="#B8860B" penwidth=1.4 arrowsize=0.8 style=dashed]
+
+    // Writes → window update #2
+    F_W6 -> L_WIN2 [label=" tcpip_callback\ntcp_recved(256)×3" color="#CC6600" penwidth=2.0 arrowsize=0.9 style=dashed]
+    L_WIN2 -> C_S7 [label=" ACK win=768 "  color="#007700" penwidth=2.4 arrowsize=1.0 dir=back style=bold]
+    C_S7 -> L_WIN2 [label=" #7  536B"      color="#2255AA" penwidth=1.8 arrowsize=0.8]
+
+    // Last sector + final segments
+    F_WLAST -> L_WIN_LAST [label=" tcpip_callback\ntcp_recved(256)×3" color="#CC6600" penwidth=2.0 arrowsize=0.9 style=dashed]
+    L_WIN_LAST -> C_S955  [label=" ACK win=768 " color="#007700" penwidth=2.4 arrowsize=1.0 dir=back style=bold]
+    C_S955 -> L_S956      [label=" #955  536B"   color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    C_S956 -> L_S956      [label=" #956  last"   color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    L_ACK_LAST -> C_S956  [label=" ACK "         color="#007700" penwidth=1.8 arrowsize=0.8 dir=back]
+
+    // Queue final message
+    L_S956 -> F_LAST  [label=" xQueueSend\n[0B,is_last=1]"   color="#B8860B" penwidth=1.4 arrowsize=0.8 style=dashed]
+    F_LAST -> L_RESP  [label=" tcpip_callback\nsend_response" color="#CC6600" penwidth=2.0 arrowsize=0.9 style=dashed]
+
+    // Teardown
+    L_RESP  -> C_RESP   [label=" HTTP 200 OK " color="#2255AA" penwidth=1.8 arrowsize=0.8 dir=back]
+    L_FIN   -> C_RESP   [label=" FIN+ACK"      color="#2255AA" penwidth=1.8 arrowsize=0.8 dir=back]
+    C_ACKFIN -> L_ACKFIN [label=" ACK + FIN"   color="#2255AA" penwidth=1.8 arrowsize=0.8]
+    L_ACKFIN -> C_ACKFIN [label=" ACK"         color="#2255AA" penwidth=1.8 arrowsize=0.8 dir=back]
+
+    // Annotations (dotted connectors)
+    NOTE_THRESH -> F_W3   [style=dotted color="#888800" arrowhead=none]
+    NOTE_Q      -> L_S4   [style=dotted color="#444488" arrowhead=none]
+    NOTE_ERASE  -> F_ERASE1 [style=dotted color="#880000" arrowhead=none]
+}
