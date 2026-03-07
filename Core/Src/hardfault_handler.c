@@ -1,4 +1,5 @@
 #include "trice.h"
+#include "usart.h"
 #include <stdint.h>
 
 #define SCB_CFSR   (*((volatile uint32_t *)0xE000ED28))
@@ -51,6 +52,11 @@ typedef struct {
  */
 void HardFault_Handler_C(exception_stack_frame_t *hardfault_args, uint32_t lr_value)
 {
+    /* Abort any in-progress UART DMA so TriceTransfer() can transmit the dump */
+    HAL_UART_Abort(&huart3);
+
+    extern volatile uint32_t g_upload_progress;
+
     uint32_t cfsr = SCB_CFSR;
     uint32_t hfsr = SCB_HFSR;
     uint32_t dfsr = SCB_DFSR;
@@ -63,6 +69,7 @@ void HardFault_Handler_C(exception_stack_frame_t *hardfault_args, uint32_t lr_va
     TRice("     HARDFAULT EXCEPTION OCCURRED      \n");
     TRice("========================================\n");
 
+    TRice("upload_progress=0x%X\n", (unsigned)g_upload_progress);
     TRice("\n--- Stack Frame (auto-saved by CPU) ---\n");
     TRice("R0  = 0x%08X\n", hardfault_args->r0);
     TRice("R1  = 0x%08X\n", hardfault_args->r1);
@@ -149,7 +156,7 @@ void HardFault_Handler_C(exception_stack_frame_t *hardfault_args, uint32_t lr_va
     TRice("\n========================================\n");
     TRice("  System halted - infinite loop below   \n");
     TRice("========================================\n\n");
-
+    TriceTransfer();
     while (1) {
         __asm volatile ("nop");
     }

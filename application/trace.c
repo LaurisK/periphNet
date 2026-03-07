@@ -91,6 +91,17 @@ static void trace_task(void *argument)
         counter++;
         TRice("Counter is - %d\n", counter);
 
+        if (counter % 20 == 0) {
+            TaskHandle_t tcpip_h = xTaskGetHandle("tcpip_thread");
+            if (tcpip_h) {
+                TRice("tcpip HWM=%u words\n",
+                      (unsigned)uxTaskGetStackHighWaterMark(tcpip_h));
+            }
+            TRice("upload HWM=%u words heap=%u\n",
+                  (unsigned)uxTaskGetStackHighWaterMark(xTaskGetHandle("ImgUp")),
+                  (unsigned)xPortGetFreeHeapSize());
+        }
+
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

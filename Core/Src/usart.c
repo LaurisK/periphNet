@@ -100,7 +100,7 @@ void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-  huart3.Init.BaudRate = 921600;
+  huart3.Init.BaudRate = 115200;
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_NONE;
@@ -308,7 +308,6 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
  */
 void TriceNonBlockingWriteUartA(const void* buf, size_t nByte)
 {
-    HAL_UART_Abort(&huart3);
     HAL_UART_Transmit_DMA(&huart3, (uint8_t*)buf, nByte);
 }
 
@@ -318,7 +317,7 @@ void TriceNonBlockingWriteUartA(const void* buf, size_t nByte)
  */
 unsigned TriceOutDepthUartA(void)
 {
-    return huart3.TxXferCount;
+    return __HAL_DMA_GET_COUNTER(huart3.hdmatx);
 }
 
 /* USER CODE END 1 */

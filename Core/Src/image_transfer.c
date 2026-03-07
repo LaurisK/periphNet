@@ -42,6 +42,10 @@ typedef struct {
 
 static upload_session_t *active_upload = NULL;
 
+/* Incremented at each major step in image_upload_handler/queue_upload_page
+ * (tcpip_thread context).  Read by HardFault_Handler_C to pinpoint crash. */
+volatile uint32_t g_upload_progress = 0;
+
 typedef struct {
     struct tcp_pcb *pcb;
     uint32_t bytes_sent;
@@ -75,7 +79,7 @@ static QueueHandle_t s_upload_queue = NULL;
 typedef struct { struct tcp_pcb *pcb; uint16_t len; } sTcpRecvArg;
 
 /* Response is pre-built by the upload task (large stack) so tcpip_do_upload_response
- * runs with minimal stack in tcpip_thread (TCPIP_THREAD_STACKSIZE = 1024 bytes). */
+ * runs with minimal stack in tcpip_thread. */
 typedef struct {
     struct tcp_pcb *pcb;
     char  buf[128];
@@ -115,9 +119,12 @@ static void image_upload_task(void *arg)
             continue;
 
         /* SEQ: page dequeued — Phase 1→2 transition */
-        TRice("FWU: page addr=0x%X len=%u last=%u total=%lu\n",
+        TRice("FWU: page addr=0x%X len=%u last=%u total=%u\n",
               (unsigned)msg.flash_addr, (unsigned)msg.len,
-              (unsigned)msg.is_last, (unsigned long)msg.total_bytes);
+              (unsigned)msg.is_last, (unsigned)msg.total_bytes);
+        TRice("FWU: heap=%u hwm=%u\n",
+              (unsigned)xPortGetFreeHeapSize(),
+              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
         uint8_t write_ok = 1;
 
@@ -160,7 +167,13 @@ static void image_upload_task(void *arg)
         if (rarg) {
             rarg->pcb  = msg.pcb;
             rarg->len  = msg.len;
-            tcpip_callback(tcpip_do_recved, rarg);
+            err_t rarg_err = tcpip_callback(tcpip_do_recved, rarg);
+            if (rarg_err != ERR_OK) {
+                TRice("FWU: tcp_recved cb FAIL err=%d\n", (int)rarg_err);
+                vPortFree(rarg);
+            }
+        } else {
+            TRice("FWU: tcp_recved malloc FAIL\n");
         }
 
         if (msg.is_last || !write_ok) {
@@ -179,7 +192,7 @@ static void image_upload_task(void *arg)
                         "{\"error\":\"flash write failed\"}\r\n");
                 } else {
                     /* SEQ: Phase 6 — all pages written; dispatch HTTP 200 via tcpip_thread */
-                    TRice("FWU: upload_done %lu bytes -> HTTP 200\n", (unsigned long)msg.total_bytes);
+                    TRice("FWU: upload_done %u bytes -> HTTP 200\n", (unsigned)msg.total_bytes);
                     fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
                     fw_state.bytes_transferred = msg.total_bytes;
                     resp->buf_len = (uint16_t)snprintf(resp->buf, sizeof(resp->buf),
@@ -189,7 +202,15 @@ static void image_upload_task(void *arg)
                         "{\"status\":\"success\",\"bytes\":%lu}\r\n",
                         (unsigned long)msg.total_bytes);
                 }
-                tcpip_callback(tcpip_do_upload_response, resp);
+                err_t resp_err = tcpip_callback(tcpip_do_upload_response, resp);
+                if (resp_err != ERR_OK) {
+                    TRice("FWU: resp cb FAIL err=%d heap=%u\n",
+                          (int)resp_err, (unsigned)xPortGetFreeHeapSize());
+                    vPortFree(resp);
+                }
+            } else {
+                TRice("FWU: resp malloc FAIL heap=%u\n",
+                      (unsigned)xPortGetFreeHeapSize());
             }
             current_sector = 0xFFFFFFFF;
         }
@@ -327,15 +348,23 @@ static err_t queue_upload_page(upload_session_t *session, uint8_t is_last)
         return ERR_OK;
 
 #ifndef TEST_MODE
-    sUploadPage page;
-    memcpy(page.data, session->buffer, session->buffer_pos);
-    page.len         = session->buffer_pos;
-    page.flash_addr  = session->flash_write_addr;
-    page.is_last     = is_last;
-    page.pcb         = session->pcb;
-    page.total_bytes = session->bytes_received;
+    sUploadPage *page = (sUploadPage *)pvPortMalloc(sizeof(sUploadPage));
+    if (page == NULL) {
+        strcpy(fw_state.error_message, "Upload page alloc failed");
+        fw_state.status = IMG_STATUS_ERROR;
+        return ERR_ABRT;
+    }
+    memcpy(page->data, session->buffer, session->buffer_pos);
+    page->len         = session->buffer_pos;
+    page->flash_addr  = session->flash_write_addr;
+    page->is_last     = is_last;
+    page->pcb         = session->pcb;
+    page->total_bytes = session->bytes_received;
 
-    if (xQueueSend(s_upload_queue, &page, 0) != pdTRUE) {
+    g_upload_progress = 100u | ((uint32_t)is_last << 8) | ((page->flash_addr & 0xFFF) << 16);
+    err_t send_err = (xQueueSend(s_upload_queue, page, 0) == pdTRUE) ? ERR_OK : ERR_ABRT;
+    vPortFree(page);
+    if (send_err != ERR_OK) {
         strcpy(fw_state.error_message, "Upload queue full");
         fw_state.status = IMG_STATUS_ERROR;
         return ERR_ABRT;
@@ -407,6 +436,7 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_MEM;
         }
 
+        g_upload_progress = 1;
         memset(session, 0, sizeof(upload_session_t));
         session->pcb = pcb;
         session->flash_write_addr = IMG_UPDATE_FLASH_ADDR;
@@ -450,6 +480,7 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         }
 #endif /* TEST_MODE */
 
+        g_upload_progress = 2;
         fw_state.status = IMG_STATUS_UPLOADING;
         fw_state.bytes_transferred = 0;
         fw_state.total_bytes = session->content_length;
@@ -457,8 +488,10 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
 
         active_upload = session;
         tcp_arg(pcb, session);
+        g_upload_progress = 3;
     }
 
+    g_upload_progress = 4;
     for (struct pbuf *q = p; q != NULL; q = q->next) {
         char *seg_data = (char *)q->payload;
         uint16_t seg_len = q->len;
@@ -485,6 +518,7 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         }
 
         if (body_len > 0) {
+            g_upload_progress = 5;
             if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
                 tcp_arg(pcb, NULL);
                 vPortFree(session);
@@ -500,11 +534,13 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
                 tcp_close(pcb);
                 return ERR_ABRT;
             }
+            g_upload_progress = 6;
         }
     }
 
     if (session->bytes_received >= session->content_length) {
         /* Flush any partial final page */
+        g_upload_progress = 7;
         if (queue_upload_page(session, 1) != ERR_OK) {
             strcpy(fw_state.error_message, "Final flash write failed");
             fw_state.status = IMG_STATUS_ERROR;
@@ -524,14 +560,18 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
             return ERR_ABRT;
         }
 
+        g_upload_progress = 8;
         tcp_arg(pcb, NULL);
 #ifndef TEST_MODE
         /* Deregister recv callback so the FIN from curl doesn't cause a second
          * tcp_close racing with the task's tcpip_do_upload_response. */
+        g_upload_progress = 9;
         tcp_recv(pcb, NULL);
 #endif
+        g_upload_progress = 10;
         vPortFree(session);
         active_upload = NULL;
+        g_upload_progress = 11;
 
 #ifdef TEST_MODE
         /* In tests, send the HTTP response immediately (no task) */
