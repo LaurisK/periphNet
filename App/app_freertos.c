@@ -20,6 +20,8 @@
 #include "main.h"
 #include "usart.h"
 #include "w25q128.h"
+#include "lwip/netif.h"
+#include "lwip/dhcp.h"
 #include "trice.h"
 
 /* --------------------------------------------------------------------------
@@ -83,6 +85,29 @@ void App_DefaultTaskEntry(void)
               id.manufacturer_id, id.memory_type, id.capacity);
     } else {
         TRice("Flash INIT FAILED\n");
+    }
+
+    /* Wait for DHCP lease (poll gnetif, up to 30 s) */
+    extern struct netif gnetif;
+    TRice("Waiting for link + DHCP...\n");
+    for (uint32_t t = 0; t < 300U; t++) {
+        vTaskDelay(pdMS_TO_TICKS(100U));
+        KickIwdg();
+        if ((t % 50U) == 49U) {
+            TRice("  t=%us flags=0x%02X link=%u ip=0x%08X\n",
+                  (t + 1U) / 10U, gnetif.flags,
+                  netif_is_link_up(&gnetif), gnetif.ip_addr.addr);
+        }
+        if (gnetif.ip_addr.addr != 0U) {
+            uint32_t ip = gnetif.ip_addr.addr;
+            TRice("DHCP OK: %d.%d.%d.%d\n",
+                  (ip >>  0) & 0xFF, (ip >>  8) & 0xFF,
+                  (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+            break;
+        }
+    }
+    if (gnetif.ip_addr.addr == 0U) {
+        TRice("DHCP timeout – no IP (flags=0x%02X)\n", gnetif.flags);
     }
 
     uint32_t btnDebounce[3] = {0U, 0U, 0U};
