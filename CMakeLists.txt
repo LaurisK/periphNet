@@ -45,6 +45,7 @@ set(CORE_SOURCES
     Core/Src/sysmem.c
     Core/Src/system_stm32f4xx.c
     Core/Src/usart.c
+    Core/Src/w25q128.c
     Core/Startup/startup_stm32f407vetx.s
 )
 

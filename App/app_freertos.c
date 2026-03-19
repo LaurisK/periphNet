@@ -19,6 +19,7 @@
 #include "cmsis_os.h"
 #include "main.h"
 #include "usart.h"
+#include "w25q128.h"
 #include "trice.h"
 
 /* --------------------------------------------------------------------------
@@ -73,6 +74,16 @@ void App_DefaultTaskEntry(void)
     System_LogResetCause();
 
     TRice("PeriphNet started. Heap=%u\n", xPortGetFreeHeapSize());
+
+    /* External flash test – read JEDEC ID */
+    if (W25Q128_Init() == W25Q128_OK) {
+        W25Q128_ID_t id;
+        W25Q128_ReadID(&id);
+        TRice("Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\n",
+              id.manufacturer_id, id.memory_type, id.capacity);
+    } else {
+        TRice("Flash INIT FAILED\n");
+    }
 
     uint32_t btnDebounce[3] = {0U, 0U, 0U};
     uint32_t heartbeatTick  = 0U;
