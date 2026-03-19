@@ -16,6 +16,7 @@
 
 #include "App/app_freertos.h"
 #include "App/system.h"
+#include "App/Http/http_server.h"
 #include "cmsis_os.h"
 #include "main.h"
 #include "usart.h"
@@ -109,6 +110,10 @@ void App_DefaultTaskEntry(void)
     if (gnetif.ip_addr.addr == 0U) {
         TRice("DHCP timeout – no IP (flags=0x%02X)\n", gnetif.flags);
     }
+
+    /* Start HTTP server (upload/download/status) */
+    http_server_init();
+    TRice("HTTP server started on port 80\n");
 
     uint32_t btnDebounce[3] = {0U, 0U, 0U};
     uint32_t heartbeatTick  = 0U;
