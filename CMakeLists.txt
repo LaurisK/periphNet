@@ -62,6 +62,7 @@ set(APP_HAL_SOURCES
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c"
+    "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_iwdg.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc_ex.c"
     "Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c"

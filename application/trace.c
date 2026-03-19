@@ -6,6 +6,7 @@
 #include "lwip/netif.h"
 #include <string.h>
 #include <stdio.h>
+#include "iwdg.h"
 
 typedef struct {
     struct tcp_pcb *pcb;
@@ -59,8 +60,10 @@ static void trace_task(void *argument)
     uint32_t counter = 0;
 
     (void)argument;
-
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    for (int i = 0; i < 5; i++) {
+        MX_IWDG_Kick();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
     trace_server.server_pcb = tcp_new();
 
@@ -100,6 +103,8 @@ static void trace_task(void *argument)
             TRice("upload HWM=%u words heap=%u\n",
                   (unsigned)uxTaskGetStackHighWaterMark(xTaskGetHandle("ImgUp")),
                   (unsigned)xPortGetFreeHeapSize());
+
+            MX_IWDG_Kick();
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));

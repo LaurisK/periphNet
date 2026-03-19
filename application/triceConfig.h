@@ -84,8 +84,9 @@ extern "C" {
 // Timestamp Configuration
 // ===========================================================================
 
-//! Use FreeRTOS tick count as timestamp (32-bit)
-#define TriceStamp32 xTaskGetTickCount()
+//! Use FreeRTOS tick count as timestamp (32-bit).
+//! xTaskGetTickCountFromISR() is ISR/exception-safe (pure BASEPRI, no context assert).
+#define TriceStamp32 xTaskGetTickCountFromISR()
 
 // ===========================================================================
 // Feature Configuration
@@ -97,8 +98,10 @@ extern "C" {
 #define TRICE_UARTA USART3
 #define TRICE_DEFERRED_UARTA 1
 
-//! Disable TCP output (was AUXILIARY8)
-#define TRICE_DEFERRED_AUXILIARY8 0
+//! Enable TCP auxiliary output so crash logs from HardFault handler reach the
+//! trice TCP viewer.  TriceNonBlockingDeferredWrite8Auxiliary() guards against
+//! being called in exception context (where tcp_write is unsafe).
+#define TRICE_DEFERRED_AUXILIARY8 1
 
 //! Disable features not needed
 #define TRICE_DEFERRED_XTEA_ENCRYPT 0
@@ -115,9 +118,13 @@ extern "C" {
 #include "task.h"
 
 //! Trice uses: TRICE_ENTER_CRITICAL_SECTION { code } TRICE_LEAVE_CRITICAL_SECTION
-//! So we need macros that expand to opening/closing statements
-#define TRICE_ENTER_CRITICAL_SECTION taskENTER_CRITICAL();
-#define TRICE_LEAVE_CRITICAL_SECTION taskEXIT_CRITICAL();
+//! Use ISR-safe BASEPRI manipulation instead of taskENTER/EXIT_CRITICAL so that
+//! TRice() is callable from exception handlers (HardFault) as well as tasks.
+//! taskENTER_CRITICAL fires configASSERT(pdFALSE) when called in exception context
+//! (portNVIC_INT_CTRL_REG & portVECTACTIVE_MASK != 0), freezing the MCU.
+//! portSET/CLEAR_INTERRUPT_MASK_FROM_ISR are pure BASEPRI writes with no context check.
+#define TRICE_ENTER_CRITICAL_SECTION { uint32_t trice_prim = portSET_INTERRUPT_MASK_FROM_ISR();
+#define TRICE_LEAVE_CRITICAL_SECTION portCLEAR_INTERRUPT_MASK_FROM_ISR(trice_prim); }
 
 #ifdef __cplusplus
 }

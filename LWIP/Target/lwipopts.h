@@ -72,8 +72,7 @@
 /*----- Value in opt.h for LWIP_NETIF_LINK_CALLBACK: 0 -----*/
 #define LWIP_NETIF_LINK_CALLBACK 1
 /*----- Value in opt.h for TCPIP_THREAD_STACKSIZE: 0 -----*/
-/* CMSIS-RTOS v2: stack_size is in BYTES. 8192 = 2048 words for deep HTTP/flash handler chains. */
-#define TCPIP_THREAD_STACKSIZE 8192
+#define TCPIP_THREAD_STACKSIZE 2048
 /*----- Value in opt.h for TCPIP_THREAD_PRIO: 1 -----*/
 #define TCPIP_THREAD_PRIO 24
 /*----- Value in opt.h for TCPIP_MBOX_SIZE: 0 -----*/
@@ -94,6 +93,10 @@
 #define DEFAULT_ACCEPTMBOX_SIZE 6
 /*----- Value in opt.h for RECV_BUFSIZE_DEFAULT: INT_MAX -----*/
 #define RECV_BUFSIZE_DEFAULT 2000000000
+/*----- Default Value for LWIP_DISABLE_TCP_SANITY_CHECKS: 0 ---*/
+#define LWIP_DISABLE_TCP_SANITY_CHECKS 1
+/*----- Default Value for LWIP_DISABLE_MEMP_SANITY_CHECKS: 0 ---*/
+#define LWIP_DISABLE_MEMP_SANITY_CHECKS 1
 /*----- Value in opt.h for LWIP_STATS: 1 -----*/
 #define LWIP_STATS 0
 /*----- Value in opt.h for CHECKSUM_GEN_IP: 1 -----*/

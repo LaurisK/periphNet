@@ -1121,10 +1121,10 @@ void HardFault_Handler_C(exception_stack_frame_t *frame, uint32_t lr) {
 # First, identify the USB-to-serial device
 ls /dev/ttyUSB* /dev/ttyACM*
 
-# From project root - connect to USART3 @ 920800 baud
+# From project root - connect to USART3 @ 921600 baud
 ./tools/trice log \
     -p COM \
-    -args "/dev/ttyUSB0:920800" \
+    -args "/dev/ttyUSB0:921600" \
     -i ./til.json \
     -li ./li.json \
     -color default \
@@ -1134,7 +1134,7 @@ ls /dev/ttyUSB* /dev/ttyACM*
 
 **Parameters:**
 - `-p COM` - Use serial COM port connection
-- `-args "PORT:BAUD"` - Serial device and baud rate (USART3 @ 920800)
+- `-args "PORT:BAUD"` - Serial device and baud rate (USART3 @ 921600)
 - `-i ./til.json` - Trice ID list (auto-generated)
 - `-li ./li.json` - Location information (auto-generated)
 - `-color default` - Enable colorized output
@@ -1143,12 +1143,12 @@ ls /dev/ttyUSB* /dev/ttyACM*
 
 **Hardware connection:**
 - USART3 TX (PD8) connects to USB-to-serial RX
-- Baud rate: 920800 (high speed for minimal trace overhead)
+- Baud rate: 921600 (high speed for minimal trace overhead)
 - DMA transmission for non-blocking output
 
 **Save to file:**
 ```bash
-./tools/trice log -p COM -args "/dev/ttyUSB0:920800" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
+./tools/trice log -p COM -args "/dev/ttyUSB0:921600" -i ./til.json -li ./li.json 2>&1 | tee trace_output.log
 ```
 
 ### Build Integration
@@ -1178,7 +1178,7 @@ Trice IDs are automatically managed by CMake:
 Trice configuration is in `application/triceConfig.h`:
 
 - **Buffer mode:** Double buffer (1072 bytes total)
-- **Output:** UART DMA (USART3 @ 920800 baud)
+- **Output:** UART DMA (USART3 @ 921600 baud)
 - **Hardware:** STM32 USART3 with DMA1_Stream3
 - **Functions:** `TriceNonBlockingWriteUartA()` / `TriceOutDepthUartA()` in `Core/Src/usart.c`
 - **Framing:** TCOBS (efficient zero-delimiter framing)
@@ -1187,14 +1187,14 @@ Trice configuration is in `application/triceConfig.h`:
 
 **Implementation (based on Lusety project):**
 - `TriceNonBlockingWriteUartA()` - Starts DMA transfer via `HAL_UART_Transmit_DMA()`
-- `TriceOutDepthUartA()` - Returns bytes remaining in DMA transfer (`huart.TxXferCount`)
+- `TriceOutDepthUartA()` - Returns bytes remaining in DMA transfer (`__HAL_DMA_GET_COUNTER(huart3.hdmatx)`)
 - Non-blocking transmission: Trice never waits for UART, uses DMA for background output
 
 **Why double buffer + DMA?**
 - Fast trice execution (no blocking on UART send)
 - Background transmission via DMA (CPU-free output)
 - Buffer swap via `TriceTransfer()` called every 50ms from trace task
-- High-speed output (920800 baud) with minimal overhead
+- High-speed output (921600 baud) with minimal overhead
 
 ### Common Patterns
 
