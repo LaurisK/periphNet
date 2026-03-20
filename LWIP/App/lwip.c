@@ -29,6 +29,8 @@
 #include <string.h>
 
 /* USER CODE BEGIN 0 */
+#include "lwip/apps/mdns.h"
+#include "lwip/igmp.h"
 /* USER CODE END 0 */
 /* Private function prototypes -----------------------------------------------*/
 static void ethernet_link_status_updated(struct netif *netif);
@@ -91,6 +93,10 @@ void MX_LWIP_Init(void)
   dhcp_start(&gnetif);
 
 /* USER CODE BEGIN 3 */
+  mdns_resp_init();
+  mdns_resp_add_netif(&gnetif, "periphnet", 300);
+  mdns_resp_add_service(&gnetif, "PeriphNet Web", "_http",
+                        DNSSD_PROTO_TCP, 80, 300, NULL, NULL);
 /* USER CODE END 3 */
 }
 
@@ -111,6 +117,7 @@ static void ethernet_link_status_updated(struct netif *netif)
   if (netif_is_up(netif))
   {
 /* USER CODE BEGIN 5 */
+    mdns_resp_announce(netif);
 /* USER CODE END 5 */
   }
   else /* netif is down */

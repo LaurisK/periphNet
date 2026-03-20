@@ -122,6 +122,17 @@
 /*-----------------------------------------------------------------------------*/
 /* USER CODE BEGIN 1 */
 
+/* mDNS responder — access board via periphnet.local */
+#define LWIP_MDNS_RESPONDER       1
+#define MDNS_MAX_SERVICES         1
+#define LWIP_IGMP                 1
+#define LWIP_NUM_NETIF_CLIENT_DATA (LWIP_MDNS_RESPONDER)
+#define MEMP_NUM_UDP_PCB          8
+
+/* Increase timeout pool for mDNS timers */
+#undef MEMP_NUM_SYS_TIMEOUT
+#define MEMP_NUM_SYS_TIMEOUT      10
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus

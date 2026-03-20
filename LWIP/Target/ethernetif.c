@@ -333,7 +333,17 @@ static void low_level_init(struct netif *netif)
 #endif /* LWIP_ARP || LWIP_ETHERNET */
 
 /* USER CODE BEGIN LOW_LEVEL_INIT */
+#if LWIP_IGMP
+  netif->flags |= NETIF_FLAG_IGMP;
 
+  /* Enable multicast reception in MAC filter */
+  {
+    ETH_MACFilterConfigTypeDef filterConf;
+    HAL_ETH_GetMACFilterConfig(&heth, &filterConf);
+    filterConf.PassAllMulticast = ENABLE;
+    HAL_ETH_SetMACFilterConfig(&heth, &filterConf);
+  }
+#endif /* LWIP_IGMP */
 /* USER CODE END LOW_LEVEL_INIT */
 }
 
