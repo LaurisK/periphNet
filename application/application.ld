@@ -44,7 +44,7 @@ SECTIONS
     . = ALIGN(4);
     KEEP(*(.app_header))
     . = ALIGN(4);
-  } >APP_HEADER AT>FLASH
+  } >APP_HEADER
 
   /* The program code and other data into "FLASH" Rom type memory */
   /* Start after vector table + app_header */
