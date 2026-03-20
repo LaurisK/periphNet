@@ -1,6 +1,8 @@
 #include "App/Http/image_transfer.h"
 #include "App/system.h"
 #include "w25q128.h"
+#include "boot_status.h"
+#include "image_mgmt.h"
 #include "lwip/tcp.h"
 #include "FreeRTOS.h"
 #include <string.h>
@@ -18,6 +20,8 @@ static image_state_t fw_state = {
     .crc32             = 0,
     .error_message     = {0}
 };
+
+static volatile bool reboot_pending = false;
 
 typedef struct {
     struct tcp_pcb *pcb;
@@ -485,4 +489,84 @@ err_t image_status_handler(struct tcp_pcb *pcb)
     tcp_output(pcb);
     vPortFree(response);
     return ERR_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Install handler — validate staged image, set FWU flag, trigger reboot
+ * -------------------------------------------------------------------------- */
+
+err_t image_install_handler(struct tcp_pcb *pcb)
+{
+    char response[256];
+    int len;
+
+    /* Must have a completed upload */
+    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
+        fw_state.status != IMG_STATUS_DOWNLOAD_READY) {
+
+        len = snprintf(response, sizeof(response),
+            "HTTP/1.1 409 Conflict\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"error\":\"no staged firmware available\"}\r\n");
+        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    /* Validate the staged image in ext flash */
+    uint8_t work_buf[sizeof(sAppInfo)];
+    eFwuRes res = ImgMgmt_Validate(EXT_FLASH_FWU_IMG_ADDR, true,
+                                    work_buf, sizeof(work_buf));
+    if (res != FWU_OK) {
+        len = snprintf(response, sizeof(response),
+            "HTTP/1.1 422 Unprocessable Entity\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"error\":\"staged image validation failed\",\"code\":%d}\r\n",
+            (int)res);
+        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    /* Read version from staged image */
+    sFwVerArea staged_ver;
+    ImgMgmt_GetVersion(EXT_FLASH_FWU_IMG_ADDR, true, &staged_ver);
+
+    /* Request FWU — writes boot status with fwu_requested flag cleared */
+    if (BootStatus_RequestFwu(fw_state.total_bytes, 0, &staged_ver) != 0) {
+        len = snprintf(response, sizeof(response),
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"error\":\"failed to write boot status\"}\r\n");
+        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    /* Signal reboot to main task */
+    reboot_pending = true;
+
+    len = snprintf(response, sizeof(response),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+        "{\"status\":\"deploying\","
+        "\"message\":\"Device will reboot in 2 seconds\","
+        "\"size\":%lu}\r\n",
+        (unsigned long)fw_state.total_bytes);
+    tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+    tcp_output(pcb);
+    tcp_close(pcb);
+    return ERR_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Reboot pending flag (checked by main task)
+ * -------------------------------------------------------------------------- */
+
+bool image_transfer_reboot_pending(void)
+{
+    return reboot_pending;
 }

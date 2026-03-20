@@ -17,6 +17,8 @@
 #include "App/app_freertos.h"
 #include "App/system.h"
 #include "App/Http/http_server.h"
+#include "App/Http/image_transfer.h"
+#include "boot_status.h"
 #include "cmsis_os.h"
 #include "main.h"
 #include "usart.h"
@@ -78,12 +80,20 @@ void App_DefaultTaskEntry(void)
 
     TRice("PeriphNet started. Heap=%u\n", xPortGetFreeHeapSize());
 
-    /* External flash test – read JEDEC ID */
+    /* External flash init + read JEDEC ID */
     if (W25Q128_Init() == W25Q128_OK) {
         W25Q128_ID_t id;
         W25Q128_ReadID(&id);
         TRice("Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\n",
               id.manufacturer_id, id.memory_type, id.capacity);
+
+        /* Confirm boot to bootloader (clears confirmed flag in boot status).
+         * Done early, before HTTP server starts, to avoid SPI bus contention. */
+        if (BootStatus_ConfirmApp() == 0) {
+            TRice("Boot confirmed\n");
+        } else {
+            TRice("Boot confirm FAILED (ext flash write)\n");
+        }
     } else {
         TRice("Flash INIT FAILED\n");
     }
@@ -123,6 +133,13 @@ void App_DefaultTaskEntry(void)
 
         /* Feed watchdog every 100 ms */
         KickIwdg();
+
+        /* Reboot for firmware install if requested via HTTP */
+        if (image_transfer_reboot_pending()) {
+            TRice("Rebooting for firmware install...\n");
+            vTaskDelay(pdMS_TO_TICKS(2000U));  /* let Trice flush + TCP close */
+            NVIC_SystemReset();
+        }
 
         /* Heartbeat every 1 s (10 × 100 ms) */
         heartbeatTick++;

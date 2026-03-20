@@ -56,6 +56,14 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
         return result;
     }
 
+    /* POST /api/firmware/install */
+    if (p->len >= 26 && strncmp(request, "POST /api/firmware/install", 26) == 0) {
+        err_t result = image_install_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        return result;
+    }
+
     /* GET /api/firmware/status */
     if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
         err_t result = image_status_handler(pcb);

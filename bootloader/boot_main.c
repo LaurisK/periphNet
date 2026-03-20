@@ -5,6 +5,7 @@
 #include "boot_status.h"
 #include "image_mgmt.h"
 #include <stdbool.h>
+#include <string.h>
 
 void SystemClock_Config(void);
 
@@ -68,20 +69,104 @@ static void boot_blink_error(void)
 }
 
 /* --------------------------------------------------------------------------
- * FWU install (stub — copies ext flash → internal flash in the future)
+ * FWU install — copy staged image from ext flash → internal flash
+ *
+ *   1. Erase application sectors (2-7)
+ *   2. Read from ext flash in 256-byte chunks
+ *   3. Program internal flash word-by-word
+ *   4. Verify by reading back
  * -------------------------------------------------------------------------- */
+
+#define INSTALL_BUF_SIZE  256u
+#define INSTALL_LED_INTERVAL  (32u * 1024u)  /* blink every 32 KB */
 
 static bool boot_install_firmware(const sBootStatus *st)
 {
-    (void)st;
-    /*
-     * Future implementation:
-     *   1. Erase application sectors (2-7)
-     *   2. Read from ext flash at EXT_FLASH_FWU_IMG_ADDR
-     *   3. Program internal flash at APPLICATION_START_ADDR
-     *   4. Verify written data
-     */
-    return false;   /* not implemented yet */
+    uint32_t image_size = st->image_size;
+
+    if (image_size == 0 || image_size > APPLICATION_SIZE) {
+        return false;
+    }
+
+    /* ---- Step 1: Erase application sectors 2-7 ---- */
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase_init;
+    erase_init.TypeErase    = FLASH_TYPEERASE_SECTORS;
+    erase_init.Sector       = FLASH_SECTOR_2;
+    erase_init.NbSectors    = 6;
+    erase_init.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+
+    uint32_t sector_error;
+    if (HAL_FLASHEx_Erase(&erase_init, &sector_error) != HAL_OK) {
+        HAL_FLASH_Lock();
+        return false;
+    }
+
+    boot_blink_led(1);  /* erase complete indicator */
+
+    /* ---- Step 2 & 3: Read from ext flash, program internal flash ---- */
+    uint8_t buf[INSTALL_BUF_SIZE];
+    uint32_t offset = 0;
+    uint32_t next_led = INSTALL_LED_INTERVAL;
+
+    while (offset < image_size) {
+        uint32_t chunk = image_size - offset;
+        if (chunk > INSTALL_BUF_SIZE) {
+            chunk = INSTALL_BUF_SIZE;
+        }
+
+        if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + offset, buf, chunk) != W25Q128_OK) {
+            HAL_FLASH_Lock();
+            return false;
+        }
+
+        /* Program word-by-word (4 bytes at a time) */
+        for (uint32_t i = 0; i < chunk; i += 4) {
+            uint32_t word = 0xFFFFFFFFu;
+            uint32_t bytes_left = chunk - i;
+            if (bytes_left >= 4) {
+                memcpy(&word, &buf[i], 4);
+            } else {
+                memcpy(&word, &buf[i], bytes_left);
+            }
+
+            if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                                  APPLICATION_START_ADDR + offset + i,
+                                  (uint64_t)word) != HAL_OK) {
+                HAL_FLASH_Lock();
+                return false;
+            }
+        }
+
+        offset += chunk;
+
+        /* Progress LED blink every 32 KB */
+        if (offset >= next_led) {
+            boot_blink_led(1);
+            next_led += INSTALL_LED_INTERVAL;
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    /* ---- Step 4: Verify by reading back and comparing ---- */
+    for (uint32_t off = 0; off < image_size; off += INSTALL_BUF_SIZE) {
+        uint32_t chunk = image_size - off;
+        if (chunk > INSTALL_BUF_SIZE) {
+            chunk = INSTALL_BUF_SIZE;
+        }
+
+        if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + off, buf, chunk) != W25Q128_OK) {
+            return false;
+        }
+
+        if (memcmp(buf, (const void *)(APPLICATION_START_ADDR + off), chunk) != 0) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /* --------------------------------------------------------------------------

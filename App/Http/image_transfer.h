@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "lwip/tcp.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef enum {
@@ -33,6 +34,8 @@ const image_state_t *image_transfer_get_status(void);
 err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p);
 err_t image_download_handler(struct tcp_pcb *pcb);
 err_t image_status_handler(struct tcp_pcb *pcb);
+err_t image_install_handler(struct tcp_pcb *pcb);
+bool  image_transfer_reboot_pending(void);
 
 #ifdef __cplusplus
 }
