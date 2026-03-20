@@ -4,6 +4,10 @@
 #include <string.h>
 #include <stddef.h>
 
+#ifdef BOOTLOADER_BUILD
+#include "secrets.h"
+#endif
+
 /* Offset of the flags field inside sBootStatus.
  * Flags live outside the CRC so individual bits can be cleared
  * without erasing/rewriting the whole header. */
@@ -84,7 +88,10 @@ int BootStatus_EnsureValid(void)
     /* Write fresh default */
     memset(&st, 0, sizeof(st));
     st.magic        = BOOT_STATUS_MAGIC;
-    st.version      = 1;
+    st.version      = 2;
+#ifdef BOOTLOADER_BUILD
+    memcpy(st.aes_key, GLB_blKey, AES128_KEY_SIZE);
+#endif
     st.header_crc32 = compute_header_crc(&st);
     st.flags.word   = 0xFFFFFFFFu;          /* all flags at erased state */
 
@@ -98,11 +105,18 @@ int BootStatus_EnsureValid(void)
 int BootStatus_RequestFwu(uint32_t image_size, uint32_t image_crc32,
                           const sFwVerArea *staged_ver)
 {
+    /* Read existing status to preserve aes_key */
+    sBootStatus old;
+    bool had_key = (BootStatus_Read(&old) == 0);
+
     sBootStatus st;
     memset(&st, 0, sizeof(st));
 
     st.magic      = BOOT_STATUS_MAGIC;
-    st.version    = 1;
+    st.version    = 2;
+    if (had_key) {
+        memcpy(st.aes_key, old.aes_key, AES128_KEY_SIZE);
+    }
     st.image_size = image_size;
     st.image_crc32 = image_crc32;
 
@@ -233,6 +247,49 @@ int BootStatus_ClearFlags(void)
     }
 
     st.flags.word = 0xFFFFFFFFu;
+
+    return BootStatus_Write(&st);
+}
+
+/* --------------------------------------------------------------------------
+ * GetAesKey — read the AES key from boot status
+ * -------------------------------------------------------------------------- */
+
+int BootStatus_GetAesKey(uint8_t key[AES128_KEY_SIZE])
+{
+    sBootStatus st;
+
+    if (!key) {
+        return -1;
+    }
+
+    if (BootStatus_Read(&st) != 0) {
+        memset(key, 0, AES128_KEY_SIZE);
+        return -1;
+    }
+
+    memcpy(key, st.aes_key, AES128_KEY_SIZE);
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * SetAesKey — update the AES key in boot status (full sector rewrite)
+ * -------------------------------------------------------------------------- */
+
+int BootStatus_SetAesKey(const uint8_t key[AES128_KEY_SIZE])
+{
+    sBootStatus st;
+
+    if (!key) {
+        return -1;
+    }
+
+    if (BootStatus_Read(&st) != 0) {
+        return -1;
+    }
+
+    memcpy(st.aes_key, key, AES128_KEY_SIZE);
+    st.header_crc32 = compute_header_crc(&st);
 
     return BootStatus_Write(&st);
 }

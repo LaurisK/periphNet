@@ -59,15 +59,19 @@ typedef int     (*fVerifyInternalApp)(void);
 typedef bool    (*fVerifyHmac)(const uint8_t *data, uint32_t size,
                                const uint8_t expected[DFU_HMAC_SIZE]);
 typedef eFwuRes (*fDecryptBlob)(uint8_t *data, uint32_t size);
+typedef eFwuRes (*fVerifyImageHmac)(uint32_t flash_addr, bool is_external,
+                                    uint32_t size,
+                                    const uint8_t expected[DFU_HMAC_SIZE]);
 
 typedef struct {
     uint32_t            magic;               /* BL_API_MAGIC                 */
-    uint32_t            version;             /* API version (2)              */
+    uint32_t            version;             /* API version (3)              */
     fGetBlVersion       get_bl_version;      /* return BL version            */
     fVerifyInternalApp  verify_internal_app; /* validate app in int. flash   */
-    fVerifyHmac         verify_hmac;         /* HMAC-SHA256 verify  (stub)   */
+    fVerifyHmac         verify_hmac;         /* HMAC-SHA256 verify (RAM)     */
     fDecryptBlob        decrypt_blob;        /* AES-GCM decrypt     (stub)   */
-    uint32_t            reserved[10];        /* future expansion             */
+    fVerifyImageHmac    verify_image_hmac;   /* HMAC verify over flash image */
+    uint32_t            reserved[9];         /* future expansion             */
 } sBootloaderApi;
 
 /* ==========================================================================

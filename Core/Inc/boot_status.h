@@ -71,6 +71,20 @@ eFwuAction BootStatus_GetFwuAction(void);
  */
 int BootStatus_ClearFlags(void);
 
+/**
+ * Read the AES-128 key from boot status.
+ * @param key  Output buffer (16 bytes). Zeroed on error.
+ * @return 0 on success, -1 on error.
+ */
+int BootStatus_GetAesKey(uint8_t key[AES128_KEY_SIZE]);
+
+/**
+ * Update the AES-128 key in boot status (sector erase + rewrite).
+ * @param key  New 16-byte key.
+ * @return 0 on success, -1 on error.
+ */
+int BootStatus_SetAesKey(const uint8_t key[AES128_KEY_SIZE]);
+
 #ifdef __cplusplus
 }
 #endif

@@ -88,14 +88,57 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
         return FWU_ERR_IMAGE_SIZE;
     }
 
-    /* ---- HMAC verification (stub: always passes) ---- */
-    /*
-     * Future: read image in chunks, compute HMAC-SHA256, compare with
-     * info->image_hmac[]. The HMAC key will be stored in boot status
-     * (ext flash) and accessible only via BL API.
-     *
-     * For now, skip HMAC — images are considered valid if magic + size OK.
-     */
+    /* ---- HMAC verification ---- */
+
+    /* Skip if image_size is unpatched (no post-build tool) */
+    if (info->image_size != 0xFFFFFFFFu) {
+        /* Check for all-0xFF placeholder (unsigned image) */
+        bool hmac_is_placeholder = true;
+        for (uint32_t i = 0; i < DFU_HMAC_SIZE; i++) {
+            if (info->image_hmac[i] != 0xFFu) {
+                hmac_is_placeholder = false;
+                break;
+            }
+        }
+
+        if (!hmac_is_placeholder) {
+#ifdef BOOTLOADER_BUILD
+            /* BL has direct access to key — declared in boot_api.c */
+            extern eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
+                                                 uint32_t size,
+                                                 const uint8_t expected[DFU_HMAC_SIZE]);
+            eFwuRes hmac_res = bl_verify_image_hmac(base, is_external,
+                                                     info->image_size,
+                                                     info->image_hmac);
+            if (hmac_res != FWU_OK) {
+                return FWU_ERR_IMAGE_HMAC;
+            }
+#else
+            /*
+             * APP context: BL API functions use BL's SPI globals which
+             * are not initialized when the APP is running.  For external
+             * flash images, skip HMAC here — the bootloader will do the
+             * authoritative verification during install.
+             *
+             * For internal flash (memory-mapped), BL API works fine.
+             */
+            if (!is_external) {
+                const sBootloaderApi *bl_api =
+                    (const sBootloaderApi *)BL_API_TABLE_ADDR;
+                if (bl_api->magic == BL_API_MAGIC &&
+                    bl_api->version >= 3 &&
+                    bl_api->verify_image_hmac != NULL) {
+                    eFwuRes hmac_res = bl_api->verify_image_hmac(
+                        base, is_external, info->image_size, info->image_hmac);
+                    if (hmac_res != FWU_OK) {
+                        return FWU_ERR_IMAGE_HMAC;
+                    }
+                }
+            }
+            /* External flash HMAC: deferred to bootloader during install */
+#endif
+        }
+    }
 
     return FWU_OK;
 }

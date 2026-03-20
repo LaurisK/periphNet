@@ -1,6 +1,7 @@
 #ifndef DFU_TYPES_H
 #define DFU_TYPES_H
 
+#include "aes128.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -111,7 +112,8 @@ typedef union {
 
 typedef struct {
     uint32_t    magic;                      /* BOOT_STATUS_MAGIC             */
-    uint32_t    version;                    /* struct version (1)            */
+    uint32_t    version;                    /* struct version (2)            */
+    uint8_t     aes_key[AES128_KEY_SIZE];   /* AES-128 key (BL inits)       */
     uint32_t    image_size;                 /* staged image size             */
     uint32_t    image_crc32;                /* staged image CRC32            */
     sFwVerArea  staged_version;             /* staged image version          */

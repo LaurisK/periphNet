@@ -100,6 +100,7 @@ set(BL_SOURCES
     bootloader/boot_main.c
     bootloader/boot_api.c
     bootloader/boot_stm32f4xx_it.c
+    bootloader/secrets.c
     Core/Startup/startup_stm32f407vetx.s
     Core/Src/gpio.c
     Core/Src/spi.c
@@ -111,6 +112,10 @@ set(BL_SOURCES
     Core/Src/boot_status.c
     Core/Src/image_mgmt.c
     Core/Src/version.c
+    Core/Src/sha256.c
+    Core/Src/hmac_sha256.c
+    Core/Src/aes128.c
+    Core/Src/aes_gcm.c
 )
 
 set(BL_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/bootloader.ld)
@@ -130,7 +135,10 @@ add_executable(bootloader.elf
     ${HAL_SOURCES}
 )
 
-target_include_directories(bootloader.elf PRIVATE ${BASE_INCLUDES})
+target_include_directories(bootloader.elf PRIVATE
+    ${BASE_INCLUDES}
+    bootloader
+)
 
 # Bootloader does NOT define APPLICATION_BUILD → VTOR stays at 0x08000000
 target_compile_definitions(bootloader.elf PRIVATE
@@ -183,6 +191,10 @@ set(APP_CORE_SOURCES
     Core/Src/boot_status.c
     Core/Src/image_mgmt.c
     Core/Src/version.c
+    Core/Src/sha256.c
+    Core/Src/hmac_sha256.c
+    Core/Src/aes128.c
+    Core/Src/aes_gcm.c
     Core/Startup/startup_stm32f407vetx.s
     application/app_info.c
 )
@@ -307,10 +319,12 @@ set_target_properties(application.elf PROPERTIES
     LINK_FLAGS "${APP_LINK_FLAGS}"
 )
 
-# Post-build: generate binary + size report + clean Trice IDs
+# Post-build: generate binary + sign + size report + clean Trice IDs
 add_custom_command(TARGET application.elf POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O ihex   $<TARGET_FILE:application.elf> application.hex
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:application.elf> application.bin
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/dfu_image_tool.py sign
+            -i ${CMAKE_CURRENT_BINARY_DIR}/application.bin
     COMMAND ${CMAKE_SIZE} --format=berkeley $<TARGET_FILE:application.elf>
     COMMENT "Application size:"
 )
