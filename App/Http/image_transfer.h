@@ -25,6 +25,11 @@ typedef struct {
     uint32_t flash_address;
     uint32_t crc32;
     char error_message[64];
+    /* Metadata extracted from uploaded binary's sAppInfo (offset 0x200) */
+    bool     meta_valid;
+    char     staged_version[24];  /* e.g. "Pl1.0.0" */
+    uint32_t staged_features;
+    uint32_t staged_image_size;
 } image_state_t;
 
 void image_transfer_init(void);
@@ -35,6 +40,7 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p);
 err_t image_download_handler(struct tcp_pcb *pcb);
 err_t image_status_handler(struct tcp_pcb *pcb);
 err_t image_install_handler(struct tcp_pcb *pcb);
+err_t image_delete_handler(struct tcp_pcb *pcb);
 bool  image_transfer_reboot_pending(void);
 
 #ifdef __cplusplus

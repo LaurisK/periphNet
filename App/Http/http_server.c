@@ -1,5 +1,7 @@
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
+#include "bl_app_contract.h"
+#include "version.h"
 #include "lwip/tcp.h"
 #include "FreeRTOS.h"
 #include <string.h>
@@ -58,10 +60,16 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
 
     /* POST /api/firmware/install */
     if (p->len >= 26 && strncmp(request, "POST /api/firmware/install", 26) == 0) {
-        err_t result = image_install_handler(pcb);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
-        return result;
+        return image_install_handler(pcb);
+    }
+
+    /* DELETE /api/firmware/staged */
+    if (p->len >= 27 && strncmp(request, "DELETE /api/firmware/staged", 27) == 0) {
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        return image_delete_handler(pcb);
     }
 
     /* GET /api/firmware/status */
@@ -87,7 +95,14 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             default:                         status_str = "unknown";        break;
         }
 
-        char *buf = (char *)pvPortMalloc(512);
+        /* Read running version from internal flash sAppInfo */
+        char running_ver[24] = "unknown";
+        const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+        if (app->magic == APP_INFO_MAGIC) {
+            ver_toString(&app->fw_version.ver, running_ver, sizeof(running_ver));
+        }
+
+        char *buf = (char *)pvPortMalloc(768);
         if (buf == NULL) {
             tcp_recved(pcb, p->tot_len);
             pbuf_free(p);
@@ -95,22 +110,34 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
             return ERR_MEM;
         }
 
-        int len = snprintf(buf, 512,
+        /* Build staged version line if metadata available */
+        char staged_line[64] = "";
+        if (st->meta_valid) {
+            snprintf(staged_line, sizeof(staged_line),
+                     "<p>Staged: <b>%s</b></p>", st->staged_version);
+        }
+
+        int len = snprintf(buf, 768,
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "Connection: close\r\n\r\n"
             "<html><body>"
             "<h1>PeriphNet</h1>"
-            "<p>Status: <b>%s</b></p>"
-            "<p>Transferred: %lu / %lu bytes</p>"
+            "<p>Running: <b>%s</b></p>"
+            "<p>Transfer: <b>%s</b> &mdash; %lu / %lu bytes</p>"
+            "%s"
             "<hr>"
-            "<p>POST /api/firmware/upload — upload binary</p>"
-            "<p>GET /api/firmware/download — download stored image</p>"
-            "<p>GET /api/firmware/status — JSON status</p>"
+            "<p>POST /api/firmware/upload &mdash; upload binary</p>"
+            "<p>POST /api/firmware/install &mdash; install staged firmware</p>"
+            "<p>DELETE /api/firmware/staged &mdash; cancel pending update</p>"
+            "<p>GET /api/firmware/download &mdash; download stored image</p>"
+            "<p>GET /api/firmware/status &mdash; JSON status</p>"
             "</body></html>",
+            running_ver,
             status_str,
             (unsigned long)st->bytes_transferred,
-            (unsigned long)st->total_bytes);
+            (unsigned long)st->total_bytes,
+            staged_line);
 
         err_t werr = tcp_write(pcb, buf, (u16_t)len, TCP_WRITE_FLAG_COPY);
         tcp_recved(pcb, p->tot_len);

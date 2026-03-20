@@ -3,6 +3,7 @@
 #include "w25q128.h"
 #include "boot_status.h"
 #include "image_mgmt.h"
+#include "version.h"
 #include "lwip/tcp.h"
 #include "FreeRTOS.h"
 #include <string.h>
@@ -22,6 +23,32 @@ static image_state_t fw_state = {
 };
 
 static volatile bool reboot_pending = false;
+
+/* --------------------------------------------------------------------------
+ * Extract metadata from staged image's sAppInfo (at offset 0x200)
+ * -------------------------------------------------------------------------- */
+
+static void extract_staged_metadata(void)
+{
+    sAppInfo info;
+
+    if (W25Q128_Read(IMG_UPDATE_FLASH_ADDR + FW_OFFSET_APP_HEADER,
+                     (uint8_t *)&info, sizeof(info)) != W25Q128_OK) {
+        fw_state.meta_valid = false;
+        return;
+    }
+
+    if (info.magic != APP_INFO_MAGIC) {
+        fw_state.meta_valid = false;
+        return;
+    }
+
+    fw_state.meta_valid       = true;
+    fw_state.staged_features  = info.features;
+    fw_state.staged_image_size = info.image_size;
+    ver_toString(&info.fw_version.ver, fw_state.staged_version,
+                 sizeof(fw_state.staged_version));
+}
 
 typedef struct {
     struct tcp_pcb *pcb;
@@ -60,6 +87,10 @@ void image_transfer_init(void)
     fw_state.total_bytes       = 0;
     fw_state.flash_address     = IMG_UPDATE_FLASH_ADDR;
     fw_state.crc32             = 0;
+    fw_state.meta_valid        = false;
+    fw_state.staged_version[0] = '\0';
+    fw_state.staged_features   = 0;
+    fw_state.staged_image_size = 0;
     memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
 
     dl_ctx.pcb = NULL;
@@ -314,17 +345,34 @@ err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
         fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
         fw_state.bytes_transferred = session->content_length;
 
+        /* Extract metadata from the uploaded binary */
+        extract_staged_metadata();
+
         tcp_arg(pcb, NULL);
         vPortFree(session);
         active_upload = NULL;
 
-        char response[128];
-        int len = snprintf(response, sizeof(response),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\n"
-            "Connection: close\r\n\r\n"
-            "{\"status\":\"success\",\"bytes\":%lu}\r\n",
-            (unsigned long)fw_state.total_bytes);
+        char response[256];
+        int len;
+        if (fw_state.meta_valid) {
+            len = snprintf(response, sizeof(response),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: close\r\n\r\n"
+                "{\"status\":\"success\",\"bytes\":%lu,"
+                "\"version\":\"%s\",\"features\":%lu}\r\n",
+                (unsigned long)fw_state.total_bytes,
+                fw_state.staged_version,
+                (unsigned long)fw_state.staged_features);
+        } else {
+            len = snprintf(response, sizeof(response),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                "Connection: close\r\n\r\n"
+                "{\"status\":\"success\",\"bytes\":%lu,"
+                "\"version\":null,\"features\":0}\r\n",
+                (unsigned long)fw_state.total_bytes);
+        }
         tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
         tcp_output(pcb);
         tcp_close(pcb);
@@ -447,7 +495,7 @@ err_t image_download_handler(struct tcp_pcb *pcb)
 
 err_t image_status_handler(struct tcp_pcb *pcb)
 {
-    char *response = (char *)pvPortMalloc(512);
+    char *response = (char *)pvPortMalloc(768);
     if (response == NULL) {
         const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
         tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
@@ -470,16 +518,29 @@ err_t image_status_handler(struct tcp_pcb *pcb)
     if (fw_state.total_bytes > 0)
         progress_pct = (fw_state.bytes_transferred * 100) / fw_state.total_bytes;
 
-    int len = snprintf(response, 512,
+    /* Running firmware version from internal flash sAppInfo */
+    char running_ver[24] = {0};
+    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+    if (app->magic == APP_INFO_MAGIC) {
+        ver_toString(&app->fw_version.ver, running_ver, sizeof(running_ver));
+    }
+
+    int len = snprintf(response, 768,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
         "Connection: close\r\n\r\n"
         "{\"status\":\"%s\","
+        "\"running_version\":\"%s\","
+        "\"staged_version\":%s%s%s,"
         "\"bytes_transferred\":%lu,"
         "\"total_bytes\":%lu,"
         "\"progress\":%lu,"
         "\"error\":\"%s\"}\r\n",
         status_str,
+        running_ver,
+        fw_state.meta_valid ? "\"" : "",
+        fw_state.meta_valid ? fw_state.staged_version : "null",
+        fw_state.meta_valid ? "\"" : "",
         (unsigned long)fw_state.bytes_transferred,
         (unsigned long)fw_state.total_bytes,
         (unsigned long)progress_pct,
@@ -556,6 +617,57 @@ err_t image_install_handler(struct tcp_pcb *pcb)
         "\"message\":\"Device will reboot in 2 seconds\","
         "\"size\":%lu}\r\n",
         (unsigned long)fw_state.total_bytes);
+    tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+    tcp_output(pcb);
+    tcp_close(pcb);
+    return ERR_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Delete staged firmware
+ * -------------------------------------------------------------------------- */
+
+static void clear_staged_metadata(void)
+{
+    fw_state.meta_valid        = false;
+    fw_state.staged_version[0] = '\0';
+    fw_state.staged_features   = 0;
+    fw_state.staged_image_size = 0;
+}
+
+err_t image_delete_handler(struct tcp_pcb *pcb)
+{
+    char response[256];
+    int len;
+
+    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
+        fw_state.status != IMG_STATUS_DOWNLOAD_READY &&
+        fw_state.status != IMG_STATUS_ERROR) {
+
+        len = snprintf(response, sizeof(response),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"status\":\"idle\",\"message\":\"nothing to delete\"}\r\n");
+        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        tcp_close(pcb);
+        return ERR_OK;
+    }
+
+    /* Erase first sector of staged image area to invalidate it */
+    W25Q128_EraseSector(IMG_UPDATE_FLASH_ADDR);
+
+    /* Reset transfer state */
+    fw_state.status            = IMG_STATUS_IDLE;
+    fw_state.bytes_transferred = 0;
+    fw_state.total_bytes       = 0;
+    memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
+    clear_staged_metadata();
+
+    len = snprintf(response, sizeof(response),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+        "{\"status\":\"idle\",\"message\":\"staged firmware deleted\"}\r\n");
     tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
     tcp_output(pcb);
     tcp_close(pcb);
