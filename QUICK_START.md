@@ -1,256 +1,117 @@
-# PeriphNet - Quick Start Guide
+# PeriphNet — Quick Start
 
-## 🚀 Build and Flash (TL;DR)
+## What it does
 
-```bash
-# Build firmware
-cd /home/laurynas/Projects/PeriphNet
-mkdir -p build && cd build
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j4
+STM32F407VET6 board running FreeRTOS + lwIP with:
 
-# Flash to device (J-Link)
-make flash
-```
+- **Web UI** at `http://periphnet.local` — firmware upload/download/install, crash log viewer
+- **OTA firmware update** — upload signed binary via browser or curl, bootloader installs on reboot
+- **Dual-image bootloader** — HMAC-SHA256 signed images, 4 boot attempts with auto-rollback
+- **Crash storage** — fault dumps saved to external flash, viewable via web UI or API
+- **Trice logging** — dual output over UART (460800 baud) and UDP broadcast (port 17001)
+- **mDNS** — board discoverable as `periphnet.local` on the local network
 
-**That's it!** Device will be erased, programmed, verified, and running in ~10 seconds.
-
----
-
-## 📁 Project Structure
-
-```
-PeriphNet/
-├── Core/             STM32 application code (HAL init, peripherals)
-├── LWIP/             lwIP configuration and port
-├── Middlewares/      FreeRTOS and lwIP source
-├── Drivers/          STM32 HAL and BSP drivers
-├── build/            CMake build outputs (gitignored)
-├── Debug/            STM32CubeIDE outputs (gitignored)
-│
-├── CMakeLists.txt    Main build configuration
-├── BUILD.md          Detailed build documentation
-├── CLAUDE.md         AI assistant guidance
-└── MILESTONE_PLAN.md Development roadmap
-```
-
----
-
-## 🔧 Common Commands
-
-### Building
+## Build & Flash
 
 ```bash
-# Debug build (default)
-mkdir build && cd build
-cmake ..
-make -j4
+# Prerequisites: arm-none-eabi-gcc, cmake 3.22+, JLinkExe, python3 (for signing)
 
-# Release build (optimized)
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j4
+cmake -B build -S .
+cmake --build build -j8
 
-# Clean rebuild
-rm -rf build/*
-mkdir -p build && cd build
-cmake .. && make -j4
+# Flash app only (daily development)
+./flash_nokill.sh flash_application.jlink
 
-# Check available targets
-make help
+# Flash bootloader + app (first time or after BL changes)
+./flash_nokill.sh flash_both.jlink
+
+# One-liner
+cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 ```
 
-### Flashing
+Build output: `build/application.bin` (~168 KB, auto-signed with HMAC-SHA256).
+
+Clean rebuild:
+```bash
+rm -rf build && cmake -B build -S . && cmake --build build -j8
+```
+
+## Access the board
 
 ```bash
-# Flash via J-Link (auto-detects device)
-make flash
+# Via mDNS (preferred)
+curl http://periphnet.local/
 
-# Manual flash with J-Link
-JLinkExe -device STM32F407VE -if SWD -speed 4000 \
-         -CommanderScript flash_jlink.jlink
+# Via IP (DHCP, check your router)
+curl http://10.42.0.203/
 ```
 
-### Code Generation (STM32CubeMX)
+Open the URL in a browser to get the web UI with firmware update controls and crash log.
+
+## HTTP API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Web UI (HTML) |
+| `/api/firmware/status` | GET | JSON: running version, staged version, transfer state |
+| `/api/firmware/upload` | POST | Upload binary to external flash (octet-stream, 480 KB max) |
+| `/api/firmware/download` | GET | Download staged image |
+| `/api/firmware/install` | POST | Validate staged image, arm FWU flag, reboot |
+| `/api/firmware/staged` | DELETE | Erase staged image |
+| `/api/crash/latest` | GET | JSON: last crash (registers, backtrace, task list) |
+| `/api/crash/latest` | DELETE | Clear stored crash log |
+
+## OTA Update (curl)
 
 ```bash
-# 1. Open PeriphNet.ioc in STM32CubeMX
-# 2. Make changes to peripherals/middleware
-# 3. Generate code (keeps user code intact)
-# 4. Rebuild:
-rm -rf build && mkdir build && cd build
-cmake .. && make -j4
+# Upload
+curl -X POST -H "Content-Type: application/octet-stream" \
+  -H "Content-Length: $(stat -c%s build/application.bin)" \
+  --data-binary @build/application.bin http://periphnet.local/api/firmware/upload
+
+# Check status
+curl http://periphnet.local/api/firmware/status
+
+# Install (board reboots)
+curl -X POST http://periphnet.local/api/firmware/install
 ```
 
----
-
-## 📊 Current Firmware Status
-
-**Built:** ✅ (Milestone 0 Complete)
-
-**Size:**
-- Flash: 118 KB / 512 KB (23%) - plenty of room!
-- RAM:    55 KB / 128 KB (43%) - good headroom
-
-**Includes:**
-- ✅ FreeRTOS v10.x
-- ✅ lwIP TCP/IP stack
-- ✅ STM32 HAL drivers
-- ✅ Ethernet PHY driver (DP83848)
-- ✅ All configured peripherals (CAN, SPI, I2C, UART, etc.)
-
-**What it does (currently):**
-- Initializes hardware
-- Starts FreeRTOS scheduler
-- Configures lwIP stack
-- *Milestone 1 (HTTP server) - TODO*
-
----
-
-## 🔌 Hardware Connection
-
-**Debugger:** SEGGER J-Link V9 (S/N: 59600182)
-**Interface:** SWD (Serial Wire Debug)
-**Target:** STM32F407VET6
-**Speed:** 4000 kHz
-
-**Pins:**
-- SWDIO - PA13
-- SWCLK - PA14
-- GND
-- VTref (3.3V)
-
----
-
-## 🛠️ Development Workflow
-
-### Option 1: CMake (Recommended)
+## Trice Logging
 
 ```bash
-# 1. Edit source code in any editor (VS Code, Vim, etc.)
-# 2. Build
-make -j4
+# UART (USB-to-serial on USART3 PD8/TX, 460800 baud)
+trice log -p COM -args "/dev/ttyUSB0:460800" -i ./til.json -li ./li.json
 
-# 3. Flash
-make flash
-
-# 4. Debug (if needed)
-arm-none-eabi-gdb build/PeriphNet.elf
-(gdb) target extended-remote :2331  # J-Link GDB server
+# UDP (no cable needed, broadcasts on port 17001)
+trice log -p UDP4 -args ":17001" -i ./til.json -li ./li.json
 ```
 
-### Option 2: STM32CubeIDE
+## Trigger a test crash
 
-```bash
-# 1. Open project in STM32CubeIDE
-# 2. Modify .ioc file for peripheral changes
-# 3. Generate code
-# 4. Build in IDE
-# 5. Debug/Flash using IDE tools
-```
-
-**Both methods work!** CMake and STM32CubeIDE coexist peacefully.
-
----
-
-## 📈 Next Milestone
-
-**Milestone 1: Ethernet + Basic HTTP Server**
-
-**Goal:** Serve "Hello World v1.0.0" webpage
-
-**Tasks:**
-- [ ] Configure lwIP DHCP
-- [ ] Implement minimal HTTP server
-- [ ] Create static HTML page with system info
-- [ ] Test: `curl http://192.168.0.XXX/`
-
-**ETA:** 3-4 days
-
-See `MILESTONE_PLAN.md` for full roadmap.
-
----
-
-## 🆘 Quick Troubleshooting
-
-**Build fails:**
-```bash
-# Clean everything
-rm -rf build
-# Regenerate and rebuild
-mkdir build && cd build && cmake .. && make -j4
-```
-
-**Flash fails:**
-```bash
-# Check J-Link connection
-lsusb | grep SEGGER
-
-# Check permissions
-sudo usermod -a -G plugdev $USER
-# Log out and back in
-```
-
-**Code generation changes not reflected:**
-```bash
-# STM32CubeMX only regenerates .ioc files
-# Must rebuild with CMake or CubeIDE
-rm -rf build && mkdir build && cd build
-cmake .. && make -j4
-```
-
----
-
-## 📚 Documentation Files
-
-- `BUILD.md` - Comprehensive build instructions
-- `CLAUDE.md` - Project architecture and guidelines for AI
-- `MILESTONE_PLAN.md` - Development roadmap (8 milestones)
-- `firmware_update_architecture.md` - Bootloader design
-- `stm32_industrial_fw_project_plan.md` - Overall project plan
-
----
-
-## 🎯 Key Features Planned
-
-1. ✅ **M0:** CMake build system
-2. ⏳ **M1:** Ethernet + HTTP server
-3. ⏳ **M2:** Bootloader ↔ Application jump
-4. ⏳ **M3:** External flash + UID validation
-5. ⏳ **M4:** HTTP firmware upload
-6. ⏳ **M5:** Firmware verification
-7. ⏳ **M6:** Bootloader API
-8. ⏳ **M7:** Installation logic
-9. ⏳ **M8:** End-to-end OTA update
-
-**End Goal:** Upload new firmware via HTTP, bootloader installs it, device boots into updated firmware showing "Hello World v2.0.0"
-
----
+Press BTN1/BTN2/BTN3 on the board to trigger HardFault/UsageFault/BusFault.
+After reboot, view the crash dump at `http://periphnet.local/api/crash/latest` or in the web UI.
 
 ## Unit Tests
-
-Tests run on the host (no ARM toolchain needed) using CppUTest.
-
-### Build
 
 ```bash
 cmake -B build_tests -S tests
 cmake --build build_tests -j8
-```
-
-### Run
-
-```bash
 ctest --test-dir build_tests -V
 ```
 
-### Notes
+Test sources in `tests/`, mocks for lwIP/FreeRTOS/W25Q128 in `tests/mocks/`.
 
-- Test sources live in `tests/`
-- Mocks for lwIP, FreeRTOS, and W25Q128 are in `tests/mocks/`
-- `image_transfer.c` is compiled directly into the test binary via `#include` to access static functions
-- Build is independent of the firmware build; no `build/` directory needed
+## Hardware
 
----
+- **MCU:** STM32F407VET6 (512 KB flash, 128 KB SRAM, 168 MHz)
+- **External Flash:** W25Q64 (8 MB, SPI2 at 21 MHz)
+- **Ethernet PHY:** DP83848IVV (RMII)
+- **Debugger:** J-Link via SWD
+- **Trice UART:** USART3 PD8/TX, DMA1_Stream3, 460800 baud
 
-**Last Updated:** 2024-12-26
-**Status:** Milestone 0 Complete ✅
+## Build Sizes
+
+| Target | Flash | RAM | Limit |
+|--------|-------|-----|-------|
+| Bootloader | ~22 KB (66%) | ~2 KB | 32 KB |
+| Application | ~168 KB (34%) | ~99 KB | 480 KB |
