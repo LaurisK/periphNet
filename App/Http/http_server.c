@@ -1,5 +1,6 @@
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
+#include "App/Log/crash.h"
 #include "bl_app_contract.h"
 #include "version.h"
 #include "lwip/tcp.h"
@@ -35,6 +36,7 @@ static const char index_html[] =
     "#msg{margin:8px 0;padding:8px;border-radius:4px;display:none}"
     ".ok{background:#dfd;color:#060}.err{background:#fdd;color:#600}"
     "#info{color:#555;font-size:.9em}"
+    "pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}"
     "</style></head><body>"
     "<h1>PeriphNet</h1><div id=ver></div>"
     "<div class=card><h3>Firmware Update</h3>"
@@ -47,6 +49,8 @@ static const char index_html[] =
     "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
     "<button class=btn-del onclick=del() id=bdel disabled>Delete Staged</button>"
     "</div></div>"
+    "<div class=card><h3>Last Crash</h3>"
+    "<div id=crash>Loading...</div></div>"
     "<script>"
     "var B='http://'+location.host;"
     "function show(t,ok){var m=document.getElementById('msg');m.textContent=t;"
@@ -59,6 +63,21 @@ static const char index_html[] =
     "document.getElementById('binst').disabled=!has;"
     "document.getElementById('bdel').disabled=!has;"
     "}).catch(()=>{})}"
+    "function crashPoll(){fetch(B+'/api/crash/latest').then(r=>r.json()).then(j=>{"
+    "var d=document.getElementById('crash');"
+    "if(!j.valid){d.innerHTML='No crash recorded.';return}"
+    "var h='<b>'+j.type+'</b> at tick '+j.tick+'<br>'"
+    "+'PC=0x'+j.pc+' LR=0x'+j.lr+' SP=0x'+j.sp+'<br>';"
+    "if(j.task)h+='Task: '+j.task+'<br>';"
+    "h+='CFSR=0x'+j.cfsr+' HFSR=0x'+j.hfsr+'<br>';"
+    "if(j.backtrace.length)h+='BT: '+j.backtrace.join(' ')+'<br>';"
+    "if(j.tasks.length){h+='<pre>';j.tasks.forEach(function(t){"
+    "h+=t.name+' ['+t.state+'] PC=0x'+t.pc+' stk='+t.free_stack+'\\n'});"
+    "h+='</pre>'}"
+    "h+='<button class=btn-del onclick=clearCrash()>Clear</button>';"
+    "d.innerHTML=h}).catch(()=>{})}"
+    "function clearCrash(){fetch(B+'/api/crash/latest',{method:'DELETE'})"
+    ".then(()=>crashPoll()).catch(()=>{})}"
     "function upload(){var f=document.getElementById('file').files[0];"
     "if(!f){show('Select a file first',0);return}"
     "var bar=document.getElementById('bar'),fill=document.getElementById('fill');"
@@ -83,7 +102,7 @@ static const char index_html[] =
     "function del(){fetch(B+'/api/firmware/staged',{method:'DELETE'}).then(r=>r.json())"
     ".then(j=>{show(j.status=='deleted'?'Staged image deleted':'Delete failed: '+(j.error||''),j.status=='deleted');poll()})"
     ".catch(e=>show(e,0))}"
-    "poll();setInterval(poll,5000);"
+    "poll();setInterval(poll,5000);crashPoll();"
     "</script></body></html>";
 
 /* Streaming index page state — attached as tcp arg */
@@ -158,6 +177,104 @@ static err_t http_serve_index(struct tcp_pcb *pcb)
     return ERR_OK;
 }
 
+/* --------------------------------------------------------------------------
+ * Crash log API handlers
+ * -------------------------------------------------------------------------- */
+
+static const char * const crash_type_names[] = {
+    "HardFault", "NMI", "BusFault", "UsageFault", "MemManage", "SwWatchdog"
+};
+static const char * const task_state_names[] = {
+    "Run", "Rdy", "Blk", "Sus", "Del"
+};
+
+static err_t crash_get_handler(struct tcp_pcb *pcb)
+{
+    char *resp = (char *)pvPortMalloc(1024);
+    if (resp == NULL) {
+        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
+        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        return ERR_OK;
+    }
+
+    sCrashLog *log = (sCrashLog *)pvPortMalloc(sizeof(sCrashLog));
+    if (log == NULL) {
+        vPortFree(resp);
+        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
+        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
+        tcp_output(pcb);
+        return ERR_OK;
+    }
+
+    int len;
+    bool valid = Crash_ReadFromFlash(log);
+
+    if (!valid) {
+        len = snprintf(resp, 1024,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"valid\":false}\r\n");
+    } else {
+        const char *type_str = (log->crash_type < 6)
+            ? crash_type_names[log->crash_type] : "Unknown";
+        int pos = snprintf(resp, 1024,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+            "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
+            "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"sp\":\"%08lX\","
+            "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
+            "\"cfsr\":\"%08lX\",\"hfsr\":\"%08lX\","
+            "\"mmfar\":\"%08lX\",\"bfar\":\"%08lX\","
+            "\"task\":\"%s\",\"backtrace\":[",
+            type_str, (unsigned long)log->tick,
+            (unsigned long)log->pc, (unsigned long)log->lr,
+            (unsigned long)log->sp, (unsigned long)log->r0,
+            (unsigned long)log->r12, (unsigned long)log->psr,
+            (unsigned long)log->cfsr, (unsigned long)log->hfsr,
+            (unsigned long)log->mmfar, (unsigned long)log->bfar,
+            log->task_name);
+
+        for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
+            pos += snprintf(resp + pos, 1024 - pos, "%s\"%08lX\"",
+                i > 0 ? "," : "", (unsigned long)log->bt_addr[i]);
+        }
+
+        pos += snprintf(resp + pos, 1024 - pos, "],\"tasks\":[");
+        for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
+            const char *st = (log->tasks[i].state < 5)
+                ? task_state_names[log->tasks[i].state] : "???";
+            pos += snprintf(resp + pos, 1024 - pos,
+                "%s{\"name\":\"%s\",\"state\":\"%s\","
+                "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
+                i > 0 ? "," : "",
+                log->tasks[i].name, st,
+                (unsigned long)log->tasks[i].pc,
+                (unsigned long)log->tasks[i].lr,
+                log->tasks[i].free_stack);
+        }
+        len = pos + snprintf(resp + pos, 1024 - pos, "]}\r\n");
+    }
+
+    vPortFree(log);
+    tcp_write(pcb, resp, len, TCP_WRITE_FLAG_COPY);
+    tcp_output(pcb);
+    vPortFree(resp);
+    return ERR_OK;
+}
+
+static err_t crash_delete_handler(struct tcp_pcb *pcb)
+{
+    Crash_ClearFlash();
+    const char *resp =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
+        "{\"status\":\"cleared\"}\r\n";
+    tcp_write(pcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
+    tcp_output(pcb);
+    return ERR_OK;
+}
+
 static void http_err_callback(void *arg, err_t err)
 {
     (void)err;
@@ -219,6 +336,24 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     /* GET /api/firmware/status */
     if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
         err_t result = image_status_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return result;
+    }
+
+    /* GET /api/crash/latest */
+    if (p->len >= 21 && strncmp(request, "GET /api/crash/latest", 21) == 0) {
+        err_t result = crash_get_handler(pcb);
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        tcp_close(pcb);
+        return result;
+    }
+
+    /* DELETE /api/crash/latest */
+    if (p->len >= 24 && strncmp(request, "DELETE /api/crash/latest", 24) == 0) {
+        err_t result = crash_delete_handler(pcb);
         tcp_recved(pcb, p->tot_len);
         pbuf_free(p);
         tcp_close(pcb);

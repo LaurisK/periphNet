@@ -38,7 +38,7 @@
 #define TRICE_CGO                   0
 #define TRICE_SEGGER_RTT            0
 #define TRICE_DEFERRED_UARTB        0
-#define TRICE_DEFERRED_AUXILIARY8   0
+#define TRICE_DEFERRED_AUXILIARY8   1
 
 /* Diagnostics ------------------------------------------------------------- */
 #define TRICE_PROTECT    1

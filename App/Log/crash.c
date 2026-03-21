@@ -7,15 +7,21 @@
  *  – FreeRTOS task context layout for CM4F (R4-R11, LR, then exception frame)
  *  – FPU-awareness: checks EXC_RETURN bit 4 to adjust saved-register offsets
  *  – DMA flush uses DMA1_Stream3 NDTR polling (USART3 TX stream on STM32F4)
+ *  – Crash log persisted to external SPI flash for later HTTP retrieval
  */
 
 #include "App/Log/crash.h"
+#include "bl_app_contract.h"
+#include "image_mgmt.h"
+#include "w25q128.h"
 #include "trice.h"
 #include "usart.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "stm32f4xx_hal.h"
 #include "Middlewares/Third_Party/backtrace/backtrace.h"
+#include <string.h>
+#include <stddef.h>
 
 /* --------------------------------------------------------------------------
  * Private types
@@ -216,6 +222,117 @@ static void printRegisters(eCrashType type, const sCrashRegs *regs)
 }
 
 /* --------------------------------------------------------------------------
+ * Flash storage — save crash log to external SPI flash
+ *
+ * Called from exception context. SPI driver uses polling, so it works
+ * even when interrupts are disabled. We force SPI handle state to READY
+ * in case a transfer was in progress when the fault occurred.
+ * -------------------------------------------------------------------------- */
+
+static void flash_force_ready(void)
+{
+    extern SPI_HandleTypeDef W25Q128_SPI_HANDLE;
+
+    /* Deassert CS in case a transaction was in progress */
+    HAL_GPIO_WritePin(W25Q128_CS_GPIO_PORT, W25Q128_CS_GPIO_PIN, GPIO_PIN_SET);
+
+    /* Force SPI handle to READY so HAL polling functions accept new transfers */
+    W25Q128_SPI_HANDLE.State = HAL_SPI_STATE_READY;
+    __HAL_UNLOCK(&W25Q128_SPI_HANDLE);
+}
+
+static void saveToFlash(eCrashType type, const sCrashRegs *regs)
+{
+    static sCrashLog log;  /* static to avoid stack overflow in exception ctx */
+
+    memset(&log, 0, sizeof(log));
+    log.magic      = CRASH_LOG_MAGIC;
+    log.tick       = HAL_GetTick();
+    log.crash_type = (uint8_t)type;
+
+    /* Registers */
+    log.r0      = regs->r0;
+    log.r1      = regs->r1;
+    log.r2      = regs->r2;
+    log.r3      = regs->r3;
+    log.r12     = regs->r12;
+    log.lr      = regs->lr;
+    log.pc      = regs->pc;
+    log.psr     = regs->psr;
+    log.sp      = regs->sp;
+    log.control = regs->control;
+    log.primask = regs->primask;
+
+    /* Fault status */
+    log.cfsr  = SCB->CFSR;
+    log.hfsr  = SCB->HFSR;
+    log.mmfar = SCB->MMFAR;
+    log.bfar  = SCB->BFAR;
+
+    /* Backtrace */
+    backtrace_frame_t frame = {
+        .pc = regs->pc, .lr = regs->lr,
+        .sp = regs->sp, .fp = regs->sp
+    };
+    backtrace_t bt[CRASH_LOG_MAX_BT_DEPTH];
+    int depth = _backtrace_unwind(bt, CRASH_LOG_MAX_BT_DEPTH, &frame);
+    log.bt_depth = (uint8_t)(depth > 0 ? depth : 0);
+    for (int i = 0; i < log.bt_depth; i++) {
+        log.bt_addr[i] = (uint32_t)bt[i].address;
+    }
+
+    /* Task name (for watchdog faults) */
+    if (type == CRASH_SW_WATCHDOG) {
+        const char *name = pcTaskGetName(NULL);
+        if (name) {
+            strncpy(log.task_name, name, sizeof(log.task_name) - 1);
+        }
+    }
+
+    /* Task snapshots */
+    TaskStatus_t tasks[CRASH_LOG_MAX_TASKS];
+    UBaseType_t n = uxTaskGetSystemState(tasks, CRASH_LOG_MAX_TASKS, NULL);
+    if (n > CRASH_LOG_MAX_TASKS) n = CRASH_LOG_MAX_TASKS;
+    log.task_count = (uint8_t)n;
+
+    for (UBaseType_t i = 0; i < n; i++) {
+        sCrashTask *ct = &log.tasks[i];
+        strncpy(ct->name, tasks[i].pcTaskName, sizeof(ct->name) - 1);
+        ct->free_stack = (uint16_t)tasks[i].usStackHighWaterMark;
+        ct->state = (uint8_t)tasks[i].eCurrentState;
+
+        volatile StackType_t *top =
+            *((volatile StackType_t *volatile *)tasks[i].xHandle);
+        uint32_t exc_return = (uint32_t)top[8];
+        uint32_t fpu_off = ((exc_return & 0x10U) == 0U) ? 16U : 0U;
+        ct->pc = (uint32_t)top[15U + fpu_off];
+        ct->lr = (uint32_t)top[14U + fpu_off];
+    }
+
+    /* CRC32 over everything except the crc32 field itself */
+    log.crc32 = ImgMgmt_Crc32((const uint8_t *)&log,
+                               offsetof(sCrashLog, crc32));
+
+    /* Write to external flash */
+    flash_force_ready();
+    W25Q128_EraseSector(EXT_FLASH_CRASH_LOG_ADDR);
+    W25Q128_WaitReady(W25Q128_ERASE_TIMEOUT_MS);
+
+    /* Write in 256-byte pages */
+    const uint8_t *src = (const uint8_t *)&log;
+    uint32_t remaining = sizeof(sCrashLog);
+    uint32_t addr = EXT_FLASH_CRASH_LOG_ADDR;
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > W25Q128_PAGE_SIZE) ? W25Q128_PAGE_SIZE : remaining;
+        W25Q128_WritePage(addr, src, chunk);
+        W25Q128_WaitReady(W25Q128_TIMEOUT_MS);
+        src += chunk;
+        addr += chunk;
+        remaining -= chunk;
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
 
@@ -238,7 +355,33 @@ void Crash_GenerateReport(eCrashType type)
     printBacktrace(regs.pc, regs.lr, regs.sp, regs.sp);
     flushTrice();
 
+    /* Save to external flash before printing task list (which takes longer) */
+    saveToFlash(type, &regs);
+
     /* Print all tasks with individual backtraces */
     printTaskList();
     flushTrice();
+}
+
+bool Crash_ReadFromFlash(sCrashLog *log)
+{
+    if (!log) return false;
+
+    if (W25Q128_Read(EXT_FLASH_CRASH_LOG_ADDR,
+                     (uint8_t *)log, sizeof(sCrashLog)) != W25Q128_OK) {
+        return false;
+    }
+
+    if (log->magic != CRASH_LOG_MAGIC) {
+        return false;
+    }
+
+    uint32_t expected = ImgMgmt_Crc32((const uint8_t *)log,
+                                       offsetof(sCrashLog, crc32));
+    return (log->crc32 == expected);
+}
+
+void Crash_ClearFlash(void)
+{
+    W25Q128_EraseSector(EXT_FLASH_CRASH_LOG_ADDR);
 }

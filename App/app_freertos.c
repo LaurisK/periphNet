@@ -18,6 +18,7 @@
 #include "App/system.h"
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
+#include "App/Log/trice_udp.h"
 #include "boot_status.h"
 #include "cmsis_os.h"
 #include "main.h"
@@ -124,6 +125,10 @@ void App_DefaultTaskEntry(void)
     /* Start HTTP server (upload/download/status) */
     http_server_init();
     TRice("HTTP server started on port 80\n");
+
+    /* Start trice UDP broadcast (port 17001) */
+    Trice_UdpInit();
+    TRice("Trice UDP started on port %u\n", TRICE_UDP_PORT);
 
     uint32_t btnDebounce[3] = {0U, 0U, 0U};
     uint32_t heartbeatTick  = 0U;

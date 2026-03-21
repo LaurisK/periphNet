@@ -29,6 +29,8 @@ extern "C" {
 #define EXT_FLASH_FWU_IMG_SIZE       0x00078000u
 #define EXT_FLASH_GOLDEN_IMG_ADDR    0x00079000u
 #define EXT_FLASH_GOLDEN_IMG_SIZE    0x00078000u
+#define EXT_FLASH_CRASH_LOG_ADDR     0x000F1000u
+#define EXT_FLASH_CRASH_LOG_SIZE     0x00001000u
 
 /* ==========================================================================
  * Magic numbers
