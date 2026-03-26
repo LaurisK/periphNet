@@ -19,6 +19,7 @@
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
 #include "App/Log/trice_udp.h"
+#include "App/Log/trice_usb.h"
 #include "boot_status.h"
 #include "cmsis_os.h"
 #include "main.h"
@@ -74,6 +75,9 @@ void App_DefaultTaskEntry(void)
 {
     /* Reconfigure buttons as polled input with pull-up (active-low) */
     App_GPIO_InitButtons();
+
+    /* Start trice USB CDC output (available immediately, no network needed) */
+    Trice_UsbInit();
 
     /* One-time startup logging */
     System_Init();

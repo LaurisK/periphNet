@@ -4,6 +4,7 @@
  */
 
 #include "App/Log/trice_udp.h"
+#include "App/Log/trice_usb.h"
 #include "trice.h"
 #include "lwip/udp.h"
 #include "lwip/tcpip.h"
@@ -31,6 +32,13 @@ void Trice_UdpWrite(const uint8_t *data, size_t len)
     pbuf_free(p);
 }
 
+/** Combined dispatcher: sends trice data to both UDP and USB CDC */
+static void Trice_AuxWrite(const uint8_t *data, size_t len)
+{
+    Trice_UdpWrite(data, len);
+    Trice_UsbWrite(data, len);
+}
+
 void Trice_UdpInit(void)
 {
     LOCK_TCPIP_CORE();
@@ -43,7 +51,7 @@ void Trice_UdpInit(void)
 
     IP4_ADDR(&s_broadcast_addr, 255, 255, 255, 255);
 
-    /* Register as trice auxiliary output */
+    /* Register combined auxiliary output (UDP + USB) */
     extern Write8AuxiliaryFn_t UserNonBlockingDeferredWrite8AuxiliaryFn;
-    UserNonBlockingDeferredWrite8AuxiliaryFn = Trice_UdpWrite;
+    UserNonBlockingDeferredWrite8AuxiliaryFn = Trice_AuxWrite;
 }
