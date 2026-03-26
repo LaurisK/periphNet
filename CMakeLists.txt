@@ -234,6 +234,19 @@ file(GLOB_RECURSE FREERTOS_SOURCES
 list(FILTER FREERTOS_SOURCES EXCLUDE REGEX ".*template.*")
 list(FILTER FREERTOS_SOURCES EXCLUDE REGEX ".*example.*")
 
+# --- USB Device CDC (Virtual COM Port) ---
+
+set(USB_DEVICE_SOURCES
+    USB_DEVICE/App/usb_device.c
+    USB_DEVICE/App/usbd_desc.c
+    USB_DEVICE/App/usbd_cdc_if.c
+    USB_DEVICE/Target/usbd_conf.c
+    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
+    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+    Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
+    Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
+)
+
 # --- Trice library ---
 
 add_subdirectory(Middlewares/Third_Party/trice)
@@ -255,6 +268,10 @@ set(APP_INCLUDES
     ${BASE_INCLUDES}
     Core/ThreadSafe
     App
+    USB_DEVICE/App
+    USB_DEVICE/Target
+    Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+    Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
     Middlewares/Third_Party/backtrace
     Drivers/BSP/Components/dp83848
     LWIP/App
@@ -302,6 +319,7 @@ add_executable(application.elf
     ${BSP_SOURCES}
     ${LWIP_SOURCES}
     ${FREERTOS_SOURCES}
+    ${USB_DEVICE_SOURCES}
 )
 
 add_dependencies(application.elf trice-insert)

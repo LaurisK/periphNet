@@ -27,8 +27,8 @@
 #include "rtc.h"
 #include "spi.h"
 #include "usart.h"
-#include "usb_device.h"
 #include "gpio.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -112,6 +112,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_IWDG_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   /* USER CODE END 2 */
 
