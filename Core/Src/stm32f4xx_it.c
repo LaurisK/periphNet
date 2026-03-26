@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "App/Log/crash.h"
+#include "App/Cmd/cmd_parser.h"
+#include "usart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -235,6 +237,24 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief USART1 global interrupt — command input from UART.
+  */
+void USART1_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart1);
+}
+
+/**
+  * @brief HAL UART RX complete callback — dispatches to command parser.
+  */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        Cmd_Uart1RxCallback();
+    }
+}
 
 /**
   * @brief TIM8 / TIM14 shared interrupt – handles software watchdog (TIM14).

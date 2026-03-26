@@ -16,6 +16,7 @@
 
 #include "App/app_freertos.h"
 #include "App/system.h"
+#include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
 #include "App/Log/trice_udp.h"
@@ -78,6 +79,9 @@ void App_DefaultTaskEntry(void)
 
     /* Start trice USB CDC output (available immediately, no network needed) */
     Trice_UsbInit();
+
+    /* Start command parser (USB CDC + UART1 input) */
+    Cmd_Init();
 
     /* One-time startup logging */
     System_Init();
