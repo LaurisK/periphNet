@@ -115,3 +115,57 @@ Test sources in `tests/`, mocks for lwIP/FreeRTOS/W25Q128 in `tests/mocks/`.
 |--------|-------|-----|-------|
 | Bootloader | ~22 KB (66%) | ~2 KB | 32 KB |
 | Application | ~168 KB (34%) | ~99 KB | 480 KB |
+
+## USB DFU Flashing (no J-Link needed)
+
+The STM32F407 has a built-in ROM bootloader that supports USB DFU on the USB OTG FS port (PA11/PA12). This lets you flash firmware over USB without a J-Link debugger.
+
+### Prerequisites
+
+```bash
+# Install dfu-util
+sudo apt install dfu-util        # Debian/Ubuntu
+# or
+sudo pacman -S dfu-util          # Arch
+# or
+brew install dfu-util            # macOS
+```
+
+### Enter DFU mode
+
+1. Set **BOOT0 = HIGH** (hold the BOOT0 button or move the BOOT0 jumper to 1)
+2. Press and release **RESET**
+3. Release BOOT0
+
+Verify the board is in DFU mode:
+```bash
+dfu-util -l
+```
+You should see a device with `[0483:df11]` — that's the STM32 system bootloader.
+
+### Flash firmware
+
+```bash
+# Flash bootloader + application (first time or after BL changes)
+dfu-util -a 0 -s 0x08000000:leave -D build/bootloader.bin
+dfu-util -a 0 -s 0x08008000:leave -D build/application.bin
+
+# Flash application only (daily development)
+dfu-util -a 0 -s 0x08008000:leave -D build/application.bin
+
+# One-liner: build + flash app
+cmake --build build -j8 && dfu-util -a 0 -s 0x08008000:leave -D build/application.bin
+```
+
+The `:leave` suffix tells the bootloader to jump to the flashed application after download completes — the board starts running immediately without a manual reset.
+
+### Notes
+
+- **Address matters:** the bootloader lives at `0x08000000`, the application at `0x08008000`. Flashing to the wrong address will brick the board (recoverable by re-entering DFU mode).
+- **Linux permissions:** if `dfu-util` can't find the device, either run with `sudo` or add a udev rule:
+  ```bash
+  echo 'SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", MODE="0666"' \
+    | sudo tee /etc/udev/rules.d/99-stm32-dfu.rules
+  sudo udevadm control --reload-rules
+  ```
+- **STM32CubeProgrammer** is an alternative to dfu-util — select "USB" as the connection type and set the start address accordingly.
