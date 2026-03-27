@@ -129,9 +129,13 @@
 #define LWIP_NUM_NETIF_CLIENT_DATA (LWIP_MDNS_RESPONDER)
 #define MEMP_NUM_UDP_PCB          8
 
-/* Increase timeout pool for mDNS timers */
+/* MQTT client — HA auto-discovery payloads need larger buffers */
+#define MQTT_OUTPUT_RINGBUF_SIZE  1024
+#define MQTT_VAR_HEADER_BUFFER_LEN 256
+
+/* Increase timeout pool for mDNS + MQTT timers */
 #undef MEMP_NUM_SYS_TIMEOUT
-#define MEMP_NUM_SYS_TIMEOUT      10
+#define MEMP_NUM_SYS_TIMEOUT      12
 
 /* USER CODE END 1 */
 
