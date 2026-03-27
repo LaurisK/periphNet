@@ -3,7 +3,8 @@
  * @brief   Pylontech BMS CAN reader — receives and parses battery frames on CAN2
  *
  * CAN2 is re-initialised to 500 kbps with acceptance filters for Pylontech IDs.
- * Frames are polled (no interrupt) — call BmsReader_Poll() periodically.
+ * Frames are received via RX FIFO0 interrupt (HAL_CAN_RxFifo0MsgPendingCallback).
+ * BmsReader_Poll() is kept as a safety net to drain anything the ISR missed.
  */
 
 #include "App/Can/bms_reader.h"
@@ -12,16 +13,16 @@
 #include <string.h>
 
 static sPylonBatteryData s_data;
-static int s_running;
+static volatile int s_running;
+static volatile uint32_t s_rxCount;
 
 /* --------------------------------------------------------------------------
- * CAN2 reconfiguration to 500 kbps + filters
+ * CAN2 reconfiguration to 500 kbps + filters + RX interrupt
  *
  * Same timing as CAN1: Prescaler=6, BS1=10, BS2=3 → 500 kbps.
  *
  * CAN2 filter banks start at bank 14 (banks 0–13 belong to CAN1).
- * We use one filter in list mode to accept all 6 Pylontech IDs,
- * or a simpler mask filter that accepts 0x350–0x35F.
+ * Mask filter accepts 0x350–0x35F.
  * -------------------------------------------------------------------------- */
 
 static int can2_init_500k(void)
@@ -55,7 +56,7 @@ static int can2_init_500k(void)
         .FilterMaskIdHigh     = 0x7F0 << 5,
         .FilterMaskIdLow      = 0x0000,
         .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-        .FilterBank           = 14,          /* First CAN2 filter bank */
+        .FilterBank           = 14,
         .FilterMode           = CAN_FILTERMODE_IDMASK,
         .FilterScale          = CAN_FILTERSCALE_32BIT,
         .FilterActivation     = CAN_FILTER_ENABLE,
@@ -70,16 +71,22 @@ static int can2_init_500k(void)
         return -1;
     }
 
+    /* Enable RX FIFO0 message pending interrupt */
+    if (HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+        return -1;
+    }
+
     return 0;
 }
 
 /* --------------------------------------------------------------------------
- * Frame parsing
+ * Frame parsing (called from ISR context and from Poll)
  * -------------------------------------------------------------------------- */
 
 static void parse_frame(uint32_t stdId, const uint8_t *data, uint8_t dlc)
 {
     s_data.lastRxTick = HAL_GetTick();
+    s_rxCount++;
 
     switch (stdId) {
     case PYLON_CAN_ID_LIMITS:
@@ -145,6 +152,26 @@ static void parse_frame(uint32_t stdId, const uint8_t *data, uint8_t dlc)
 }
 
 /* --------------------------------------------------------------------------
+ * HAL CAN RX callback — called from CAN2_RX0_IRQHandler via HAL_CAN_IRQHandler
+ * -------------------------------------------------------------------------- */
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+    if (hcan->Instance != CAN2 || !s_running) {
+        return;
+    }
+
+    CAN_RxHeaderTypeDef header;
+    uint8_t data[8];
+
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) == HAL_OK) {
+        if (header.IDE == CAN_ID_STD) {
+            parse_frame(header.StdId, data, header.DLC);
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
 
@@ -152,7 +179,8 @@ void BmsReader_Start(void)
 {
     if (s_running) return;
 
-    memset(&s_data, 0, sizeof(s_data));
+    memset((void *)&s_data, 0, sizeof(s_data));
+    s_rxCount = 0;
 
     if (can2_init_500k() != 0) {
         TRice("BmsReader: CAN2 init failed\n");
@@ -160,18 +188,19 @@ void BmsReader_Start(void)
     }
 
     s_running = 1;
-    TRice("BmsReader: started on CAN2 (500 kbps)\n");
+    TRice("BmsReader: started on CAN2 (500 kbps, IRQ)\n");
 }
 
 void BmsReader_Stop(void)
 {
     if (!s_running) return;
 
+    s_running = 0;
+    HAL_CAN_DeactivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
     HAL_CAN_Stop(&hcan2);
     HAL_CAN_DeInit(&hcan2);
 
-    s_running = 0;
-    TRice("BmsReader: stopped\n");
+    TRice("BmsReader: stopped (rx=%u frames)\n", s_rxCount);
 }
 
 int BmsReader_IsRunning(void)
@@ -186,7 +215,7 @@ void BmsReader_Poll(void)
     CAN_RxHeaderTypeDef header;
     uint8_t data[8];
 
-    /* Drain all pending frames from FIFO0 */
+    /* Safety net: drain anything the ISR might have missed */
     while (HAL_CAN_GetRxFifoFillLevel(&hcan2, CAN_RX_FIFO0) > 0) {
         if (HAL_CAN_GetRxMessage(&hcan2, CAN_RX_FIFO0, &header, data) == HAL_OK) {
             if (header.IDE == CAN_ID_STD) {
@@ -198,19 +227,19 @@ void BmsReader_Poll(void)
 
 const sPylonBatteryData *BmsReader_GetData(void)
 {
-    return &s_data;
+    return (const sPylonBatteryData *)&s_data;
 }
 
 void BmsReader_LogData(void)
 {
-    const sPylonBatteryData *d = &s_data;
+    const sPylonBatteryData *d = (const sPylonBatteryData *)&s_data;
 
     if (d->rxMask == 0) {
         TRice("BmsReader: no data received\n");
         return;
     }
 
-    TRice("BMS rx=0x%02X", d->rxMask);
+    TRice("BMS rx=0x%02X (%u frames)", d->rxMask, s_rxCount);
 
     if (d->rxMask & PYLON_RX_GOT_MEASURE) {
         TRice(" V=%d.%02dV I=%d.%01dA T=%d.%01dC",
