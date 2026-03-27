@@ -1,0 +1,74 @@
+[
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/SerialPort.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/SerialPort.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/SerialPort.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/SerialPort.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/TriceProcess.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/TriceProcess.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/TriceProcess.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/TriceProcess.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/Log.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/Log.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/Log.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/Log.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/Config.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/Config.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/Config.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/Config.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/Device.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/Device.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/Device.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/Device.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/TestRunner.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/TestRunner.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/TestRunner.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/TestRunner.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/TestCases.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/TestCases.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/TestCases.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/TestCases.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/UdpTriceSource.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/UdpTriceSource.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/UdpTriceSource.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/transport/UdpTriceSource.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/UsbTriceSource.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/UsbTriceSource.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/UsbTriceSource.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/transport/UsbTriceSource.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/SerialCommandTransport.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialCommandTransport.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialCommandTransport.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/transport/SerialCommandTransport.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_cli.dir/src/cli/main.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/cli/main.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/cli/main.cpp",
+  "output": "CMakeFiles/periphnet_cli.dir/src/cli/main.cpp.o"
+}
+]
