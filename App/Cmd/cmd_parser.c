@@ -4,11 +4,15 @@
  */
 
 #include "App/Cmd/cmd_parser.h"
+#include "App/Can/bms_sim.h"
+#include "App/Can/bms_reader.h"
 #include "trice.h"
 #include "usart.h"
 #include "stm32f4xx_hal.h"
 #include <string.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 /* --------------------------------------------------------------------------
  * Configuration
@@ -48,9 +52,11 @@ static void cmd_peripherals(const char *args);
 static void cmd_help(const char *args);
 static void cmd_reboot(const char *args);
 static void cmd_dfu(const char *args);
+static void cmd_bms(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
+    { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
     { "help",        cmd_help,        "List available commands"  },
@@ -65,6 +71,64 @@ static void cmd_peripherals(const char *args)
 {
     (void)args;
     TRice("n/a\n");
+}
+
+/**
+ * BMS command: control Pylontech BMS simulator (CAN1 TX) and reader (CAN2 RX).
+ *
+ * Usage:
+ *   bms start       — Start both simulator and reader
+ *   bms stop        — Stop both
+ *   bms read        — Poll CAN2 RX and log parsed battery data
+ *   bms send        — Transmit one round of BMS frames on CAN1
+ *   bms set V I SOC T — Set simulator voltage/current/SOC/temperature
+ *   bms status      — Show running state
+ */
+static void cmd_bms(const char *args)
+{
+    if (strncmp(args, "start", 5) == 0) {
+        BmsSim_Start();
+        BmsReader_Start();
+    } else if (strncmp(args, "stop", 4) == 0) {
+        BmsReader_Stop();
+        BmsSim_Stop();
+    } else if (strncmp(args, "send", 4) == 0) {
+        if (!BmsSim_IsRunning()) {
+            TRice("BMS sim not running\n");
+            return;
+        }
+        BmsSim_SendOnce();
+        TRice("BMS frames sent\n");
+    } else if (strncmp(args, "read", 4) == 0) {
+        if (!BmsReader_IsRunning()) {
+            TRice("BMS reader not running\n");
+            return;
+        }
+        BmsReader_Poll();
+        BmsReader_LogData();
+    } else if (strncmp(args, "set ", 4) == 0) {
+        float v, i, t;
+        int soc;
+        if (sscanf(args + 4, "%f %f %d %f", &v, &i, &soc, &t) == 4) {
+            BmsSim_SetVoltage(v);
+            BmsSim_SetCurrent(i);
+            BmsSim_SetSoc((uint16_t)soc);
+            BmsSim_SetTemperature(t);
+            TRice("BMS sim set: V=%d.%01d I=%d.%01d SOC=%d T=%d.%01d\n",
+                  (int)v, ((int)(v * 10)) % 10,
+                  (int)i, ((int)(i * 10)) % 10,
+                  soc,
+                  (int)t, ((int)(t * 10)) % 10);
+        } else {
+            TRice("Usage: bms set <voltage> <current> <soc> <temperature>\n");
+        }
+    } else if (strncmp(args, "status", 6) == 0) {
+        TRice("BMS sim=%s reader=%s\n",
+              BmsSim_IsRunning() ? "running" : "stopped",
+              BmsReader_IsRunning() ? "running" : "stopped");
+    } else {
+        TRice("Usage: bms start|stop|send|read|set|status\n");
+    }
 }
 
 static void cmd_reboot(const char *args)
