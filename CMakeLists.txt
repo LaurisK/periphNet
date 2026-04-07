@@ -74,7 +74,9 @@ set(APP_HAL_SOURCES
 # Common driver sources (shared by bootloader and application)
 set(COMMON_DRIVER_SOURCES
     "Core/Src/w25q128.c"
-    "Core/Src/update_manager.c"
+    "Core/Src/boot_status.c"
+    "Core/Src/image_mgmt.c"
+    "Core/Src/version.c"
 )
 
 # Minimal system files for bootloader

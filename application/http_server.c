@@ -6,7 +6,7 @@
 #include "main.h"
 #include "w25q128.h"
 #include "bl_app_contract.h"
-#include "update_manager.h"
+#include "boot_status.h"
 #include "image_transfer.h"
 #include "FreeRTOS.h"
 
@@ -160,9 +160,9 @@ static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, 
     } else if (strncmp(request, "GET /trigger_update", 19) == 0) {
         uint32_t dummy_size = 245760;
         uint32_t dummy_crc = 0x12345678;
-        uint32_t dummy_version = 0x010001;
+        sFwVerArea dummy_ver = {0};
 
-        int update_result = update_status_request(dummy_size, dummy_crc, dummy_version);
+        int update_result = BootStatus_RequestFwu(dummy_size, dummy_crc, &dummy_ver);
 
         const char *result_msg;
         if (update_result == 0) {
@@ -455,15 +455,13 @@ void http_server_test_flash(void)
     }
 
     uint32_t bl_major = 0, bl_minor = 0, bl_patch = 0;
-    bl_api->get_bootloader_version(&bl_major, &bl_minor, &bl_patch);
-
-    uint32_t test_crc = bl_api->calculate_crc32(0x08000000, 1024, false);
+    bl_api->get_bl_version(&bl_major, &bl_minor, &bl_patch);
 
     int verify_result = bl_api->verify_internal_app();
 
     snprintf(bl_api_test, sizeof(bl_api_test),
-            "OK - BL v%lu.%lu.%lu, CRC=0x%08lX, Verify=%d",
-            bl_major, bl_minor, bl_patch, test_crc, verify_result);
+            "OK - BL v%lu.%lu.%lu, Verify=%d",
+            bl_major, bl_minor, bl_patch, verify_result);
 
     strcpy(flash_test_result, "ALL TESTS PASSED");
     flash_test_ok = true;

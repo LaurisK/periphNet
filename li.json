@@ -1,7 +1,7 @@
 {
 	"1019": {
 		"File": "trace.c",
-		"Line": 134
+		"Line": 150
 	},
 	"1037": {
 		"File": "hardfault_handler.c",
@@ -9,7 +9,7 @@
 	},
 	"1058": {
 		"File": "hardfault_handler.c",
-		"Line": 67
+		"Line": 74
 	},
 	"1077": {
 		"File": "firmware_update_http.c",
@@ -17,7 +17,7 @@
 	},
 	"1098": {
 		"File": "hardfault_handler.c",
-		"Line": 74
+		"Line": 81
 	},
 	"1102": {
 		"File": "hardfault_handler.c",
@@ -25,19 +25,19 @@
 	},
 	"1115": {
 		"File": "hardfault_handler.c",
-		"Line": 70
+		"Line": 77
 	},
 	"1177": {
 		"File": "hardfault_handler.c",
-		"Line": 101
+		"Line": 108
 	},
 	"1195": {
 		"File": "hardfault_handler.c",
-		"Line": 125
+		"Line": 132
 	},
 	"1197": {
 		"File": "hardfault_handler.c",
-		"Line": 109
+		"Line": 116
 	},
 	"1209": {
 		"File": "firmware_update_http.c",
@@ -45,31 +45,39 @@
 	},
 	"1231": {
 		"File": "hardfault_handler.c",
-		"Line": 141
+		"Line": 148
 	},
 	"1390": {
 		"File": "hardfault_handler.c",
-		"Line": 90
+		"Line": 97
 	},
 	"1405": {
 		"File": "hardfault_handler.c",
-		"Line": 149
+		"Line": 156
 	},
 	"1457": {
 		"File": "hardfault_handler.c",
-		"Line": 81
+		"Line": 88
 	},
 	"1475": {
 		"File": "hardfault_handler.c",
-		"Line": 143
+		"Line": 150
+	},
+	"1493": {
+		"File": "image_transfer.c",
+		"Line": 156
 	},
 	"1504": {
 		"File": "hardfault_handler.c",
-		"Line": 144
+		"Line": 151
 	},
 	"1559": {
 		"File": "http_server.c",
 		"Line": 306
+	},
+	"1629": {
+		"File": "image_transfer.c",
+		"Line": 195
 	},
 	"1639": {
 		"File": "hardfault_handler.c",
@@ -77,7 +85,7 @@
 	},
 	"1657": {
 		"File": "hardfault_handler.c",
-		"Line": 96
+		"Line": 103
 	},
 	"1721": {
 		"File": "hardfault_handler.c",
@@ -86,6 +94,10 @@
 	"1739": {
 		"File": "hardfault_handler.c",
 		"Line": 92
+	},
+	"1782": {
+		"File": "trace.c",
+		"Line": 103
 	},
 	"1820": {
 		"File": "hardfault_handler.c",
@@ -111,9 +123,13 @@
 		"File": "hardfault_handler.c",
 		"Line": 149
 	},
+	"2374": {
+		"File": "image_transfer.c",
+		"Line": 154
+	},
 	"2424": {
 		"File": "hardfault_handler.c",
-		"Line": 116
+		"Line": 123
 	},
 	"2455": {
 		"File": "http_server.c",
@@ -123,13 +139,17 @@
 		"File": "http_server.c",
 		"Line": 155
 	},
+	"2472": {
+		"File": "image_transfer.c",
+		"Line": 172
+	},
 	"2497": {
 		"File": "hardfault_handler.c",
-		"Line": 97
+		"Line": 104
 	},
 	"2498": {
 		"File": "hardfault_handler.c",
-		"Line": 127
+		"Line": 134
 	},
 	"2564": {
 		"File": "hardfault_handler.c",
@@ -157,7 +177,7 @@
 	},
 	"3027": {
 		"File": "hardfault_handler.c",
-		"Line": 86
+		"Line": 93
 	},
 	"3046": {
 		"File": "http_server.c",
@@ -165,7 +185,7 @@
 	},
 	"3051": {
 		"File": "hardfault_handler.c",
-		"Line": 111
+		"Line": 118
 	},
 	"3060": {
 		"File": "hardfault_handler.c",
@@ -173,11 +193,15 @@
 	},
 	"3098": {
 		"File": "hardfault_handler.c",
-		"Line": 69
+		"Line": 76
 	},
 	"3151": {
 		"File": "hardfault_handler.c",
 		"Line": 158
+	},
+	"3177": {
+		"File": "image_transfer.c",
+		"Line": 140
 	},
 	"3180": {
 		"File": "hardfault_handler.c",
@@ -185,15 +209,15 @@
 	},
 	"3249": {
 		"File": "hardfault_handler.c",
-		"Line": 132
+		"Line": 139
 	},
 	"3251": {
 		"File": "hardfault_handler.c",
-		"Line": 112
+		"Line": 119
 	},
 	"3266": {
 		"File": "hardfault_handler.c",
-		"Line": 145
+		"Line": 152
 	},
 	"3275": {
 		"File": "hardfault_handler.c",
@@ -205,15 +229,19 @@
 	},
 	"3355": {
 		"File": "hardfault_handler.c",
-		"Line": 71
+		"Line": 78
 	},
 	"3357": {
 		"File": "hardfault_handler.c",
 		"Line": 150
 	},
+	"3435": {
+		"File": "image_transfer.c",
+		"Line": 144
+	},
 	"3447": {
 		"File": "hardfault_handler.c",
-		"Line": 84
+		"Line": 91
 	},
 	"3457": {
 		"File": "hardfault_handler.c",
@@ -249,15 +277,15 @@
 	},
 	"3795": {
 		"File": "hardfault_handler.c",
-		"Line": 126
+		"Line": 133
 	},
 	"3811": {
 		"File": "hardfault_handler.c",
-		"Line": 89
+		"Line": 96
 	},
 	"3829": {
 		"File": "hardfault_handler.c",
-		"Line": 62
+		"Line": 68
 	},
 	"3831": {
 		"File": "http_server.c",
@@ -277,7 +305,7 @@
 	},
 	"3966": {
 		"File": "hardfault_handler.c",
-		"Line": 121
+		"Line": 128
 	},
 	"4048": {
 		"File": "hardfault_handler.c",
@@ -301,11 +329,11 @@
 	},
 	"4244": {
 		"File": "hardfault_handler.c",
-		"Line": 139
+		"Line": 146
 	},
 	"4283": {
 		"File": "hardfault_handler.c",
-		"Line": 61
+		"Line": 67
 	},
 	"4361": {
 		"File": "hardfault_handler.c",
@@ -317,27 +345,31 @@
 	},
 	"4401": {
 		"File": "hardfault_handler.c",
-		"Line": 103
+		"Line": 110
 	},
 	"4432": {
 		"File": "hardfault_handler.c",
-		"Line": 72
+		"Line": 79
 	},
 	"4468": {
 		"File": "hardfault_handler.c",
-		"Line": 63
+		"Line": 69
 	},
 	"4562": {
 		"File": "hardfault_handler.c",
-		"Line": 138
+		"Line": 145
 	},
 	"4590": {
 		"File": "hardfault_handler.c",
 		"Line": 133
 	},
+	"4718": {
+		"File": "image_transfer.c",
+		"Line": 146
+	},
 	"4770": {
 		"File": "hardfault_handler.c",
-		"Line": 140
+		"Line": 147
 	},
 	"4797": {
 		"File": "hardfault_handler.c",
@@ -353,15 +385,15 @@
 	},
 	"4861": {
 		"File": "hardfault_handler.c",
-		"Line": 73
+		"Line": 80
 	},
 	"4916": {
 		"File": "hardfault_handler.c",
-		"Line": 123
+		"Line": 130
 	},
 	"4923": {
 		"File": "hardfault_handler.c",
-		"Line": 92
+		"Line": 99
 	},
 	"4951": {
 		"File": "http_server.c",
@@ -375,21 +407,25 @@
 		"File": "hardfault_handler.c",
 		"Line": 138
 	},
+	"5003": {
+		"File": "hardfault_handler.c",
+		"Line": 72
+	},
 	"5018": {
 		"File": "hardfault_handler.c",
 		"Line": 168
 	},
 	"5158": {
 		"File": "hardfault_handler.c",
-		"Line": 122
+		"Line": 129
 	},
 	"5292": {
 		"File": "hardfault_handler.c",
-		"Line": 137
+		"Line": 144
 	},
 	"5297": {
 		"File": "hardfault_handler.c",
-		"Line": 146
+		"Line": 153
 	},
 	"5393": {
 		"File": "firmware_update_http.c",
@@ -397,7 +433,7 @@
 	},
 	"5432": {
 		"File": "hardfault_handler.c",
-		"Line": 100
+		"Line": 107
 	},
 	"5444": {
 		"File": "hardfault_handler.c",
@@ -405,7 +441,7 @@
 	},
 	"5447": {
 		"File": "hardfault_handler.c",
-		"Line": 114
+		"Line": 121
 	},
 	"5453": {
 		"File": "firmware_update_http.c",
@@ -421,7 +457,7 @@
 	},
 	"5527": {
 		"File": "hardfault_handler.c",
-		"Line": 147
+		"Line": 154
 	},
 	"5533": {
 		"File": "hardfault_handler.c",
@@ -431,13 +467,21 @@
 		"File": "hardfault_handler.c",
 		"Line": 151
 	},
+	"5550": {
+		"File": "image_transfer.c",
+		"Line": 125
+	},
 	"5555": {
 		"File": "hardfault_handler.c",
 		"Line": 89
 	},
 	"5586": {
 		"File": "hardfault_handler.c",
-		"Line": 64
+		"Line": 70
+	},
+	"5652": {
+		"File": "image_transfer.c",
+		"Line": 212
 	},
 	"5662": {
 		"File": "hardfault_handler.c",
@@ -445,7 +489,7 @@
 	},
 	"5697": {
 		"File": "hardfault_handler.c",
-		"Line": 134
+		"Line": 141
 	},
 	"5841": {
 		"File": "http_server.c",
@@ -469,7 +513,7 @@
 	},
 	"6081": {
 		"File": "hardfault_handler.c",
-		"Line": 113
+		"Line": 120
 	},
 	"6104": {
 		"File": "hardfault_handler.c",
@@ -477,11 +521,15 @@
 	},
 	"6121": {
 		"File": "hardfault_handler.c",
-		"Line": 79
+		"Line": 86
+	},
+	"6209": {
+		"File": "image_transfer.c",
+		"Line": 176
 	},
 	"6248": {
 		"File": "hardfault_handler.c",
-		"Line": 99
+		"Line": 106
 	},
 	"6253": {
 		"File": "http_server.c",
@@ -493,7 +541,7 @@
 	},
 	"6296": {
 		"File": "hardfault_handler.c",
-		"Line": 66
+		"Line": 73
 	},
 	"6402": {
 		"File": "firmware_update_http.c",
@@ -509,7 +557,7 @@
 	},
 	"6491": {
 		"File": "hardfault_handler.c",
-		"Line": 124
+		"Line": 131
 	},
 	"6525": {
 		"File": "http_server.c",
@@ -517,23 +565,31 @@
 	},
 	"6573": {
 		"File": "hardfault_handler.c",
-		"Line": 91
+		"Line": 98
 	},
 	"6619": {
 		"File": "hardfault_handler.c",
-		"Line": 108
+		"Line": 115
 	},
 	"6666": {
 		"File": "hardfault_handler.c",
 		"Line": 83
 	},
+	"6716": {
+		"File": "image_transfer.c",
+		"Line": 165
+	},
+	"6733": {
+		"File": "trace.c",
+		"Line": 100
+	},
 	"6814": {
 		"File": "hardfault_handler.c",
-		"Line": 131
+		"Line": 138
 	},
 	"6862": {
 		"File": "trace.c",
-		"Line": 92
+		"Line": 95
 	},
 	"6905": {
 		"File": "hardfault_handler.c",
@@ -547,9 +603,13 @@
 		"File": "hardfault_handler.c",
 		"Line": 81
 	},
+	"6967": {
+		"File": "image_transfer.c",
+		"Line": 207
+	},
 	"6988": {
 		"File": "hardfault_handler.c",
-		"Line": 110
+		"Line": 117
 	},
 	"6990": {
 		"File": "http_server.c",
@@ -561,15 +621,19 @@
 	},
 	"7047": {
 		"File": "hardfault_handler.c",
-		"Line": 77
+		"Line": 84
 	},
 	"7049": {
 		"File": "hardfault_handler.c",
-		"Line": 68
+		"Line": 75
+	},
+	"7072": {
+		"File": "image_transfer.c",
+		"Line": 122
 	},
 	"7173": {
 		"File": "hardfault_handler.c",
-		"Line": 93
+		"Line": 100
 	},
 	"7205": {
 		"File": "http_server.c",
@@ -577,7 +641,7 @@
 	},
 	"7219": {
 		"File": "hardfault_handler.c",
-		"Line": 151
+		"Line": 158
 	},
 	"7223": {
 		"File": "http_server.c",
@@ -589,7 +653,7 @@
 	},
 	"7263": {
 		"File": "hardfault_handler.c",
-		"Line": 76
+		"Line": 83
 	},
 	"7304": {
 		"File": "firmware_update_http.c",
@@ -603,6 +667,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 164
 	},
+	"7354": {
+		"File": "image_transfer.c",
+		"Line": 185
+	},
 	"7368": {
 		"File": "hardfault_handler.c",
 		"Line": 88
@@ -613,11 +681,11 @@
 	},
 	"7425": {
 		"File": "hardfault_handler.c",
-		"Line": 150
+		"Line": 157
 	},
 	"7499": {
 		"File": "hardfault_handler.c",
-		"Line": 98
+		"Line": 105
 	},
 	"7509": {
 		"File": "http_server.c",
@@ -649,7 +717,7 @@
 	},
 	"7767": {
 		"File": "hardfault_handler.c",
-		"Line": 133
+		"Line": 140
 	},
 	"7772": {
 		"File": "hardfault_handler.c",
@@ -665,7 +733,7 @@
 	},
 	"7914": {
 		"File": "hardfault_handler.c",
-		"Line": 142
+		"Line": 149
 	},
 	"7944": {
 		"File": "firmware_update_http.c",

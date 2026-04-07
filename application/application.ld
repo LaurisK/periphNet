@@ -24,7 +24,6 @@ MEMORY
   CCMRAM     (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
   RAM        (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
   FLASH      (rx)     : ORIGIN = 0x08008000,   LENGTH = 480K   /* Application: 480KB */
-  APP_HEADER (rx)     : ORIGIN = 0x08008200,   LENGTH = 256    /* App info header */
 }
 
 /* Sections */
@@ -35,20 +34,19 @@ SECTIONS
   {
     . = ALIGN(4);
     KEEP(*(.isr_vector)) /* Startup code - must be first! */
+    /* Pad to 0x200 so app_header starts at fixed offset */
+    . = 0x200;
+  } >FLASH
+
+  /* Application info header at fixed offset 0x200 from FLASH start */
+  .app_header :
+  {
+    KEEP(*(.app_header))
     . = ALIGN(4);
   } >FLASH
 
-  /* Application info header at fixed address 0x08008200 */
-  .app_header 0x08008200 :
-  {
-    . = ALIGN(4);
-    KEEP(*(.app_header))
-    . = ALIGN(4);
-  } >APP_HEADER AT>FLASH
-
-  /* The program code and other data into "FLASH" Rom type memory */
-  /* Start after vector table + app_header */
-  .text 0x08008300 :
+  /* The program code and other data into "FLASH" rom type memory */
+  .text :
   {
     . = ALIGN(4);
     *(.text)           /* .text sections (code) */

@@ -63,6 +63,10 @@
 		"Type": "TRice",
 		"Strg": "  4. Backtrace: bt\\n"
 	},
+	"1493": {
+		"Type": "TRice",
+		"Strg": "FWU: write_FAIL 0x%X\\n"
+	},
 	"1504": {
 		"Type": "TRice",
 		"Strg": "\\nTo disassemble fault address:\\n"
@@ -70,6 +74,10 @@
 	"1559": {
 		"Type": "TRICE",
 		"Strg": "ERR: Bind FAILED, err=%d\\n"
+	},
+	"1629": {
+		"Type": "TRice",
+		"Strg": "FWU: upload_done %u bytes -\u003e HTTP 200\\n"
 	},
 	"1639": {
 		"Type": "TRICE0",
@@ -86,6 +94,10 @@
 	"1739": {
 		"Type": "TRICE",
 		"Strg": "LR  = 0x%08X (return address)\\n"
+	},
+	"1782": {
+		"Type": "TRice",
+		"Strg": "upload HWM=%u words heap=%u\\n"
 	},
 	"1820": {
 		"Type": "TRICE0",
@@ -111,6 +123,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Invalid PC load\\n"
 	},
+	"2374": {
+		"Type": "TRice",
+		"Strg": "FWU: write_ok 0x%X %uB\\n"
+	},
 	"2424": {
 		"Type": "TRice",
 		"Strg": "  - Fault address: 0x%08X (BFAR)\\n"
@@ -122,6 +138,10 @@
 	"2469": {
 		"Type": "TRICE",
 		"Strg": "DBG: HTML built, len=%d, sending...\\n"
+	},
+	"2472": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved cb FAIL err=%d\\n"
 	},
 	"2497": {
 		"Type": "TRice",
@@ -179,6 +199,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Vector table read fault\\n"
 	},
+	"3177": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_start 0x%X\\n"
+	},
 	"3180": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Exception Return ---\\n"
@@ -210,6 +234,10 @@
 	"3357": {
 		"Type": "TRICE0",
 		"Strg": "  - No coprocessor\\n"
+	},
+	"3435": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_done 0x%X\\n"
 	},
 	"3447": {
 		"Type": "TRice",
@@ -335,6 +363,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Instruction bus error\\n"
 	},
+	"4718": {
+		"Type": "TRice",
+		"Strg": "FWU: erase_FAIL 0x%X\\n"
+	},
 	"4770": {
 		"Type": "TRice",
 		"Strg": "  1. Load ELF: file build/application.elf\\n"
@@ -374,6 +406,10 @@
 	"4999": {
 		"Type": "TRICE0",
 		"Strg": "  - Bus fault during FP lazy state preservation\\n"
+	},
+	"5003": {
+		"Type": "TRice",
+		"Strg": "upload_progress=0x%X\\n"
 	},
 	"5018": {
 		"Type": "TRICE",
@@ -431,6 +467,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Unaligned access\\n"
 	},
+	"5550": {
+		"Type": "TRice",
+		"Strg": "FWU: heap=%u hwm=%u\\n"
+	},
 	"5555": {
 		"Type": "TRICE",
 		"Strg": "R2  = 0x%08X\\n"
@@ -438,6 +478,10 @@
 	"5586": {
 		"Type": "TRice",
 		"Strg": "========================================\\n"
+	},
+	"5652": {
+		"Type": "TRice",
+		"Strg": "FWU: resp malloc FAIL heap=%u\\n"
 	},
 	"5662": {
 		"Type": "TRICE0",
@@ -478,6 +522,10 @@
 	"6121": {
 		"Type": "TRice",
 		"Strg": "  Return to: Thread mode (PSP)\\n"
+	},
+	"6209": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved malloc FAIL\\n"
 	},
 	"6248": {
 		"Type": "TRice",
@@ -527,6 +575,14 @@
 		"Type": "TRICE0",
 		"Strg": "========================================\\n"
 	},
+	"6716": {
+		"Type": "TRice",
+		"Strg": "FWU: tcp_recved %u -\u003e tcpip_thread\\n"
+	},
+	"6733": {
+		"Type": "TRice",
+		"Strg": "tcpip HWM=%u words\\n"
+	},
 	"6814": {
 		"Type": "TRice",
 		"Strg": "\\n--- HardFault Status ---\\n"
@@ -547,6 +603,10 @@
 		"Type": "TRICE0",
 		"Strg": "========================================\\n"
 	},
+	"6967": {
+		"Type": "TRice",
+		"Strg": "FWU: resp cb FAIL err=%d heap=%u\\n"
+	},
 	"6988": {
 		"Type": "TRice",
 		"Strg": "  - Precise data bus error\\n"
@@ -566,6 +626,10 @@
 	"7049": {
 		"Type": "TRice",
 		"Strg": "R1  = 0x%08X\\n"
+	},
+	"7072": {
+		"Type": "TRice",
+		"Strg": "FWU: page addr=0x%X len=%u last=%u total=%u\\n"
 	},
 	"7173": {
 		"Type": "TRice",
@@ -602,6 +666,10 @@
 	"7342": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Stack Unwinding Information ---\\n"
+	},
+	"7354": {
+		"Type": "TRice",
+		"Strg": "FWU: upload_err -\u003e HTTP 500\\n"
 	},
 	"7368": {
 		"Type": "TRICE",
