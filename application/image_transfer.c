@@ -15,6 +15,7 @@
 #include "queue.h"
 #include "lwip/tcpip.h"
 #include "trice.h"
+#include "iwdg.h"
 #endif
 
 #define IMG_UPDATE_FLASH_ADDR   EXT_FLASH_FWU_IMG_ADDR
@@ -61,7 +62,7 @@ static download_ctx_t dl_ctx;
 
 #define UPLOAD_QUEUE_DEPTH   12
 #define UPLOAD_TASK_STACK    1024  /* words */
-#define UPLOAD_TASK_PRIORITY (tskIDLE_PRIORITY + 2)
+#define UPLOAD_TASK_PRIORITY 25  /* above tcpip_thread (24) so flash writes drain */
 
 /* One entry in the upload queue: one flash page worth of data */
 typedef struct {
@@ -155,6 +156,7 @@ static void image_upload_task(void *arg)
                 else
                     TRice("FWU: write_FAIL 0x%X\n", (unsigned)msg.flash_addr);
             }
+            MX_IWDG_Kick();
         }
 
         /* Advance TCP window: tells lwIP the application consumed msg.len bytes,

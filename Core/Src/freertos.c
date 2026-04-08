@@ -25,7 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "mqtt_bridge.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,6 +117,10 @@ void StartDefaultTask(void *argument)
   /* init code for LWIP */
   MX_LWIP_Init();
   /* USER CODE BEGIN StartDefaultTask */
+  {
+    const uint8_t broker_ip[] = {192, 168, 0, 182};
+    mqtt_bridge_init(broker_ip, 1883, MODBUS_PORT_NONE);
+  }
   /* Infinite loop */
   for(;;)
   {

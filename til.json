@@ -63,6 +63,10 @@
 		"Type": "TRice",
 		"Strg": "  4. Backtrace: bt\\n"
 	},
+	"1476": {
+		"Type": "TRice",
+		"Strg": "MQTT: connecting to %d.%d.%d.%d:%d\\n"
+	},
 	"1493": {
 		"Type": "TRice",
 		"Strg": "FWU: write_FAIL 0x%X\\n"
@@ -74,6 +78,14 @@
 	"1559": {
 		"Type": "TRICE",
 		"Strg": "ERR: Bind FAILED, err=%d\\n"
+	},
+	"1572": {
+		"Type": "TRice",
+		"Strg": "MQTT: connected to broker\\n"
+	},
+	"1600": {
+		"Type": "TRice",
+		"Strg": "MB TX: addr=%d fc=%d len=%d\\n"
 	},
 	"1629": {
 		"Type": "TRice",
@@ -119,9 +131,25 @@
 		"Type": "TRICE",
 		"Strg": "FWU: Download handler called\\n"
 	},
+	"2106": {
+		"Type": "TRice",
+		"Strg": "MB: invalid port %d, disabling\\n"
+	},
+	"2184": {
+		"Type": "TRice",
+		"Strg": "BRIDGE: MQTT client alloc failed!\\n"
+	},
+	"2192": {
+		"Type": "TRice",
+		"Strg": "BRIDGE: MQTT not connected, reconnecting...\\n"
+	},
 	"2286": {
 		"Type": "TRICE0",
 		"Strg": "  - Invalid PC load\\n"
+	},
+	"2325": {
+		"Type": "TRice",
+		"Strg": "MQTT: connect call failed err=%d\\n"
 	},
 	"2374": {
 		"Type": "TRice",
@@ -251,6 +279,10 @@
 		"Type": "TRICE",
 		"Strg": "ERR: Final flash write failed\\n"
 	},
+	"3475": {
+		"Type": "TRice",
+		"Strg": "MB: port disabled\\n"
+	},
 	"3480": {
 		"Type": "TRICE0",
 		"Strg": "\\n========================================\\n"
@@ -262,6 +294,10 @@
 	"3583": {
 		"Type": "TRICE",
 		"Strg": "CFSR = 0x%08X\\n"
+	},
+	"3588": {
+		"Type": "TRice",
+		"Strg": "MQTT: connection failed/lost, status=%d\\n"
 	},
 	"3660": {
 		"Type": "TRICE0",
@@ -355,6 +391,14 @@
 		"Type": "TRice",
 		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
 	},
+	"4513": {
+		"Type": "TRice",
+		"Strg": "BRIDGE: %s = %s (raw=%d)\\n"
+	},
+	"4533": {
+		"Type": "TRice",
+		"Strg": "MB RX: timeout (no response)\\n"
+	},
 	"4562": {
 		"Type": "TRice",
 		"Strg": "Stack frame at: 0x%08X\\n"
@@ -378,6 +422,10 @@
 	"4801": {
 		"Type": "TRICE",
 		"Strg": "DBG: Connection accepted\\n"
+	},
+	"4856": {
+		"Type": "TRice",
+		"Strg": "MB RX: CRC mismatch calc=0x%04X recv=0x%04X\\n"
 	},
 	"4858": {
 		"Type": "TRICE0",
@@ -403,6 +451,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - MemManage fault on stacking\\n"
 	},
+	"4961": {
+		"Type": "TRice",
+		"Strg": "MQTT: pub err=%d topic=%s\\n"
+	},
 	"4999": {
 		"Type": "TRICE0",
 		"Strg": "  - Bus fault during FP lazy state preservation\\n"
@@ -415,9 +467,21 @@
 		"Type": "TRICE",
 		"Strg": "  2. Set PC: set $pc = 0x%08X\\n"
 	},
+	"5084": {
+		"Type": "TRice",
+		"Strg": "MB RX: exception fc=0x%02X code=%d\\n"
+	},
 	"5158": {
 		"Type": "TRice",
 		"Strg": "  - Undefined instruction\\n"
+	},
+	"5168": {
+		"Type": "TRice",
+		"Strg": "MB RX: len=%d [%02X %02X %02X ...]\\n"
+	},
+	"5218": {
+		"Type": "TRice",
+		"Strg": "MQTT: publish failed err=%d\\n"
 	},
 	"5292": {
 		"Type": "TRice",
@@ -575,6 +639,10 @@
 		"Type": "TRICE0",
 		"Strg": "========================================\\n"
 	},
+	"6676": {
+		"Type": "TRice",
+		"Strg": "BRIDGE: read %s failed err=%d\\n"
+	},
 	"6716": {
 		"Type": "TRice",
 		"Strg": "FWU: tcp_recved %u -\u003e tcpip_thread\\n"
@@ -630,6 +698,14 @@
 	"7072": {
 		"Type": "TRice",
 		"Strg": "FWU: page addr=0x%X len=%u last=%u total=%u\\n"
+	},
+	"7085": {
+		"Type": "TRice",
+		"Strg": "MB: init done on UART%d, 9600 8N1\\n"
+	},
+	"7142": {
+		"Type": "TRice",
+		"Strg": "BRIDGE: task created, broker=%d.%d.%d.%d:%d, mb_port=%d\\n"
 	},
 	"7173": {
 		"Type": "TRice",

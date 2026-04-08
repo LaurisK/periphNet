@@ -63,9 +63,13 @@
 		"File": "hardfault_handler.c",
 		"Line": 150
 	},
+	"1476": {
+		"File": "mqtt_bridge.c",
+		"Line": 93
+	},
 	"1493": {
 		"File": "image_transfer.c",
-		"Line": 156
+		"Line": 157
 	},
 	"1504": {
 		"File": "hardfault_handler.c",
@@ -75,9 +79,17 @@
 		"File": "http_server.c",
 		"Line": 306
 	},
+	"1572": {
+		"File": "mqtt_bridge.c",
+		"Line": 72
+	},
+	"1600": {
+		"File": "modbus_rtu.c",
+		"Line": 134
+	},
 	"1629": {
 		"File": "image_transfer.c",
-		"Line": 195
+		"Line": 197
 	},
 	"1639": {
 		"File": "hardfault_handler.c",
@@ -119,13 +131,29 @@
 		"File": "firmware_update_http.c",
 		"Line": 327
 	},
+	"2106": {
+		"File": "modbus_rtu.c",
+		"Line": 67
+	},
+	"2184": {
+		"File": "mqtt_bridge.c",
+		"Line": 137
+	},
+	"2192": {
+		"File": "mqtt_bridge.c",
+		"Line": 150
+	},
 	"2286": {
 		"File": "hardfault_handler.c",
 		"Line": 149
 	},
+	"2325": {
+		"File": "mqtt_bridge.c",
+		"Line": 102
+	},
 	"2374": {
 		"File": "image_transfer.c",
-		"Line": 154
+		"Line": 155
 	},
 	"2424": {
 		"File": "hardfault_handler.c",
@@ -141,7 +169,7 @@
 	},
 	"2472": {
 		"File": "image_transfer.c",
-		"Line": 172
+		"Line": 174
 	},
 	"2497": {
 		"File": "hardfault_handler.c",
@@ -201,7 +229,7 @@
 	},
 	"3177": {
 		"File": "image_transfer.c",
-		"Line": 140
+		"Line": 141
 	},
 	"3180": {
 		"File": "hardfault_handler.c",
@@ -237,7 +265,7 @@
 	},
 	"3435": {
 		"File": "image_transfer.c",
-		"Line": 144
+		"Line": 145
 	},
 	"3447": {
 		"File": "hardfault_handler.c",
@@ -251,6 +279,10 @@
 		"File": "firmware_update_http.c",
 		"Line": 284
 	},
+	"3475": {
+		"File": "modbus_rtu.c",
+		"Line": 61
+	},
 	"3480": {
 		"File": "hardfault_handler.c",
 		"Line": 176
@@ -262,6 +294,10 @@
 	"3583": {
 		"File": "hardfault_handler.c",
 		"Line": 112
+	},
+	"3588": {
+		"File": "mqtt_bridge.c",
+		"Line": 75
 	},
 	"3660": {
 		"File": "hardfault_handler.c",
@@ -355,6 +391,14 @@
 		"File": "hardfault_handler.c",
 		"Line": 69
 	},
+	"4513": {
+		"File": "mqtt_bridge.c",
+		"Line": 182
+	},
+	"4533": {
+		"File": "modbus_rtu.c",
+		"Line": 154
+	},
 	"4562": {
 		"File": "hardfault_handler.c",
 		"Line": 145
@@ -365,7 +409,7 @@
 	},
 	"4718": {
 		"File": "image_transfer.c",
-		"Line": 146
+		"Line": 147
 	},
 	"4770": {
 		"File": "hardfault_handler.c",
@@ -378,6 +422,10 @@
 	"4801": {
 		"File": "http_server.c",
 		"Line": 273
+	},
+	"4856": {
+		"File": "modbus_rtu.c",
+		"Line": 176
 	},
 	"4858": {
 		"File": "hardfault_handler.c",
@@ -403,6 +451,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 123
 	},
+	"4961": {
+		"File": "mqtt_bridge.c",
+		"Line": 117
+	},
 	"4999": {
 		"File": "hardfault_handler.c",
 		"Line": 138
@@ -415,9 +467,21 @@
 		"File": "hardfault_handler.c",
 		"Line": 168
 	},
+	"5084": {
+		"File": "modbus_rtu.c",
+		"Line": 187
+	},
 	"5158": {
 		"File": "hardfault_handler.c",
 		"Line": 129
+	},
+	"5168": {
+		"File": "modbus_rtu.c",
+		"Line": 163
+	},
+	"5218": {
+		"File": "mqtt_bridge.c",
+		"Line": 83
 	},
 	"5292": {
 		"File": "hardfault_handler.c",
@@ -469,7 +533,7 @@
 	},
 	"5550": {
 		"File": "image_transfer.c",
-		"Line": 125
+		"Line": 126
 	},
 	"5555": {
 		"File": "hardfault_handler.c",
@@ -481,7 +545,7 @@
 	},
 	"5652": {
 		"File": "image_transfer.c",
-		"Line": 212
+		"Line": 214
 	},
 	"5662": {
 		"File": "hardfault_handler.c",
@@ -525,7 +589,7 @@
 	},
 	"6209": {
 		"File": "image_transfer.c",
-		"Line": 176
+		"Line": 178
 	},
 	"6248": {
 		"File": "hardfault_handler.c",
@@ -575,9 +639,13 @@
 		"File": "hardfault_handler.c",
 		"Line": 83
 	},
+	"6676": {
+		"File": "mqtt_bridge.c",
+		"Line": 184
+	},
 	"6716": {
 		"File": "image_transfer.c",
-		"Line": 165
+		"Line": 167
 	},
 	"6733": {
 		"File": "trace.c",
@@ -605,7 +673,7 @@
 	},
 	"6967": {
 		"File": "image_transfer.c",
-		"Line": 207
+		"Line": 209
 	},
 	"6988": {
 		"File": "hardfault_handler.c",
@@ -629,7 +697,15 @@
 	},
 	"7072": {
 		"File": "image_transfer.c",
-		"Line": 122
+		"Line": 123
+	},
+	"7085": {
+		"File": "modbus_rtu.c",
+		"Line": 84
+	},
+	"7142": {
+		"File": "mqtt_bridge.c",
+		"Line": 214
 	},
 	"7173": {
 		"File": "hardfault_handler.c",
@@ -669,7 +745,7 @@
 	},
 	"7354": {
 		"File": "image_transfer.c",
-		"Line": 185
+		"Line": 187
 	},
 	"7368": {
 		"File": "hardfault_handler.c",
