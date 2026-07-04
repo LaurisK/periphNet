@@ -214,3 +214,6 @@ third_party/*/.git/
 # Generated version files (auto-generated at build time)
 version_generated.h
 build_info.h
+
+# Production FWU keys — never commit
+bootloader/secrets_prod.c

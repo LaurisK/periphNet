@@ -96,11 +96,21 @@ add_custom_target(trice-insert
 # Target: bootloader.elf  (32KB @ 0x08000000, no RTOS/network)
 # ==============================================================================
 
+# FWU keys: committed secrets.c holds publicly-known DEVELOPMENT keys.
+# A gitignored bootloader/secrets_prod.c (same symbols) takes precedence.
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/secrets_prod.c)
+    set(BL_SECRETS bootloader/secrets_prod.c)
+    message(STATUS "FWU keys: PRODUCTION (bootloader/secrets_prod.c)")
+else()
+    set(BL_SECRETS bootloader/secrets.c)
+    message(STATUS "FWU keys: development defaults (bootloader/secrets.c)")
+endif()
+
 set(BL_SOURCES
     bootloader/boot_main.c
     bootloader/boot_api.c
     bootloader/boot_stm32f4xx_it.c
-    bootloader/secrets.c
+    ${BL_SECRETS}
     Core/Startup/startup_stm32f407vetx.s
     Core/Src/gpio.c
     Core/Src/spi.c
@@ -356,6 +366,44 @@ add_custom_command(TARGET application.elf POST_BUILD
     COMMENT "Cleaning Trice IDs..."
     VERBATIM
 )
+
+# ==============================================================================
+# FWU artifacts
+#   periphnet_full.hex — BL + signed APP, factory / initial J-Link write
+#   periphnet_fwu.pnfw — encrypted+authenticated blob for OTA upload
+# Requires python packages: cryptography, intelhex (checked at configure time)
+# ==============================================================================
+
+execute_process(
+    COMMAND python3 -c "import cryptography, intelhex"
+    RESULT_VARIABLE PY_DFU_DEPS_MISSING
+    OUTPUT_QUIET ERROR_QUIET
+)
+
+if(NOT PY_DFU_DEPS_MISSING)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/periphnet_full.hex
+               ${CMAKE_CURRENT_BINARY_DIR}/periphnet_fwu.pnfw
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/dfu_image_tool.py full
+                -i ${CMAKE_CURRENT_BINARY_DIR}/application.bin
+                -o ${CMAKE_CURRENT_BINARY_DIR}/periphnet_full.hex
+                -b ${CMAKE_CURRENT_BINARY_DIR}/bootloader.bin
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/dfu_image_tool.py package
+                -i ${CMAKE_CURRENT_BINARY_DIR}/application.bin
+                -o ${CMAKE_CURRENT_BINARY_DIR}/periphnet_fwu.pnfw
+        DEPENDS bootloader.elf application.elf
+        COMMENT "Generating FWU artifacts (full hex + encrypted blob)"
+        VERBATIM
+    )
+    add_custom_target(fwu_artifacts ALL
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/periphnet_full.hex
+                ${CMAKE_CURRENT_BINARY_DIR}/periphnet_fwu.pnfw
+    )
+else()
+    message(WARNING "python3 packages 'cryptography'/'intelhex' missing — "
+                    "FWU artifacts (periphnet_full.hex / periphnet_fwu.pnfw) "
+                    "will not be generated")
+endif()
 
 # ==============================================================================
 # Flash targets (J-Link clone wrapper)

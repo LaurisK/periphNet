@@ -1,99 +1,110 @@
+/*
+ * FWU staging + control logic (protocol-agnostic).
+ *
+ * The application only ever handles opaque encrypted .pnfw blobs:
+ * it stores them, checks the keyless manifest + CRC32, and arms the FWU
+ * flag.  All cryptography (GCM tag, HMAC, version gating) happens in the
+ * bootloader during install.  Transfer and FWU are independent: a staged
+ * blob survives reboots and can be installed at any time.
+ *
+ * Runs in the HTTP server task (upload/download/control) and defaultTask
+ * (promotion, reboot); the W25Q128 driver serializes SPI access.
+ */
+
 #include "App/Http/image_transfer.h"
 #include "App/system.h"
 #include "w25q128.h"
 #include "boot_status.h"
 #include "image_mgmt.h"
 #include "version.h"
-#include "lwip/tcp.h"
-#include "FreeRTOS.h"
+#include "bl_app_contract.h"
 #include <string.h>
 #include <stdio.h>
 
-#define IMG_UPDATE_FLASH_ADDR   0x00001000U
-#define IMG_MAX_SIZE            (480U * 1024U)
-#define DOWNLOAD_CHUNK_SIZE     512U
+#define SCAN_CHUNK_SIZE      256U
+#define PROMOTE_CHUNK_SIZE   4096U   /* one ext-flash sector */
 
-static image_state_t fw_state = {
-    .status            = IMG_STATUS_IDLE,
-    .bytes_transferred = 0,
-    .total_bytes       = 0,
-    .flash_address     = IMG_UPDATE_FLASH_ADDR,
-    .crc32             = 0,
-    .error_message     = {0}
-};
+static image_state_t fw_state;
 
-static volatile bool reboot_pending = false;
+static volatile bool reboot_pending  = false;
+static volatile bool promote_pending = false;
+static volatile bool promoting       = false;
 
 /* --------------------------------------------------------------------------
- * Extract metadata from staged image's sAppInfo (at offset 0x200)
+ * Blob area scanning — manifest sanity + whole-blob CRC32 (keyless)
  * -------------------------------------------------------------------------- */
 
-static void extract_staged_metadata(void)
+static void scan_blob_area(uint32_t base, uint32_t area_size, sBlobInfo *out)
 {
-    sAppInfo info;
+    memset(out, 0, sizeof(*out));
 
-    if (W25Q128_Read(IMG_UPDATE_FLASH_ADDR + FW_OFFSET_APP_HEADER,
-                     (uint8_t *)&info, sizeof(info)) != W25Q128_OK) {
-        fw_state.meta_valid = false;
+    sFwuManifest man;
+    if (W25Q128_Read(base, (uint8_t *)&man, sizeof(man)) != W25Q128_OK) {
         return;
     }
 
-    if (info.magic != APP_INFO_MAGIC) {
-        fw_state.meta_valid = false;
+    if (man.magic != FWU_BLOB_MAGIC || man.format != FWU_BLOB_FORMAT) {
+        return;
+    }
+    if (man.image_size < FW_OFFSET_APP_HEADER + sizeof(sAppInfo) ||
+        man.image_size > APPLICATION_SIZE ||
+        man.blob_size != man.image_size + FWU_BLOB_OVERHEAD ||
+        man.blob_size > area_size) {
         return;
     }
 
-    fw_state.meta_valid       = true;
-    fw_state.staged_features  = info.features;
-    fw_state.staged_image_size = info.image_size;
-    ver_toString(&info.fw_version.ver, fw_state.staged_version,
-                 sizeof(fw_state.staged_version));
+    uint8_t  buf[SCAN_CHUNK_SIZE];
+    uint32_t body_len = man.blob_size - FWU_BLOB_CRC_SIZE;
+    uint32_t crc = ImgMgmt_Crc32Init();
+
+    for (uint32_t off = 0; off < body_len; off += SCAN_CHUNK_SIZE) {
+        uint32_t n = body_len - off;
+        if (n > SCAN_CHUNK_SIZE) n = SCAN_CHUNK_SIZE;
+
+        if ((off & 0xFFFFU) == 0U) {
+            KickIwdg();
+        }
+        if (W25Q128_Read(base + off, buf, n) != W25Q128_OK) {
+            return;
+        }
+        crc = ImgMgmt_Crc32Update(crc, buf, n);
+    }
+
+    uint32_t stored;
+    if (W25Q128_Read(base + body_len, (uint8_t *)&stored,
+                     sizeof(stored)) != W25Q128_OK) {
+        return;
+    }
+    if (ImgMgmt_Crc32Final(crc) != stored) {
+        return;
+    }
+
+    out->valid      = true;
+    out->version    = man.fw_version;
+    out->image_size = man.image_size;
+    out->blob_size  = man.blob_size;
+    out->blob_crc32 = stored;
+    ver_toString(&man.fw_version.ver, out->version_str,
+                 sizeof(out->version_str));
 }
 
-typedef struct {
-    struct tcp_pcb *pcb;
-    uint32_t content_length;
-    uint32_t bytes_received;
-    uint32_t flash_write_addr;
-    uint32_t current_sector;
-    uint8_t  header_parsed;
-    uint8_t  buffer[256];
-    uint16_t buffer_pos;
-} sUploadSession;
-
-static sUploadSession *active_upload = NULL;
-
-typedef struct {
-    struct tcp_pcb *pcb;
-    uint32_t bytes_sent;
-    uint32_t total_bytes;
-} sDownloadCtx;
-
-static sDownloadCtx dl_ctx;
-
 /* --------------------------------------------------------------------------
- * Public API
+ * Init / status
  * -------------------------------------------------------------------------- */
 
 void image_transfer_init(void)
 {
-    if (active_upload != NULL) {
-        vPortFree(active_upload);
-        active_upload = NULL;
-    }
+    memset(&fw_state, 0, sizeof(fw_state));
 
-    fw_state.status            = IMG_STATUS_IDLE;
-    fw_state.bytes_transferred = 0;
-    fw_state.total_bytes       = 0;
-    fw_state.flash_address     = IMG_UPDATE_FLASH_ADDR;
-    fw_state.crc32             = 0;
-    fw_state.meta_valid        = false;
-    fw_state.staged_version[0] = '\0';
-    fw_state.staged_features   = 0;
-    fw_state.staged_image_size = 0;
-    memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
+    /* Blob areas are self-describing: rescan so a staged image uploaded
+     * before a reboot is still installable. */
+    scan_blob_area(EXT_FLASH_FWU_IMG_ADDR, EXT_FLASH_FWU_IMG_SIZE,
+                   &fw_state.staged);
+    scan_blob_area(EXT_FLASH_GOLDEN_IMG_ADDR, EXT_FLASH_GOLDEN_IMG_SIZE,
+                   &fw_state.golden);
 
-    dl_ctx.pcb = NULL;
+    fw_state.status = fw_state.staged.valid ? IMG_STATUS_STAGED
+                                            : IMG_STATUS_IDLE;
 }
 
 const image_state_t *image_transfer_get_status(void)
@@ -101,584 +112,330 @@ const image_state_t *image_transfer_get_status(void)
     return &fw_state;
 }
 
-void image_upload_abort_session(struct tcp_pcb *pcb)
-{
-    if (active_upload != NULL && active_upload->pcb == pcb) {
-        vPortFree(active_upload);
-        active_upload = NULL;
-        fw_state.status = IMG_STATUS_ERROR;
-        strcpy(fw_state.error_message, "Connection aborted");
-    }
-}
-
-void image_upload_abort_session_ptr(void *session_ptr)
-{
-    if (active_upload != NULL && active_upload == (sUploadSession *)session_ptr) {
-        vPortFree(active_upload);
-        active_upload = NULL;
-        fw_state.status = IMG_STATUS_ERROR;
-        strcpy(fw_state.error_message, "Connection aborted");
-    }
-}
-
 /* --------------------------------------------------------------------------
- * Upload: HTTP header / body parsing
+ * Upload session — page-buffered synchronous flash writes with lazy
+ * sector erase.  Single session; the HTTP task is the only caller.
  * -------------------------------------------------------------------------- */
 
-static uint32_t parse_content_length(const char *header, uint16_t header_len)
+typedef struct {
+    bool     active;
+    uint32_t content_length;
+    uint32_t bytes_received;
+    uint32_t flash_write_addr;
+    uint32_t current_sector;
+    uint16_t buffer_pos;
+    uint8_t  buffer[256];
+} sUploadSession;
+
+static sUploadSession upload;
+
+static bool flush_upload_page(void)
 {
-    const char *pattern = "Content-Length:";
-    const uint16_t pattern_len = 15;
-
-    if (header_len < pattern_len)
-        return 0;
-
-    for (uint16_t i = 0; i <= header_len - pattern_len; i++) {
-        uint8_t match = 1;
-        for (uint16_t j = 0; j < pattern_len; j++) {
-            char c1 = header[i + j];
-            char c2 = pattern[j];
-            if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
-            if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
-            if (c1 != c2) { match = 0; break; }
-        }
-        if (match) {
-            const char *num_start = &header[i + pattern_len];
-            const char *num_end   = &header[header_len];
-            while (num_start < num_end && (*num_start == ' ' || *num_start == '\t'))
-                num_start++;
-            uint32_t value = 0;
-            while (num_start < num_end && *num_start >= '0' && *num_start <= '9')
-                value = value * 10 + (*num_start++ - '0');
-            return value;
-        }
+    if (upload.buffer_pos == 0) {
+        return true;
     }
-    return 0;
-}
 
-static const char *find_http_body(const char *data, uint16_t data_len)
-{
-    for (uint16_t i = 0; i + 3 < data_len; i++) {
-        if (data[i] == '\r' && data[i+1] == '\n' &&
-            data[i+2] == '\r' && data[i+3] == '\n') {
-            return &data[i + 4];
-        }
-    }
-    return NULL;
-}
-
-/* --------------------------------------------------------------------------
- * Upload: synchronous flash write (runs in tcpip_thread context)
- * -------------------------------------------------------------------------- */
-
-static err_t flush_upload_page(sUploadSession *session)
-{
-    if (session->buffer_pos == 0)
-        return ERR_OK;
-
-    uint32_t addr = session->flash_write_addr;
+    uint32_t addr = upload.flash_write_addr;
     uint32_t sector = addr & ~0xFFFU;
 
     /* Lazy sector erase before first write to each 4KB sector */
-    if (sector != session->current_sector) {
+    if (sector != upload.current_sector) {
         KickIwdg();
         if (W25Q128_EraseSector(sector) != W25Q128_OK) {
-            strcpy(fw_state.error_message, "Flash erase error");
-            fw_state.status = IMG_STATUS_ERROR;
-            return ERR_ABRT;
+            return false;
         }
-        session->current_sector = sector;
+        upload.current_sector = sector;
     }
 
-    if (W25Q128_WritePage(addr, session->buffer, session->buffer_pos) != W25Q128_OK) {
-        strcpy(fw_state.error_message, "Flash write error");
-        fw_state.status = IMG_STATUS_ERROR;
-        return ERR_ABRT;
+    if (W25Q128_WritePage(addr, upload.buffer, upload.buffer_pos) != W25Q128_OK) {
+        return false;
     }
 
-    session->flash_write_addr += session->buffer_pos;
-    session->buffer_pos = 0;
-    return ERR_OK;
+    upload.flash_write_addr += upload.buffer_pos;
+    upload.buffer_pos = 0;
+    return true;
 }
 
-static err_t process_upload_data(sUploadSession *session, const uint8_t *data, uint16_t len)
+bool img_upload_begin(uint32_t content_length, const char **err)
 {
-    uint16_t offset = 0;
+    if (promote_pending || promoting) {
+        *err = "golden promotion in progress";
+        return false;
+    }
+    if (upload.active) {
+        *err = "upload already in progress";
+        return false;
+    }
+    if (content_length < FWU_BLOB_OVERHEAD ||
+        content_length > EXT_FLASH_FWU_IMG_SIZE) {
+        *err = "invalid content-length";
+        return false;
+    }
 
+    memset(&upload, 0, sizeof(upload));
+    upload.active           = true;
+    upload.content_length   = content_length;
+    upload.flash_write_addr = EXT_FLASH_FWU_IMG_ADDR;
+    upload.current_sector   = 0xFFFFFFFFU;
+
+    /* Incoming upload invalidates whatever was staged */
+    fw_state.staged.valid      = false;
+    fw_state.status            = IMG_STATUS_UPLOADING;
+    fw_state.bytes_transferred = 0;
+    fw_state.total_bytes       = content_length;
+    memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
+
+    return true;
+}
+
+bool img_upload_write(const uint8_t *data, uint32_t len)
+{
+    if (!upload.active) {
+        return false;
+    }
+
+    uint32_t offset = 0;
     while (offset < len) {
-        uint16_t chunk = len - offset;
-        uint16_t space = sizeof(session->buffer) - session->buffer_pos;
+        uint32_t chunk = len - offset;
+        uint32_t space = sizeof(upload.buffer) - upload.buffer_pos;
         if (chunk > space) chunk = space;
 
-        memcpy(&session->buffer[session->buffer_pos], &data[offset], chunk);
-        session->buffer_pos += chunk;
+        memcpy(&upload.buffer[upload.buffer_pos], &data[offset], chunk);
+        upload.buffer_pos += (uint16_t)chunk;
         offset += chunk;
-        session->bytes_received += chunk;
+        upload.bytes_received += chunk;
 
-        if (session->buffer_pos >= sizeof(session->buffer)) {
-            if (flush_upload_page(session) != ERR_OK)
-                return ERR_ABRT;
-        }
-    }
-
-    fw_state.bytes_transferred = session->bytes_received;
-    return ERR_OK;
-}
-
-/* --------------------------------------------------------------------------
- * image_upload_handler  (synchronous: flash writes in tcpip_thread context)
- * -------------------------------------------------------------------------- */
-
-err_t image_upload_handler(struct tcp_pcb *pcb, struct pbuf *p)
-{
-    sUploadSession *session = active_upload;
-    char *data     = (char *)p->payload;
-    uint16_t data_len = p->len;
-
-    if (session == NULL) {
-        session = (sUploadSession *)pvPortMalloc(sizeof(sUploadSession));
-        if (session == NULL) {
-            strcpy(fw_state.error_message, "Out of memory");
-            fw_state.status = IMG_STATUS_ERROR;
-            tcp_recved(pcb, p->tot_len);
-            tcp_close(pcb);
-            return ERR_MEM;
-        }
-
-        memset(session, 0, sizeof(sUploadSession));
-        session->pcb             = pcb;
-        session->flash_write_addr = IMG_UPDATE_FLASH_ADDR;
-        session->current_sector  = 0xFFFFFFFFU;
-
-        session->content_length = parse_content_length(data, data_len);
-        if (session->content_length == 0 || session->content_length > IMG_MAX_SIZE) {
-            vPortFree(session);
-            strcpy(fw_state.error_message, "Invalid content length");
-            fw_state.status = IMG_STATUS_ERROR;
-
-            const char *err_resp =
-                "HTTP/1.1 400 Bad Request\r\n"
-                "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-                "{\"error\":\"invalid content-length\"}\r\n";
-            tcp_recved(pcb, p->tot_len);
-            tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
-            tcp_output(pcb);
-            tcp_close(pcb);
-            return ERR_VAL;
-        }
-
-        fw_state.status            = IMG_STATUS_UPLOADING;
-        fw_state.bytes_transferred = 0;
-        fw_state.total_bytes       = session->content_length;
-        fw_state.flash_address     = IMG_UPDATE_FLASH_ADDR;
-        memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
-
-        active_upload = session;
-        tcp_arg(pcb, session);
-    }
-
-    for (struct pbuf *q = p; q != NULL; q = q->next) {
-        char *seg_data    = (char *)q->payload;
-        uint16_t seg_len  = q->len;
-
-        const char *body_start = seg_data;
-        uint16_t body_len      = seg_len;
-
-        if (!session->header_parsed) {
-            body_start = find_http_body(seg_data, seg_len);
-            if (body_start == NULL)
-                continue;
-            body_len = seg_len - (uint16_t)(body_start - seg_data);
-            session->header_parsed = 1;
-        }
-
-        if (session->bytes_received < session->content_length) {
-            uint32_t remaining = session->content_length - session->bytes_received;
-            if (body_len > remaining)
-                body_len = (uint16_t)remaining;
-        } else {
-            body_len = 0;
-        }
-
-        if (body_len > 0) {
-            if (process_upload_data(session, (const uint8_t *)body_start, body_len) != ERR_OK) {
-                tcp_arg(pcb, NULL);
-                vPortFree(session);
-                active_upload = NULL;
-
-                const char *err_resp =
-                    "HTTP/1.1 500 Internal Server Error\r\n"
-                    "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-                    "{\"error\":\"flash write error\"}\r\n";
-                tcp_recved(pcb, p->tot_len);
-                tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
-                tcp_output(pcb);
-                tcp_close(pcb);
-                return ERR_ABRT;
+        if (upload.buffer_pos >= sizeof(upload.buffer)) {
+            if (!flush_upload_page()) {
+                img_upload_abort("Flash write error");
+                return false;
             }
         }
     }
 
-    /* Advance TCP receive window so sender can continue */
-    tcp_recved(pcb, p->tot_len);
+    fw_state.bytes_transferred = upload.bytes_received;
+    return true;
+}
 
-    if (session->bytes_received >= session->content_length) {
-        /* Flush any partial final page */
-        if (flush_upload_page(session) != ERR_OK) {
-            strcpy(fw_state.error_message, "Final flash write failed");
-            fw_state.status = IMG_STATUS_ERROR;
-
-            tcp_arg(pcb, NULL);
-            vPortFree(session);
-            active_upload = NULL;
-
-            const char *err_resp =
-                "HTTP/1.1 500 Internal Server Error\r\n"
-                "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-                "{\"error\":\"final flash write failed\"}\r\n";
-            tcp_write(pcb, err_resp, strlen(err_resp), TCP_WRITE_FLAG_COPY);
-            tcp_output(pcb);
-            tcp_close(pcb);
-            return ERR_ABRT;
-        }
-
-        fw_state.status = IMG_STATUS_UPLOAD_COMPLETE;
-        fw_state.bytes_transferred = session->content_length;
-
-        /* Extract metadata from the uploaded binary */
-        extract_staged_metadata();
-
-        tcp_arg(pcb, NULL);
-        vPortFree(session);
-        active_upload = NULL;
-
-        char response[256];
-        int len;
-        if (fw_state.meta_valid) {
-            len = snprintf(response, sizeof(response),
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Connection: close\r\n\r\n"
-                "{\"status\":\"success\",\"bytes\":%lu,"
-                "\"version\":\"%s\",\"features\":%lu}\r\n",
-                (unsigned long)fw_state.total_bytes,
-                fw_state.staged_version,
-                (unsigned long)fw_state.staged_features);
-        } else {
-            len = snprintf(response, sizeof(response),
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Connection: close\r\n\r\n"
-                "{\"status\":\"success\",\"bytes\":%lu,"
-                "\"version\":null,\"features\":0}\r\n",
-                (unsigned long)fw_state.total_bytes);
-        }
-        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
+bool img_upload_finish(void)
+{
+    if (!upload.active) {
+        return false;
     }
 
-    return ERR_OK;
+    bool flushed = flush_upload_page();
+    upload.active = false;
+
+    if (!flushed) {
+        fw_state.status = IMG_STATUS_ERROR;
+        strcpy(fw_state.error_message, "Final flash write failed");
+        return false;
+    }
+
+    /* Validate the received blob: manifest + CRC32 (keyless) */
+    scan_blob_area(EXT_FLASH_FWU_IMG_ADDR, EXT_FLASH_FWU_IMG_SIZE,
+                   &fw_state.staged);
+
+    if (fw_state.staged.valid) {
+        fw_state.status = IMG_STATUS_STAGED;
+        return true;
+    }
+
+    fw_state.status = IMG_STATUS_ERROR;
+    strcpy(fw_state.error_message, "Invalid blob (manifest/CRC)");
+    return false;
+}
+
+void img_upload_abort(const char *reason)
+{
+    if (upload.active) {
+        upload.active = false;
+        fw_state.status = IMG_STATUS_ERROR;
+        snprintf(fw_state.error_message, sizeof(fw_state.error_message),
+                 "%s", reason ? reason : "Upload aborted");
+    }
 }
 
 /* --------------------------------------------------------------------------
- * Download handler
+ * Staged blob access (download)
  * -------------------------------------------------------------------------- */
 
-static err_t send_download_chunk(struct tcp_pcb *pcb)
+void img_download_begin(void)
 {
-    if (dl_ctx.pcb != pcb)
-        return ERR_OK;
-
-    if (dl_ctx.bytes_sent >= dl_ctx.total_bytes) {
-        fw_state.status = IMG_STATUS_DOWNLOAD_READY;
-        dl_ctx.pcb = NULL;
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    uint32_t remaining = dl_ctx.total_bytes - dl_ctx.bytes_sent;
-    uint16_t sndbuf    = tcp_sndbuf(pcb);
-    uint32_t chunk     = remaining < (uint32_t)sndbuf ? remaining : (uint32_t)sndbuf;
-    if (chunk > DOWNLOAD_CHUNK_SIZE) chunk = DOWNLOAD_CHUNK_SIZE;
-
-    if (chunk == 0) {
-        tcp_output(pcb);
-        return ERR_OK;
-    }
-
-    uint8_t read_buf[DOWNLOAD_CHUNK_SIZE];
-    if (W25Q128_Read(IMG_UPDATE_FLASH_ADDR + dl_ctx.bytes_sent, read_buf, chunk) != W25Q128_OK) {
-        strcpy(fw_state.error_message, "Flash read error");
-        fw_state.status = IMG_STATUS_ERROR;
-        dl_ctx.pcb = NULL;
-        tcp_abort(pcb);
-        return ERR_ABRT;
-    }
-
-    err_t err = tcp_write(pcb, read_buf, (u16_t)chunk, TCP_WRITE_FLAG_COPY);
-    if (err != ERR_OK) {
-        if (err == ERR_MEM) {
-            tcp_output(pcb);
-            return ERR_OK;
-        }
-        strcpy(fw_state.error_message, "TCP write error");
-        fw_state.status = IMG_STATUS_ERROR;
-        dl_ctx.pcb = NULL;
-        tcp_abort(pcb);
-        return ERR_ABRT;
-    }
-
-    dl_ctx.bytes_sent += chunk;
-    fw_state.bytes_transferred = dl_ctx.bytes_sent;
-    tcp_output(pcb);
-    return ERR_OK;
-}
-
-static err_t image_download_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
-{
-    (void)arg;
-    (void)len;
-    return send_download_chunk(pcb);
-}
-
-err_t image_download_handler(struct tcp_pcb *pcb)
-{
-    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
-        fw_state.status != IMG_STATUS_DOWNLOAD_READY) {
-        const char *response =
-            "HTTP/1.1 404 Not Found\r\n"
-            "Content-Type: text/plain\r\nConnection: close\r\n\r\n"
-            "No firmware available for download\r\n";
-        tcp_write(pcb, response, strlen(response), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    dl_ctx.pcb        = pcb;
-    dl_ctx.bytes_sent = 0;
-    dl_ctx.total_bytes = fw_state.total_bytes;
-
     fw_state.status            = IMG_STATUS_DOWNLOADING;
     fw_state.bytes_transferred = 0;
+    fw_state.total_bytes       = fw_state.staged.blob_size;
+}
 
-    tcp_sent(pcb, image_download_sent);
-
-    char headers[256];
-    int header_len = snprintf(headers, sizeof(headers),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/octet-stream\r\n"
-        "Content-Length: %lu\r\n"
-        "Content-Disposition: attachment; filename=\"firmware.bin\"\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        (unsigned long)fw_state.total_bytes);
-
-    err_t err = tcp_write(pcb, headers, header_len, TCP_WRITE_FLAG_COPY);
-    if (err != ERR_OK) {
-        dl_ctx.pcb = NULL;
+void img_download_end(bool ok, const char *err)
+{
+    if (ok) {
+        fw_state.status = IMG_STATUS_STAGED;
+    } else {
         fw_state.status = IMG_STATUS_ERROR;
-        strcpy(fw_state.error_message, "Header write error");
-        tcp_abort(pcb);
-        return ERR_ABRT;
+        snprintf(fw_state.error_message, sizeof(fw_state.error_message),
+                 "%s", err ? err : "Download failed");
     }
+}
 
-    tcp_output(pcb);
-    return send_download_chunk(pcb);
+bool img_read_staged(uint32_t offset, uint8_t *buf, uint32_t len)
+{
+    if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + offset, buf, len) != W25Q128_OK) {
+        return false;
+    }
+    fw_state.bytes_transferred = offset + len;
+    return true;
 }
 
 /* --------------------------------------------------------------------------
- * Status handler
+ * FWU control — install / confirm / delete / verify
  * -------------------------------------------------------------------------- */
 
-err_t image_status_handler(struct tcp_pcb *pcb)
+eImgCtlRes img_install_request(void)
 {
-    char *response = (char *)pvPortMalloc(768);
-    if (response == NULL) {
-        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
-        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        return ERR_OK;
+    if (!fw_state.staged.valid || fw_state.status != IMG_STATUS_STAGED) {
+        return IMG_CTL_NO_IMAGE;
+    }
+    if (promote_pending || promoting) {
+        return IMG_CTL_BUSY;
+    }
+    if (BootStatus_RequestFwu() != 0) {
+        return IMG_CTL_FLASH_ERR;
     }
 
-    const char *status_str;
-    switch (fw_state.status) {
-        case IMG_STATUS_IDLE:            status_str = "idle";            break;
-        case IMG_STATUS_UPLOADING:       status_str = "uploading";      break;
-        case IMG_STATUS_UPLOAD_COMPLETE: status_str = "upload_complete"; break;
-        case IMG_STATUS_DOWNLOAD_READY:  status_str = "download_ready"; break;
-        case IMG_STATUS_DOWNLOADING:     status_str = "downloading";    break;
-        case IMG_STATUS_ERROR:           status_str = "error";          break;
-        default:                         status_str = "unknown";        break;
-    }
-
-    uint32_t progress_pct = 0;
-    if (fw_state.total_bytes > 0)
-        progress_pct = (fw_state.bytes_transferred * 100) / fw_state.total_bytes;
-
-    /* Running firmware version from internal flash sAppInfo */
-    char running_ver[24] = {0};
-    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
-    if (app->magic == APP_INFO_MAGIC) {
-        ver_toString(&app->fw_version.ver, running_ver, sizeof(running_ver));
-    }
-
-    int len = snprintf(response, 768,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Connection: close\r\n\r\n"
-        "{\"status\":\"%s\","
-        "\"running_version\":\"%s\","
-        "\"staged_version\":%s%s%s,"
-        "\"bytes_transferred\":%lu,"
-        "\"total_bytes\":%lu,"
-        "\"progress\":%lu,"
-        "\"error\":\"%s\"}\r\n",
-        status_str,
-        running_ver,
-        fw_state.meta_valid ? "\"" : "",
-        fw_state.meta_valid ? fw_state.staged_version : "null",
-        fw_state.meta_valid ? "\"" : "",
-        (unsigned long)fw_state.bytes_transferred,
-        (unsigned long)fw_state.total_bytes,
-        (unsigned long)progress_pct,
-        fw_state.error_message);
-
-    tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
-    vPortFree(response);
-    return ERR_OK;
-}
-
-/* --------------------------------------------------------------------------
- * Install handler — validate staged image, set FWU flag, trigger reboot
- * -------------------------------------------------------------------------- */
-
-err_t image_install_handler(struct tcp_pcb *pcb)
-{
-    char response[256];
-    int len;
-
-    /* Must have a completed upload */
-    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
-        fw_state.status != IMG_STATUS_DOWNLOAD_READY) {
-
-        len = snprintf(response, sizeof(response),
-            "HTTP/1.1 409 Conflict\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"error\":\"no staged firmware available\"}\r\n");
-        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    /* Validate the staged image in ext flash */
-    uint8_t work_buf[sizeof(sAppInfo)];
-    eFwuRes res = ImgMgmt_Validate(EXT_FLASH_FWU_IMG_ADDR, true,
-                                    work_buf, sizeof(work_buf));
-    if (res != FWU_OK) {
-        len = snprintf(response, sizeof(response),
-            "HTTP/1.1 422 Unprocessable Entity\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"error\":\"staged image validation failed\",\"code\":%d}\r\n",
-            (int)res);
-        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    /* Read version from staged image */
-    sFwVerArea staged_ver;
-    ImgMgmt_GetVersion(EXT_FLASH_FWU_IMG_ADDR, true, &staged_ver);
-
-    /* Request FWU — writes boot status with fwu_requested flag cleared */
-    if (BootStatus_RequestFwu(fw_state.total_bytes, 0, &staged_ver) != 0) {
-        len = snprintf(response, sizeof(response),
-            "HTTP/1.1 500 Internal Server Error\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"error\":\"failed to write boot status\"}\r\n");
-        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    /* Signal reboot to main task */
     reboot_pending = true;
-
-    len = snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-        "{\"status\":\"deploying\","
-        "\"message\":\"Device will reboot in 2 seconds\","
-        "\"size\":%lu}\r\n",
-        (unsigned long)fw_state.total_bytes);
-    tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
-    tcp_close(pcb);
-    return ERR_OK;
+    return IMG_CTL_OK;
 }
 
-/* --------------------------------------------------------------------------
- * Delete staged firmware
- * -------------------------------------------------------------------------- */
-
-static void clear_staged_metadata(void)
+eImgCtlRes img_confirm(bool *promote)
 {
-    fw_state.meta_valid        = false;
-    fw_state.staged_version[0] = '\0';
-    fw_state.staged_features   = 0;
-    fw_state.staged_image_size = 0;
-}
+    *promote = false;
 
-err_t image_delete_handler(struct tcp_pcb *pcb)
-{
-    char response[256];
-    int len;
-
-    if (fw_state.status != IMG_STATUS_UPLOAD_COMPLETE &&
-        fw_state.status != IMG_STATUS_DOWNLOAD_READY &&
-        fw_state.status != IMG_STATUS_ERROR) {
-
-        len = snprintf(response, sizeof(response),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"status\":\"idle\",\"message\":\"nothing to delete\"}\r\n");
-        tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
+    if (!BootStatus_IsUnconfirmed()) {
+        return IMG_CTL_ALREADY;
+    }
+    if (BootStatus_ConfirmApp() != 0) {
+        return IMG_CTL_FLASH_ERR;
     }
 
-    /* Erase first sector of staged image area to invalidate it */
-    W25Q128_EraseSector(IMG_UPDATE_FLASH_ADDR);
+    /* Promote staged → golden only if the staged blob is what is actually
+     * running (a newer, not-yet-installed upload must not become golden). */
+    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+    if (fw_state.staged.valid &&
+        app->magic == APP_INFO_MAGIC &&
+        memcmp(&fw_state.staged.version.ver, &app->fw_version.ver,
+               sizeof(sFwVer)) == 0 &&
+        (!fw_state.golden.valid ||
+         fw_state.golden.blob_crc32 != fw_state.staged.blob_crc32)) {
+        *promote = true;
+        promote_pending = true;
+    }
 
-    /* Reset transfer state */
+    return IMG_CTL_OK;
+}
+
+eImgCtlRes img_delete(void)
+{
+    if (fw_state.status == IMG_STATUS_UPLOADING ||
+        fw_state.status == IMG_STATUS_DOWNLOADING ||
+        promote_pending || promoting) {
+        return IMG_CTL_BUSY;
+    }
+
+    /* Erase first sector of staged area — kills the manifest */
+    if (W25Q128_EraseSector(EXT_FLASH_FWU_IMG_ADDR) != W25Q128_OK) {
+        return IMG_CTL_FLASH_ERR;
+    }
+
+    memset(&fw_state.staged, 0, sizeof(fw_state.staged));
     fw_state.status            = IMG_STATUS_IDLE;
     fw_state.bytes_transferred = 0;
     fw_state.total_bytes       = 0;
     memset(fw_state.error_message, 0, sizeof(fw_state.error_message));
-    clear_staged_metadata();
 
-    len = snprintf(response, sizeof(response),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-        "{\"status\":\"idle\",\"message\":\"staged firmware deleted\"}\r\n");
-    tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
-    tcp_close(pcb);
-    return ERR_OK;
+    return IMG_CTL_OK;
+}
+
+eFwuRes img_verify_running(void)
+{
+    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+    const sBootloaderApi *bl = (const sBootloaderApi *)BL_API_TABLE_ADDR;
+
+    if (app->magic != APP_INFO_MAGIC) {
+        return FWU_ERR_WRONG_MAGIC;
+    }
+    if (app->image_size == 0xFFFFFFFFu) {
+        return FWU_ERR_IMAGE_SIZE;      /* unsigned dev image */
+    }
+    if (bl->magic != BL_API_MAGIC || bl->version < 3 ||
+        bl->verify_image_hmac == NULL) {
+        return FWU_ERR_NO_IMAGE;        /* BL API unavailable */
+    }
+
+    return bl->verify_image_hmac(APPLICATION_START_ADDR, false,
+                                 app->image_size, app->image_hmac);
 }
 
 /* --------------------------------------------------------------------------
- * Reboot pending flag (checked by main task)
+ * defaultTask-side jobs: reboot + golden promotion
  * -------------------------------------------------------------------------- */
 
 bool image_transfer_reboot_pending(void)
 {
     return reboot_pending;
+}
+
+bool image_transfer_promote_pending(void)
+{
+    return promote_pending;
+}
+
+void image_transfer_run_promotion(void)
+{
+    if (!promote_pending) {
+        return;
+    }
+
+    promoting = true;
+    promote_pending = false;
+
+    uint32_t total = fw_state.staged.blob_size;
+    uint8_t  buf[256];   /* source ≠ destination, so a page bounce suffices */
+
+    if (!fw_state.staged.valid || total == 0) {
+        promoting = false;
+        return;
+    }
+
+    bool ok = true;
+    for (uint32_t off = 0; off < total && ok; off += PROMOTE_CHUNK_SIZE) {
+        KickIwdg();
+
+        uint32_t n = total - off;
+        if (n > PROMOTE_CHUNK_SIZE) n = PROMOTE_CHUNK_SIZE;
+
+        if (W25Q128_EraseSector(EXT_FLASH_GOLDEN_IMG_ADDR + off) != W25Q128_OK) {
+            ok = false;
+            break;
+        }
+
+        for (uint32_t page = 0; page < n; page += sizeof(buf)) {
+            uint32_t plen = n - page;
+            if (plen > sizeof(buf)) plen = sizeof(buf);
+            if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + off + page,
+                             buf, plen) != W25Q128_OK ||
+                W25Q128_WritePage(EXT_FLASH_GOLDEN_IMG_ADDR + off + page,
+                                  buf, plen) != W25Q128_OK) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    /* Re-scan golden: validates the copy (manifest + CRC32) */
+    scan_blob_area(EXT_FLASH_GOLDEN_IMG_ADDR, EXT_FLASH_GOLDEN_IMG_SIZE,
+                   &fw_state.golden);
+
+    (void)ok;
+    promoting = false;
 }

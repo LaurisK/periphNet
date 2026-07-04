@@ -11,6 +11,18 @@
 		"File": "hardfault_handler.c",
 		"Line": 74
 	},
+	"1059": {
+		"File": "image_transfer.c",
+		"Line": 134
+	},
+	"1070": {
+		"File": "solis_poller.c",
+		"Line": 333
+	},
+	"1076": {
+		"File": "cmd_parser.c",
+		"Line": 123
+	},
 	"1077": {
 		"File": "firmware_update_http.c",
 		"Line": 201
@@ -26,6 +38,14 @@
 	"1115": {
 		"File": "hardfault_handler.c",
 		"Line": 77
+	},
+	"1122": {
+		"File": "bms_reader.c",
+		"Line": 213
+	},
+	"1142": {
+		"File": "app_freertos.c",
+		"Line": 117
 	},
 	"1177": {
 		"File": "hardfault_handler.c",
@@ -49,7 +69,15 @@
 	},
 	"1243": {
 		"File": "app_freertos.c",
-		"Line": 90
+		"Line": 169
+	},
+	"1245": {
+		"File": "cmd_parser.c",
+		"Line": 156
+	},
+	"1292": {
+		"File": "image_transfer.c",
+		"Line": 200
 	},
 	"1390": {
 		"File": "hardfault_handler.c",
@@ -71,13 +99,33 @@
 		"File": "hardfault_handler.c",
 		"Line": 151
 	},
+	"1547": {
+		"File": "bms_sim.c",
+		"Line": 115
+	},
 	"1559": {
 		"File": "http_server.c",
 		"Line": 306
 	},
+	"1574": {
+		"File": "app_freertos.c",
+		"Line": 130
+	},
+	"1595": {
+		"File": "cmd_parser.c",
+		"Line": 186
+	},
+	"1634": {
+		"File": "http_server.c",
+		"Line": 715
+	},
 	"1639": {
 		"File": "hardfault_handler.c",
 		"Line": 147
+	},
+	"1645": {
+		"File": "cmd_parser.c",
+		"Line": 132
 	},
 	"1657": {
 		"File": "hardfault_handler.c",
@@ -85,7 +133,7 @@
 	},
 	"1686": {
 		"File": "crash.c",
-		"Line": 215
+		"Line": 221
 	},
 	"1721": {
 		"File": "hardfault_handler.c",
@@ -125,35 +173,51 @@
 	},
 	"2041": {
 		"File": "crash.c",
-		"Line": 200
+		"Line": 206
 	},
 	"2053": {
 		"File": "app_freertos.c",
-		"Line": 112
+		"Line": 191
 	},
 	"2070": {
 		"File": "crash.c",
-		"Line": 142
+		"Line": 148
 	},
 	"2153": {
 		"File": "crash.c",
-		"Line": 141
+		"Line": 147
 	},
 	"2170": {
 		"File": "app_freertos.c",
-		"Line": 125
+		"Line": 204
+	},
+	"2205": {
+		"File": "cmd_parser.c",
+		"Line": 202
 	},
 	"2207": {
 		"File": "crash.c",
-		"Line": 204
+		"Line": 210
 	},
 	"2266": {
 		"File": "crash.c",
-		"Line": 211
+		"Line": 217
+	},
+	"2282": {
+		"File": "cmd_parser.c",
+		"Line": 335
 	},
 	"2286": {
 		"File": "hardfault_handler.c",
 		"Line": 149
+	},
+	"2335": {
+		"File": "bms_reader.c",
+		"Line": 268
+	},
+	"2352": {
+		"File": "image_transfer.c",
+		"Line": 147
 	},
 	"2396": {
 		"File": "image_transfer.c",
@@ -163,9 +227,17 @@
 		"File": "hardfault_handler.c",
 		"Line": 123
 	},
+	"2427": {
+		"File": "cmd_parser.c",
+		"Line": 79
+	},
 	"2450": {
 		"File": "image_transfer.c",
 		"Line": 118
+	},
+	"2454": {
+		"File": "bms_reader.c",
+		"Line": 238
 	},
 	"2455": {
 		"File": "http_server.c",
@@ -183,13 +255,41 @@
 		"File": "hardfault_handler.c",
 		"Line": 134
 	},
+	"2531": {
+		"File": "app_freertos.c",
+		"Line": 107
+	},
 	"2564": {
 		"File": "hardfault_handler.c",
 		"Line": 120
 	},
+	"2572": {
+		"File": "image_transfer.c",
+		"Line": 103
+	},
+	"2580": {
+		"File": "cmd_parser.c",
+		"Line": 194
+	},
+	"2582": {
+		"File": "solis_poller.c",
+		"Line": 192
+	},
 	"2636": {
 		"File": "firmware_update_http.c",
 		"Line": 223
+	},
+	"2648": {
+		"File": "cmd_parser.c",
+		"Line": 110
+	},
+	"2733": {
+		"File": "app_freertos.c",
+		"Line": 123
+	},
+	"2761": {
+		"File": "cmd_parser.c",
+		"Line": 271
 	},
 	"2788": {
 		"File": "image_transfer.c",
@@ -197,7 +297,7 @@
 	},
 	"2794": {
 		"File": "crash.c",
-		"Line": 202
+		"Line": 208
 	},
 	"2826": {
 		"File": "hardfault_handler.c",
@@ -206,6 +306,10 @@
 	"2833": {
 		"File": "hardfault_handler.c",
 		"Line": 107
+	},
+	"2838": {
+		"File": "bms_reader.c",
+		"Line": 191
 	},
 	"2862": {
 		"File": "hardfault_handler.c",
@@ -217,7 +321,11 @@
 	},
 	"2905": {
 		"File": "crash.c",
-		"Line": 135
+		"Line": 141
+	},
+	"2939": {
+		"File": "app_freertos.c",
+		"Line": 139
 	},
 	"2943": {
 		"File": "image_transfer.c",
@@ -226,6 +334,10 @@
 	"2980": {
 		"File": "image_transfer.c",
 		"Line": 140
+	},
+	"3017": {
+		"File": "cmd_parser.c",
+		"Line": 196
 	},
 	"3027": {
 		"File": "hardfault_handler.c",
@@ -246,6 +358,22 @@
 	"3098": {
 		"File": "hardfault_handler.c",
 		"Line": 76
+	},
+	"3106": {
+		"File": "app_freertos.c",
+		"Line": 160
+	},
+	"3116": {
+		"File": "solis_poller.c",
+		"Line": 331
+	},
+	"3122": {
+		"File": "mqtt_bridge.c",
+		"Line": 417
+	},
+	"3149": {
+		"File": "bms_reader.c",
+		"Line": 271
 	},
 	"3151": {
 		"File": "hardfault_handler.c",
@@ -283,6 +411,18 @@
 		"File": "hardfault_handler.c",
 		"Line": 150
 	},
+	"3402": {
+		"File": "bms_reader.c",
+		"Line": 264
+	},
+	"3414": {
+		"File": "bms_reader.c",
+		"Line": 174
+	},
+	"3426": {
+		"File": "app_freertos.c",
+		"Line": 105
+	},
 	"3447": {
 		"File": "hardfault_handler.c",
 		"Line": 91
@@ -294,6 +434,10 @@
 	"3458": {
 		"File": "firmware_update_http.c",
 		"Line": 284
+	},
+	"3467": {
+		"File": "cmd_parser.c",
+		"Line": 207
 	},
 	"3480": {
 		"File": "hardfault_handler.c",
@@ -307,6 +451,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 112
 	},
+	"3589": {
+		"File": "image_transfer.c",
+		"Line": 140
+	},
 	"3640": {
 		"File": "image_transfer.c",
 		"Line": 146
@@ -314,6 +462,10 @@
 	"3660": {
 		"File": "hardfault_handler.c",
 		"Line": 166
+	},
+	"3674": {
+		"File": "solis_poller.c",
+		"Line": 176
 	},
 	"3753": {
 		"File": "http_server.c",
@@ -330,6 +482,10 @@
 	"3811": {
 		"File": "hardfault_handler.c",
 		"Line": 96
+	},
+	"3828": {
+		"File": "cmd_parser.c",
+		"Line": 266
 	},
 	"3829": {
 		"File": "hardfault_handler.c",
@@ -349,11 +505,15 @@
 	},
 	"3900": {
 		"File": "crash.c",
-		"Line": 212
+		"Line": 218
 	},
 	"3929": {
 		"File": "http_server.c",
 		"Line": 304
+	},
+	"3937": {
+		"File": "http_server.c",
+		"Line": 211
 	},
 	"3948": {
 		"File": "http_server.c",
@@ -377,7 +537,7 @@
 	},
 	"4177": {
 		"File": "crash.c",
-		"Line": 163
+		"Line": 169
 	},
 	"4178": {
 		"File": "hardfault_handler.c",
@@ -399,9 +559,21 @@
 		"File": "hardfault_handler.c",
 		"Line": 67
 	},
+	"4320": {
+		"File": "image_transfer.c",
+		"Line": 415
+	},
+	"4344": {
+		"File": "cmd_parser.c",
+		"Line": 69
+	},
 	"4361": {
 		"File": "hardfault_handler.c",
 		"Line": 113
+	},
+	"4371": {
+		"File": "app_freertos.c",
+		"Line": 96
 	},
 	"4388": {
 		"File": "hardfault_handler.c",
@@ -425,7 +597,7 @@
 	},
 	"4538": {
 		"File": "crash.c",
-		"Line": 201
+		"Line": 207
 	},
 	"4562": {
 		"File": "hardfault_handler.c",
@@ -435,9 +607,17 @@
 		"File": "hardfault_handler.c",
 		"Line": 133
 	},
+	"4664": {
+		"File": "app_freertos.c",
+		"Line": 97
+	},
 	"4687": {
 		"File": "crash.c",
-		"Line": 105
+		"Line": 111
+	},
+	"4724": {
+		"File": "http_server.c",
+		"Line": 508
 	},
 	"4757": {
 		"File": "image_transfer.c",
@@ -447,6 +627,14 @@
 		"File": "hardfault_handler.c",
 		"Line": 147
 	},
+	"4772": {
+		"File": "cmd_parser.c",
+		"Line": 237
+	},
+	"4796": {
+		"File": "cmd_parser.c",
+		"Line": 264
+	},
 	"4797": {
 		"File": "hardfault_handler.c",
 		"Line": 148
@@ -454,6 +642,10 @@
 	"4801": {
 		"File": "http_server.c",
 		"Line": 273
+	},
+	"4851": {
+		"File": "solis_poller.c",
+		"Line": 317
 	},
 	"4858": {
 		"File": "hardfault_handler.c",
@@ -467,6 +659,10 @@
 		"File": "system.c",
 		"Line": 81
 	},
+	"4891": {
+		"File": "app_freertos.c",
+		"Line": 102
+	},
 	"4905": {
 		"File": "image_transfer.c",
 		"Line": 154
@@ -479,6 +675,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 99
 	},
+	"4948": {
+		"File": "http_server.c",
+		"Line": 710
+	},
 	"4951": {
 		"File": "http_server.c",
 		"Line": 265
@@ -486,6 +686,10 @@
 	"4960": {
 		"File": "hardfault_handler.c",
 		"Line": 123
+	},
+	"4994": {
+		"File": "cmd_parser.c",
+		"Line": 216
 	},
 	"4999": {
 		"File": "hardfault_handler.c",
@@ -495,21 +699,37 @@
 		"File": "hardfault_handler.c",
 		"Line": 168
 	},
+	"5092": {
+		"File": "mqtt_bridge.c",
+		"Line": 345
+	},
 	"5158": {
 		"File": "hardfault_handler.c",
 		"Line": 129
 	},
+	"5181": {
+		"File": "cmd_parser.c",
+		"Line": 336
+	},
 	"5229": {
 		"File": "crash.c",
-		"Line": 205
+		"Line": 211
 	},
 	"5292": {
 		"File": "hardfault_handler.c",
 		"Line": 144
 	},
+	"5293": {
+		"File": "bms_sim.c",
+		"Line": 126
+	},
 	"5297": {
 		"File": "hardfault_handler.c",
 		"Line": 153
+	},
+	"5347": {
+		"File": "mqtt_bridge.c",
+		"Line": 374
 	},
 	"5393": {
 		"File": "firmware_update_http.c",
@@ -535,6 +755,10 @@
 		"File": "firmware_update_http.c",
 		"Line": 332
 	},
+	"5457": {
+		"File": "app_freertos.c",
+		"Line": 112
+	},
 	"5476": {
 		"File": "hardfault_handler.c",
 		"Line": 169
@@ -559,17 +783,37 @@
 		"File": "hardfault_handler.c",
 		"Line": 151
 	},
+	"5543": {
+		"File": "mqtt_bridge.c",
+		"Line": 316
+	},
+	"5546": {
+		"File": "http_server.c",
+		"Line": 480
+	},
 	"5555": {
 		"File": "hardfault_handler.c",
 		"Line": 89
+	},
+	"5584": {
+		"File": "solis_poller.c",
+		"Line": 313
 	},
 	"5586": {
 		"File": "hardfault_handler.c",
 		"Line": 70
 	},
+	"5588": {
+		"File": "image_transfer.c",
+		"Line": 175
+	},
+	"5621": {
+		"File": "mqtt_bridge.c",
+		"Line": 334
+	},
 	"5649": {
 		"File": "app_freertos.c",
-		"Line": 75
+		"Line": 90
 	},
 	"5662": {
 		"File": "hardfault_handler.c",
@@ -581,11 +825,11 @@
 	},
 	"5707": {
 		"File": "crash.c",
-		"Line": 206
+		"Line": 212
 	},
 	"5714": {
 		"File": "crash.c",
-		"Line": 230
+		"Line": 347
 	},
 	"5780": {
 		"File": "image_transfer.c",
@@ -607,6 +851,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 94
 	},
+	"6004": {
+		"File": "bms_sim.c",
+		"Line": 110
+	},
 	"6045": {
 		"File": "http_server.c",
 		"Line": 262
@@ -627,17 +875,41 @@
 		"File": "image_transfer.c",
 		"Line": 156
 	},
+	"6110": {
+		"File": "mqtt_bridge.c",
+		"Line": 302
+	},
+	"6113": {
+		"File": "http_server.c",
+		"Line": 347
+	},
 	"6121": {
 		"File": "hardfault_handler.c",
 		"Line": 86
 	},
+	"6141": {
+		"File": "bms_reader.c",
+		"Line": 252
+	},
+	"6162": {
+		"File": "cmd_parser.c",
+		"Line": 211
+	},
+	"6175": {
+		"File": "cmd_parser.c",
+		"Line": 278
+	},
 	"6209": {
 		"File": "crash.c",
-		"Line": 207
+		"Line": 213
 	},
 	"6220": {
 		"File": "crash.c",
-		"Line": 208
+		"Line": 214
+	},
+	"6232": {
+		"File": "cmd_parser.c",
+		"Line": 204
 	},
 	"6248": {
 		"File": "hardfault_handler.c",
@@ -663,9 +935,25 @@
 		"File": "hardfault_handler.c",
 		"Line": 73
 	},
+	"6364": {
+		"File": "solis_poller.c",
+		"Line": 228
+	},
 	"6402": {
 		"File": "firmware_update_http.c",
 		"Line": 281
+	},
+	"6426": {
+		"File": "cmd_parser.c",
+		"Line": 178
+	},
+	"6438": {
+		"File": "solis_poller.c",
+		"Line": 259
+	},
+	"6456": {
+		"File": "bms_reader.c",
+		"Line": 245
 	},
 	"6471": {
 		"File": "hardfault_handler.c",
@@ -683,6 +971,10 @@
 		"File": "http_server.c",
 		"Line": 87
 	},
+	"6535": {
+		"File": "solis_poller.c",
+		"Line": 199
+	},
 	"6573": {
 		"File": "hardfault_handler.c",
 		"Line": 98
@@ -691,17 +983,45 @@
 		"File": "hardfault_handler.c",
 		"Line": 115
 	},
+	"6622": {
+		"File": "app_freertos.c",
+		"Line": 162
+	},
 	"6666": {
 		"File": "hardfault_handler.c",
 		"Line": 83
+	},
+	"6668": {
+		"File": "cmd_parser.c",
+		"Line": 107
 	},
 	"6697": {
 		"File": "system.c",
 		"Line": 76
 	},
+	"6709": {
+		"File": "bms_reader.c",
+		"Line": 186
+	},
+	"6773": {
+		"File": "cmd_parser.c",
+		"Line": 332
+	},
+	"6781": {
+		"File": "cmd_parser.c",
+		"Line": 103
+	},
+	"6794": {
+		"File": "solis_poller.c",
+		"Line": 322
+	},
 	"6796": {
 		"File": "app_freertos.c",
-		"Line": 100
+		"Line": 179
+	},
+	"6806": {
+		"File": "bms_reader.c",
+		"Line": 203
 	},
 	"6814": {
 		"File": "hardfault_handler.c",
@@ -725,7 +1045,7 @@
 	},
 	"6961": {
 		"File": "crash.c",
-		"Line": 103
+		"Line": 109
 	},
 	"6988": {
 		"File": "hardfault_handler.c",
@@ -739,6 +1059,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 115
 	},
+	"7007": {
+		"File": "solis_poller.c",
+		"Line": 326
+	},
 	"7047": {
 		"File": "hardfault_handler.c",
 		"Line": 84
@@ -747,13 +1071,29 @@
 		"File": "hardfault_handler.c",
 		"Line": 75
 	},
+	"7056": {
+		"File": "app_freertos.c",
+		"Line": 104
+	},
 	"7073": {
 		"File": "image_transfer.c",
 		"Line": 195
 	},
+	"7094": {
+		"File": "bms_reader.c",
+		"Line": 163
+	},
 	"7101": {
 		"File": "system.c",
 		"Line": 74
+	},
+	"7115": {
+		"File": "app_freertos.c",
+		"Line": 135
+	},
+	"7148": {
+		"File": "app_freertos.c",
+		"Line": 92
 	},
 	"7173": {
 		"File": "hardfault_handler.c",
@@ -775,9 +1115,17 @@
 		"File": "hardfault_handler.c",
 		"Line": 105
 	},
+	"7258": {
+		"File": "cmd_parser.c",
+		"Line": 377
+	},
 	"7263": {
 		"File": "hardfault_handler.c",
 		"Line": 83
+	},
+	"7264": {
+		"File": "cmd_parser.c",
+		"Line": 129
 	},
 	"7281": {
 		"File": "system.c",
@@ -787,13 +1135,21 @@
 		"File": "firmware_update_http.c",
 		"Line": 205
 	},
+	"7308": {
+		"File": "mqtt_bridge.c",
+		"Line": 451
+	},
 	"7314": {
 		"File": "http_server.c",
 		"Line": 286
 	},
+	"7315": {
+		"File": "app_freertos.c",
+		"Line": 104
+	},
 	"7318": {
 		"File": "crash.c",
-		"Line": 213
+		"Line": 219
 	},
 	"7342": {
 		"File": "hardfault_handler.c",
@@ -803,6 +1159,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 88
 	},
+	"7377": {
+		"File": "cmd_parser.c",
+		"Line": 110
+	},
 	"7396": {
 		"File": "http_server.c",
 		"Line": 172
@@ -811,9 +1171,17 @@
 		"File": "hardfault_handler.c",
 		"Line": 157
 	},
+	"7446": {
+		"File": "cmd_parser.c",
+		"Line": 334
+	},
 	"7465": {
 		"File": "image_transfer.c",
 		"Line": 172
+	},
+	"7466": {
+		"File": "cmd_parser.c",
+		"Line": 136
 	},
 	"7472": {
 		"File": "system.c",
@@ -823,13 +1191,41 @@
 		"File": "hardfault_handler.c",
 		"Line": 105
 	},
+	"7501": {
+		"File": "app_freertos.c",
+		"Line": 92
+	},
 	"7509": {
 		"File": "http_server.c",
 		"Line": 92
 	},
+	"7516": {
+		"File": "http_server.c",
+		"Line": 207
+	},
+	"7539": {
+		"File": "cmd_parser.c",
+		"Line": 289
+	},
+	"7593": {
+		"File": "solis_poller.c",
+		"Line": 318
+	},
+	"7610": {
+		"File": "bms_reader.c",
+		"Line": 242
+	},
 	"7652": {
 		"File": "http_server.c",
 		"Line": 118
+	},
+	"7654": {
+		"File": "cmd_parser.c",
+		"Line": 188
+	},
+	"7669": {
+		"File": "solis_poller.c",
+		"Line": 178
 	},
 	"7687": {
 		"File": "system.c",
@@ -841,7 +1237,11 @@
 	},
 	"7698": {
 		"File": "crash.c",
-		"Line": 203
+		"Line": 209
+	},
+	"7718": {
+		"File": "bms_reader.c",
+		"Line": 256
 	},
 	"7752": {
 		"File": "http_server.c",
@@ -854,6 +1254,10 @@
 	"7755": {
 		"File": "http_server.c",
 		"Line": 83
+	},
+	"7761": {
+		"File": "image_transfer.c",
+		"Line": 112
 	},
 	"7764": {
 		"File": "hardfault_handler.c",
@@ -871,6 +1275,10 @@
 		"File": "firmware_update_http.c",
 		"Line": 220
 	},
+	"7857": {
+		"File": "app_freertos.c",
+		"Line": 152
+	},
 	"7866": {
 		"File": "hardfault_handler.c",
 		"Line": 124
@@ -886,5 +1294,9 @@
 	"7954": {
 		"File": "hardfault_handler.c",
 		"Line": 119
+	},
+	"7981": {
+		"File": "cmd_parser.c",
+		"Line": 219
 	}
 }

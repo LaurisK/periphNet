@@ -7,12 +7,59 @@
 static W25Q128_Status_t W25Q128_WriteEnable(void);
 static uint8_t W25Q128_ReadStatusReg1(void);
 
+/* --------------------------------------------------------------------------
+ * Bus locking — data-path operations are serialized with a mutex in the
+ * application (tcpip_thread and defaultTask both access the flash).
+ * The bootloader is single-threaded and fault handlers (crash dump) must
+ * not block, so locking is skipped there.
+ * -------------------------------------------------------------------------- */
+
+#ifndef BOOTLOADER_BUILD
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "task.h"
+
+static SemaphoreHandle_t s_busLock;
+
+static void bus_lock(void)
+{
+    if (s_busLock == NULL ||
+        xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
+        __get_IPSR() != 0U) {
+        return;   /* pre-scheduler init or fault-handler context */
+    }
+    xSemaphoreTake(s_busLock, portMAX_DELAY);
+}
+
+static void bus_unlock(void)
+{
+    if (s_busLock == NULL ||
+        xTaskGetSchedulerState() != taskSCHEDULER_RUNNING ||
+        __get_IPSR() != 0U) {
+        return;
+    }
+    xSemaphoreGive(s_busLock);
+}
+
+static void bus_lock_init(void)
+{
+    if (s_busLock == NULL) {
+        s_busLock = xSemaphoreCreateMutex();
+    }
+}
+#else
+#define bus_lock()
+#define bus_unlock()
+#define bus_lock_init()
+#endif
+
 /**
  * @brief Initialize the W25Q128 flash device.
  * @return W25Q128_OK if a supported Winbond W25Q64 or W25Q128 is detected.
  */
 W25Q128_Status_t W25Q128_Init(void)
 {
+    bus_lock_init();
     CS_HIGH();
     HAL_Delay(10);
     W25Q128_WakeUp();
@@ -72,7 +119,7 @@ W25Q128_Status_t W25Q128_ReadID(W25Q128_ID_t *id)
  * @param len Number of bytes to read.
  * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
-W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
+static W25Q128_Status_t read_impl(uint32_t addr, uint8_t *buffer, uint32_t len)
 {
     uint8_t cmd[4];
 
@@ -113,7 +160,7 @@ W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
  * @param len Number of bytes to write (max 256).
  * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
-W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
+static W25Q128_Status_t write_page_impl(uint32_t addr, const uint8_t *buffer, uint32_t len)
 {
     uint8_t cmd[4];
 
@@ -160,7 +207,7 @@ W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_
  * @param addr Any address within the target sector.
  * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
-W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
+static W25Q128_Status_t erase_sector_impl(uint32_t addr)
 {
     uint8_t cmd[4];
 
@@ -202,7 +249,7 @@ W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
  * @param addr Any address within the target block.
  * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
-W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr)
+static W25Q128_Status_t erase_block32k_impl(uint32_t addr)
 {
     uint8_t cmd[4];
 
@@ -235,7 +282,7 @@ W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr)
  * @param addr Any address within the target block.
  * @return W25Q128_OK on success, W25Q128_ERROR or W25Q128_TIMEOUT on failure.
  */
-W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr)
+static W25Q128_Status_t erase_block64k_impl(uint32_t addr)
 {
     uint8_t cmd[4];
 
@@ -268,7 +315,7 @@ W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr)
  * @return W25Q128_OK on success, W25Q128_TIMEOUT if the operation exceeds 60 seconds.
  * @warning This operation takes several seconds to complete.
  */
-W25Q128_Status_t W25Q128_EraseChip(void)
+static W25Q128_Status_t erase_chip_impl(void)
 {
     uint8_t cmd = W25Q128_CMD_CHIP_ERASE;
 
@@ -285,6 +332,58 @@ W25Q128_Status_t W25Q128_EraseChip(void)
     CS_HIGH();
 
     return W25Q128_WaitReady(60000);
+}
+
+/* --------------------------------------------------------------------------
+ * Locked public wrappers for the data-path operations
+ * -------------------------------------------------------------------------- */
+
+W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
+{
+    bus_lock();
+    W25Q128_Status_t res = read_impl(addr, buffer, len);
+    bus_unlock();
+    return res;
+}
+
+W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
+{
+    bus_lock();
+    W25Q128_Status_t res = write_page_impl(addr, buffer, len);
+    bus_unlock();
+    return res;
+}
+
+W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
+{
+    bus_lock();
+    W25Q128_Status_t res = erase_sector_impl(addr);
+    bus_unlock();
+    return res;
+}
+
+W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr)
+{
+    bus_lock();
+    W25Q128_Status_t res = erase_block32k_impl(addr);
+    bus_unlock();
+    return res;
+}
+
+W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr)
+{
+    bus_lock();
+    W25Q128_Status_t res = erase_block64k_impl(addr);
+    bus_unlock();
+    return res;
+}
+
+W25Q128_Status_t W25Q128_EraseChip(void)
+{
+    bus_lock();
+    W25Q128_Status_t res = erase_chip_impl();
+    bus_unlock();
+    return res;
 }
 
 /**

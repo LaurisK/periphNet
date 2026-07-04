@@ -16,7 +16,8 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 
 _Min_Heap_Size = 0x200;  /* 512 bytes - minimal for bootloader */
-_Min_Stack_Size = 0x400; /* 1KB stack */
+_Min_Stack_Size = 0x800; /* 2KB stack — streaming install uses ~1.5KB
+                            (2×256B chunk buffers + GCM/HMAC contexts) */
 
 /* Memories definition */
 MEMORY

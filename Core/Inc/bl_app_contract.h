@@ -22,14 +22,16 @@ extern "C" {
  * External flash layout
  * ========================================================================== */
 
+/* Blob areas hold encrypted .pnfw blobs (max image 480 KB + 96 B blob
+ * overhead → 488 KB, 4 KB-sector aligned). */
 #define EXT_FLASH_BASE               0x00000000u
 #define EXT_FLASH_FWU_STATUS_ADDR    0x00000000u
 #define EXT_FLASH_FWU_STATUS_SIZE    0x00001000u
 #define EXT_FLASH_FWU_IMG_ADDR       0x00001000u
-#define EXT_FLASH_FWU_IMG_SIZE       0x00078000u
-#define EXT_FLASH_GOLDEN_IMG_ADDR    0x00079000u
-#define EXT_FLASH_GOLDEN_IMG_SIZE    0x00078000u
-#define EXT_FLASH_CRASH_LOG_ADDR     0x000F1000u
+#define EXT_FLASH_FWU_IMG_SIZE       0x0007A000u
+#define EXT_FLASH_GOLDEN_IMG_ADDR    0x0007B000u
+#define EXT_FLASH_GOLDEN_IMG_SIZE    0x0007A000u
+#define EXT_FLASH_CRASH_LOG_ADDR     0x000F8000u
 #define EXT_FLASH_CRASH_LOG_SIZE     0x00001000u
 
 /* ==========================================================================
@@ -71,7 +73,7 @@ typedef struct {
     fGetBlVersion       get_bl_version;      /* return BL version            */
     fVerifyInternalApp  verify_internal_app; /* validate app in int. flash   */
     fVerifyHmac         verify_hmac;         /* HMAC-SHA256 verify (RAM)     */
-    fDecryptBlob        decrypt_blob;        /* AES-GCM decrypt     (stub)   */
+    fDecryptBlob        decrypt_blob;        /* AES-GCM decrypt (RAM blob)   */
     fVerifyImageHmac    verify_image_hmac;   /* HMAC verify over flash image */
     uint32_t            reserved[9];         /* future expansion             */
 } sBootloaderApi;

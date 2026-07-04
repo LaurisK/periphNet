@@ -82,6 +82,11 @@ void System_LogResetCause(void)
     trice("\n");
 }
 
+uint32_t System_GetResetCause(void)
+{
+    return s_resetCause;
+}
+
 void KickIwdg(void)
 {
     if (s_wdgTestMode) {

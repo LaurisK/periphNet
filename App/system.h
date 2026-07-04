@@ -42,6 +42,11 @@ void System_Init(void);
 void System_LogResetCause(void);
 
 /**
+ * @brief Raw RCC_CSR reset-cause flags captured at boot by System_Init().
+ */
+uint32_t System_GetResetCause(void);
+
+/**
  * @brief Refresh IWDG and restart TIM14 software watchdog counter.
  *
  * Call regularly (≤ 12 s interval) from the critical application task.

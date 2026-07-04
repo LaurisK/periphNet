@@ -9,7 +9,7 @@ extern "C" {
 
 /**
  * Read boot status from external flash.
- * @return 0 on success, -1 on read error or invalid magic.
+ * @return 0 on success, -1 on read error, invalid magic/version or bad CRC.
  */
 int BootStatus_Read(sBootStatus *status);
 
@@ -21,26 +21,24 @@ int BootStatus_Write(const sBootStatus *status);
 
 /**
  * Ensure boot status sector contains a valid header.
- * If magic is invalid, writes a fresh default header.
+ * If magic/version/CRC is invalid, writes a fresh default header.
  * @return 0 on success (existing or freshly written), -1 on flash error.
  */
 int BootStatus_EnsureValid(void);
 
 /**
- * Request firmware update.  Writes staged image metadata and clears
- * the fwu_requested flag (NOR-flash bit clear).
- *
- * @param image_size   Size of the staged image in ext flash.
- * @param image_crc32  CRC32 of the staged image.
- * @param staged_ver   Version of the staged image.
+ * Arm the FWU request flag (NOR bit-clear, no sector erase).
+ * The staged blob in ext flash is self-describing — no metadata is
+ * carried here, keeping transfer and FWU fully independent.
  * @return 0 on success.
  */
-int BootStatus_RequestFwu(uint32_t image_size, uint32_t image_crc32,
-                          const sFwVerArea *staged_ver);
+int BootStatus_RequestFwu(void);
 
 /**
  * Confirm the running application image is healthy.
  * Clears the confirmed flag bit (NOR bit-clear, no erase).
+ * Called on behalf of an outside actor (HTTP confirm endpoint) —
+ * the application must never call this on its own initiative.
  * @return 0 on success.
  */
 int BootStatus_ConfirmApp(void);
@@ -53,8 +51,8 @@ int BootStatus_ConfirmApp(void);
 int BootStatus_ConsumeBootAttempt(void);
 
 /**
- * Check if the running image is unconfirmed (needs APP confirmation).
- * @return true if confirmed bit is still 1 (not yet cleared by APP).
+ * Check if the running image is unconfirmed (needs actor confirmation).
+ * @return true if confirmed bit is still 1 (not yet cleared).
  */
 bool BootStatus_IsUnconfirmed(void);
 
@@ -65,25 +63,32 @@ bool BootStatus_IsUnconfirmed(void);
 eFwuAction BootStatus_GetFwuAction(void);
 
 /**
- * Clear all flags by rewriting the boot status with fresh flags.
- * Used after a successful FWU install or rollback.
+ * Finish an FWU install / rollback attempt: record the result code and
+ * rewrite the flags fresh (disarms fwu_requested, restores all boot
+ * attempts).
+ *
+ * @param result         eFwuRes of the attempt (stored as last_fwu_result).
+ * @param pre_confirmed  true  = mark the image confirmed immediately
+ *                               (failed install keeps the old, already
+ *                               confirmed app; rollback restores the
+ *                               golden image which is known-good),
+ *                       false = leave unconfirmed so the outside actor
+ *                               must confirm within BOOT_ATTEMPTS_MAX boots.
  * @return 0 on success.
  */
-int BootStatus_ClearFlags(void);
+int BootStatus_FinishFwu(eFwuRes result, bool pre_confirmed);
 
 /**
- * Read the AES-128 key from boot status.
- * @param key  Output buffer (16 bytes). Zeroed on error.
- * @return 0 on success, -1 on error.
+ * Read current boot flags (raw word from ext flash).
+ * @return 0 on success.
  */
-int BootStatus_GetAesKey(uint8_t key[AES128_KEY_SIZE]);
+int BootStatus_GetFlags(sBootFlags *flags);
 
 /**
- * Update the AES-128 key in boot status (sector erase + rewrite).
- * @param key  New 16-byte key.
- * @return 0 on success, -1 on error.
+ * @return Number of unconsumed boot attempts (0..BOOT_ATTEMPTS_MAX),
+ *         or BOOT_ATTEMPTS_MAX on read error.
  */
-int BootStatus_SetAesKey(const uint8_t key[AES128_KEY_SIZE]);
+uint8_t BootStatus_AttemptsRemaining(void);
 
 #ifdef __cplusplus
 }

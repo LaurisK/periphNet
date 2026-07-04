@@ -1,25 +1,39 @@
+/*
+ * HTTP server — dedicated FreeRTOS task using the lwIP netconn API.
+ *
+ * Connections are handled sequentially by one task, so plain synchronous
+ * code replaces the old raw-callback state machines: headers are consumed
+ * byte-wise from a small stream cursor (immune to TCP segmentation), the
+ * upload body is streamed straight into the staging logic, and Trice
+ * logging is allowed here (task context, not tcpip_thread).
+ *
+ * Firmware/FWU domain logic lives in image_transfer.c; this file owns all
+ * HTTP parsing and response formatting.
+ */
+
 #include "App/Http/http_server.h"
 #include "App/Http/image_transfer.h"
 #include "App/Log/crash.h"
+#include "App/system.h"
 #include "bl_app_contract.h"
 #include "version.h"
-#include "lwip/tcp.h"
+#include "boot_status.h"
+#include "lwip/api.h"
+#include "cmsis_os.h"
 #include "FreeRTOS.h"
+#include "trice.h"
 #include <string.h>
 #include <stdio.h>
 
-static const char http_404[] =
-    "HTTP/1.1 404 Not Found\r\n"
-    "Content-Type: text/html\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-    "<html><body><h1>404 Not Found</h1></body></html>";
+#define HTTP_IO_TIMEOUT_MS   10000
+#define REQ_BUF_SIZE         1024
+#define DOWNLOAD_CHUNK_SIZE  512
 
-/* Web UI HTML — served from flash via GET / */
+/* Single-task server: static buffers are safe and cheap */
+static char req_buf[REQ_BUF_SIZE];
+static char resp_buf[1024];
+
 static const char index_html[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/html\r\n"
-    "Connection: close\r\n\r\n"
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>PeriphNet</title>"
@@ -40,13 +54,14 @@ static const char index_html[] =
     "</style></head><body>"
     "<h1>PeriphNet</h1><div id=ver></div>"
     "<div class=card><h3>Firmware Update</h3>"
-    "<input type=file id=file accept='.bin'>"
+    "<input type=file id=file accept='.pnfw'>"
     "<button class=btn-up onclick=upload()>Upload</button>"
     "<div id=bar><div id=fill></div></div>"
     "<div id=info></div><div id=msg></div>"
     "<div style='margin-top:8px'>"
     "<button class=btn-dl onclick=download() id=bdl disabled>Download Staged</button>"
     "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
+    "<button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button>"
     "<button class=btn-del onclick=del() id=bdel disabled>Delete Staged</button>"
     "</div></div>"
     "<div class=card><h3>Last Crash</h3>"
@@ -56,13 +71,22 @@ static const char index_html[] =
     "function show(t,ok){var m=document.getElementById('msg');m.textContent=t;"
     "m.className=ok?'ok':'err';m.style.display='block'}"
     "function poll(){fetch(B+'/api/firmware/status').then(r=>r.json()).then(j=>{"
-    "document.getElementById('ver').textContent='Running: '+j.running_version;"
-    "var s=j.staged_version,has=s&&s!='null';"
-    "document.getElementById('info').textContent=has?'Staged: '+s+' ('+j.bytes_transferred+' B)':'';"
+    "document.getElementById('ver').textContent='Running: '+j.running_version"
+    "+(j.confirmed?' (confirmed)':' UNCONFIRMED, '+j.attempts_remaining+' boots left');"
+    "var has=!!j.staged_version;"
+    "var t=has?'Staged: '+j.staged_version:'';"
+    "if(j.golden_version)t+=(t?' | ':'')+'Golden: '+j.golden_version;"
+    "if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;"
+    "if(j.promote_pending)t+=' | promoting...';"
+    "document.getElementById('info').textContent=t;"
     "document.getElementById('bdl').disabled=!has;"
     "document.getElementById('binst').disabled=!has;"
     "document.getElementById('bdel').disabled=!has;"
+    "document.getElementById('bconf').disabled=j.confirmed;"
     "}).catch(()=>{})}"
+    "function confirmFw(){fetch(B+'/api/firmware/confirm',{method:'POST'})"
+    ".then(r=>r.json()).then(j=>{show('Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
+    ".catch(e=>show(e,0))}"
     "function crashPoll(){fetch(B+'/api/crash/latest').then(r=>r.json()).then(j=>{"
     "var d=document.getElementById('crash');"
     "if(!j.valid){d.innerHTML='No crash recorded.';return}"
@@ -91,7 +115,6 @@ static const char index_html[] =
     "show('Upload failed: '+x.responseText,0)}poll()};"
     "x.onerror=function(){bar.style.display='none';show('Network error',0)};"
     "x.open('POST',B+'/api/firmware/upload');"
-    "x.setRequestHeader('Content-Length',f.size);"
     "x.setRequestHeader('Content-Type','application/octet-stream');"
     "x.send(f)}"
     "function download(){window.location=B+'/api/firmware/download'}"
@@ -105,80 +128,442 @@ static const char index_html[] =
     "poll();setInterval(poll,5000);crashPoll();"
     "</script></body></html>";
 
-/* Streaming index page state — attached as tcp arg */
+/* --------------------------------------------------------------------------
+ * Connection byte stream — hides netbuf/part boundaries from the parser
+ * -------------------------------------------------------------------------- */
+
 typedef struct {
-    const char *ptr;
-    uint16_t remaining;
-} index_send_t;
+    struct netconn *conn;
+    struct netbuf  *nb;      /* current netbuf, NULL when exhausted */
+    void           *data;    /* current part                        */
+    u16_t           len;
+    u16_t           off;
+} sConnStream;
 
-static err_t index_sent_callback(void *arg, struct tcp_pcb *pcb, u16_t len)
+static void cs_init(sConnStream *s, struct netconn *conn)
 {
-    (void)len;
-    index_send_t *ctx = (index_send_t *)arg;
-    if (ctx == NULL || ctx->remaining == 0) {
-        if (ctx) vPortFree(ctx);
-        tcp_arg(pcb, NULL);
-        tcp_sent(pcb, NULL);
-        tcp_close(pcb);
-        return ERR_OK;
+    memset(s, 0, sizeof(*s));
+    s->conn = conn;
+}
+
+static void cs_cleanup(sConnStream *s)
+{
+    if (s->nb != NULL) {
+        netbuf_delete(s->nb);
+        s->nb = NULL;
     }
+}
 
-    uint16_t sndbuf = tcp_sndbuf(pcb);
-    uint16_t send_len = (ctx->remaining > sndbuf) ? sndbuf : ctx->remaining;
-    if (send_len == 0) return ERR_OK;
+/** Ensure the current part has unread bytes; pulls the next part/netbuf
+ *  as needed.  Returns ERR_OK or the netconn error (incl. timeout). */
+static err_t cs_fill(sConnStream *s)
+{
+    while (s->nb == NULL || s->off >= s->len) {
+        if (s->nb != NULL) {
+            if (netbuf_next(s->nb) >= 0) {
+                netbuf_data(s->nb, &s->data, &s->len);
+                s->off = 0;
+                continue;
+            }
+            netbuf_delete(s->nb);
+            s->nb = NULL;
+        }
 
-    err_t werr = tcp_write(pcb, ctx->ptr, send_len, TCP_WRITE_FLAG_COPY);
-    if (werr == ERR_OK) {
-        ctx->ptr += send_len;
-        ctx->remaining -= send_len;
-        tcp_output(pcb);
+        err_t err = netconn_recv(s->conn, &s->nb);
+        if (err != ERR_OK) {
+            s->nb = NULL;
+            return err;
+        }
+        netbuf_data(s->nb, &s->data, &s->len);
+        s->off = 0;
     }
     return ERR_OK;
 }
 
-static void index_err_callback(void *arg, err_t err)
+static int cs_read_byte(sConnStream *s)
 {
-    (void)err;
-    if (arg) vPortFree(arg);
-}
-
-static err_t http_serve_index(struct tcp_pcb *pcb)
-{
-    index_send_t *ctx = (index_send_t *)pvPortMalloc(sizeof(index_send_t));
-    if (ctx == NULL) {
-        tcp_close(pcb);
-        return ERR_MEM;
+    if (cs_fill(s) != ERR_OK) {
+        return -1;
     }
-
-    ctx->ptr = index_html;
-    ctx->remaining = (uint16_t)(sizeof(index_html) - 1);
-
-    /* Detach from the normal http callbacks for this pcb */
-    tcp_arg(pcb, ctx);
-    tcp_recv(pcb, NULL);
-    tcp_sent(pcb, index_sent_callback);
-    tcp_err(pcb, index_err_callback);
-
-    /* Send first chunk */
-    uint16_t sndbuf = tcp_sndbuf(pcb);
-    uint16_t send_len = (ctx->remaining > sndbuf) ? sndbuf : ctx->remaining;
-
-    err_t werr = tcp_write(pcb, ctx->ptr, send_len, TCP_WRITE_FLAG_COPY);
-    if (werr == ERR_OK) {
-        ctx->ptr += send_len;
-        ctx->remaining -= send_len;
-        tcp_output(pcb);
-    } else {
-        vPortFree(ctx);
-        tcp_abort(pcb);
-        return ERR_ABRT;
-    }
-
-    return ERR_OK;
+    return ((uint8_t *)s->data)[s->off++];
 }
 
 /* --------------------------------------------------------------------------
- * Crash log API handlers
+ * Response helpers
+ * -------------------------------------------------------------------------- */
+
+/** Write the whole buffer, looping over partial writes.  With a send
+ *  timeout set, lwIP treats writes as non-blocking and plain
+ *  netconn_write() (NULL bytes_written) is rejected with ERR_VAL, so
+ *  netconn_write_partly() is mandatory here. */
+static bool send_all(struct netconn *conn, const void *data, size_t len)
+{
+    const uint8_t *p = data;
+
+    while (len > 0U) {
+        size_t written = 0U;
+        err_t  err = netconn_write_partly(conn, p, len, NETCONN_COPY, &written);
+        if (err != ERR_OK) {
+            TRice("HTTP: write failed, err=%d\n", (int)err);
+            return false;
+        }
+        if (written == 0U) {          /* no progress within send timeout */
+            TRice("HTTP: write stalled\n");
+            return false;
+        }
+        p   += written;
+        len -= written;
+    }
+    return true;
+}
+
+static void send_body(struct netconn *conn, const char *status,
+                      const char *content_type, const char *body)
+{
+    char hdr[128];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n\r\n",
+        status, content_type, (unsigned)strlen(body));
+    send_all(conn, hdr, hlen);
+    send_all(conn, body, strlen(body));
+}
+
+static void send_json(struct netconn *conn, const char *status, const char *json)
+{
+    send_body(conn, status, "application/json", json);
+}
+
+/* --------------------------------------------------------------------------
+ * Header parsing
+ * -------------------------------------------------------------------------- */
+
+static uint32_t parse_content_length(const char *header)
+{
+    const char *pattern = "content-length:";
+    for (const char *p = header; *p; p++) {
+        const char *h = p, *n = pattern;
+        while (*n && *h) {
+            char c = (*h >= 'A' && *h <= 'Z') ? *h + 32 : *h;
+            if (c != *n) break;
+            h++; n++;
+        }
+        if (*n == '\0') {
+            while (*h == ' ' || *h == '\t') h++;
+            uint32_t value = 0;
+            while (*h >= '0' && *h <= '9')
+                value = value * 10 + (uint32_t)(*h++ - '0');
+            return value;
+        }
+    }
+    return 0;
+}
+
+static bool header_expects_continue(const char *header)
+{
+    const char *pattern = "100-continue";
+    for (const char *p = header; *p; p++) {
+        const char *h = p, *n = pattern;
+        while (*n && *h) {
+            char c = (*h >= 'A' && *h <= 'Z') ? *h + 32 : *h;
+            if (c != *n) break;
+            h++; n++;
+        }
+        if (*n == '\0') return true;
+    }
+    return false;
+}
+
+/** Read the request header (through \r\n\r\n) into req_buf.
+ *  @return header length, or -1 on stream error / oversized header. */
+static int read_request_header(sConnStream *s)
+{
+    int len = 0;
+
+    while (len < REQ_BUF_SIZE - 1) {
+        int c = cs_read_byte(s);
+        if (c < 0) {
+            return -1;
+        }
+        req_buf[len++] = (char)c;
+
+        if (len >= 4 &&
+            req_buf[len-4] == '\r' && req_buf[len-3] == '\n' &&
+            req_buf[len-2] == '\r' && req_buf[len-1] == '\n') {
+            req_buf[len] = '\0';
+            return len;
+        }
+    }
+
+    return -1;   /* header too large */
+}
+
+/* --------------------------------------------------------------------------
+ * Endpoint handlers
+ * -------------------------------------------------------------------------- */
+
+static void handle_upload(struct netconn *conn, sConnStream *s)
+{
+    uint32_t content_length = parse_content_length(req_buf);
+
+    const char *err;
+    if (!img_upload_begin(content_length, &err)) {
+        snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}", err);
+        send_json(conn, "409 Conflict", resp_buf);
+        return;
+    }
+
+    /* curl sends Expect: 100-continue for large bodies and stalls ~1s
+     * waiting for the go-ahead */
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    uint32_t remaining = content_length;
+    while (remaining > 0) {
+        if (cs_fill(s) != ERR_OK) {
+            img_upload_abort("Connection lost");
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"connection lost during upload\"}");
+            return;
+        }
+
+        uint32_t n = (uint32_t)(s->len - s->off);
+        if (n > remaining) n = remaining;
+
+        if (!img_upload_write((uint8_t *)s->data + s->off, n)) {
+            send_json(conn, "500 Internal Server Error",
+                      "{\"error\":\"flash write error\"}");
+            return;
+        }
+        s->off += (u16_t)n;
+        remaining -= n;
+    }
+
+    const image_state_t *st = image_transfer_get_status();
+    if (img_upload_finish()) {
+        TRice("FWU: staged %u B\n", (unsigned)st->staged.blob_size);
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"status\":\"staged\",\"bytes\":%lu,\"version\":\"%s\"}",
+                 (unsigned long)st->staged.blob_size, st->staged.version_str);
+        send_json(conn, "200 OK", resp_buf);
+    } else {
+        snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}",
+                 st->error_message);
+        send_json(conn, "422 Unprocessable Entity", resp_buf);
+    }
+}
+
+static void handle_download(struct netconn *conn)
+{
+    const image_state_t *st = image_transfer_get_status();
+
+    if (st->status != IMG_STATUS_STAGED || !st->staged.valid) {
+        send_body(conn, "404 Not Found", "text/plain",
+                  "No staged firmware available for download\r\n");
+        return;
+    }
+
+    img_download_begin();
+
+    uint32_t total = st->staged.blob_size;
+    char hdr[192];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/octet-stream\r\n"
+        "Content-Length: %lu\r\n"
+        "Content-Disposition: attachment; filename=\"firmware.pnfw\"\r\n"
+        "Connection: close\r\n\r\n",
+        (unsigned long)total);
+    send_all(conn, hdr, hlen);
+
+    uint8_t buf[DOWNLOAD_CHUNK_SIZE];
+    for (uint32_t off = 0; off < total; off += DOWNLOAD_CHUNK_SIZE) {
+        uint32_t n = total - off;
+        if (n > DOWNLOAD_CHUNK_SIZE) n = DOWNLOAD_CHUNK_SIZE;
+
+        if (!img_read_staged(off, buf, n)) {
+            img_download_end(false, "Flash read error");
+            return;
+        }
+        if (!send_all(conn, buf, n)) {
+            img_download_end(false, "TCP write error");
+            return;
+        }
+    }
+
+    img_download_end(true, NULL);
+}
+
+static void handle_status(struct netconn *conn)
+{
+    const image_state_t *st = image_transfer_get_status();
+
+    const char *status_str;
+    switch (st->status) {
+        case IMG_STATUS_IDLE:        status_str = "idle";        break;
+        case IMG_STATUS_UPLOADING:   status_str = "uploading";   break;
+        case IMG_STATUS_STAGED:      status_str = "staged";      break;
+        case IMG_STATUS_DOWNLOADING: status_str = "downloading"; break;
+        case IMG_STATUS_ERROR:       status_str = "error";       break;
+        default:                     status_str = "unknown";     break;
+    }
+
+    uint32_t progress_pct = 0;
+    if (st->total_bytes > 0)
+        progress_pct = (st->bytes_transferred * 100) / st->total_bytes;
+
+    char running_ver[24] = {0};
+    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+    if (app->magic == APP_INFO_MAGIC) {
+        ver_toString(&app->fw_version.ver, running_ver, sizeof(running_ver));
+    }
+
+    sBootStatus bs;
+    bool     bs_ok       = (BootStatus_Read(&bs) == 0);
+    bool     unconfirmed = BootStatus_IsUnconfirmed();
+    uint8_t  attempts    = BootStatus_AttemptsRemaining();
+    uint32_t last_result = bs_ok ? bs.last_fwu_result : (uint32_t)FWU_NO_RESULT;
+
+    char staged_field[32], golden_field[32];
+    if (st->staged.valid) {
+        snprintf(staged_field, sizeof(staged_field), "\"%s\"",
+                 st->staged.version_str);
+    } else {
+        strcpy(staged_field, "null");
+    }
+    if (st->golden.valid) {
+        snprintf(golden_field, sizeof(golden_field), "\"%s\"",
+                 st->golden.version_str);
+    } else {
+        strcpy(golden_field, "null");
+    }
+
+    snprintf(resp_buf, sizeof(resp_buf),
+        "{\"status\":\"%s\","
+        "\"running_version\":\"%s\","
+        "\"staged_version\":%s,"
+        "\"golden_version\":%s,"
+        "\"confirmed\":%s,"
+        "\"attempts_remaining\":%u,"
+        "\"last_fwu_result\":%lu,"
+        "\"promote_pending\":%s,"
+        "\"bytes_transferred\":%lu,"
+        "\"total_bytes\":%lu,"
+        "\"progress\":%lu,"
+        "\"reset_cause\":\"0x%08lX\","
+        "\"error\":\"%s\"}",
+        status_str,
+        running_ver,
+        staged_field,
+        golden_field,
+        unconfirmed ? "false" : "true",
+        (unsigned)attempts,
+        (unsigned long)last_result,
+        image_transfer_promote_pending() ? "true" : "false",
+        (unsigned long)st->bytes_transferred,
+        (unsigned long)st->total_bytes,
+        (unsigned long)progress_pct,
+        (unsigned long)System_GetResetCause(),
+        st->error_message);
+
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_install(struct netconn *conn)
+{
+    switch (img_install_request()) {
+    case IMG_CTL_OK: {
+        const image_state_t *st = image_transfer_get_status();
+        TRice("FWU: install requested, rebooting\n");
+        snprintf(resp_buf, sizeof(resp_buf),
+            "{\"status\":\"deploying\","
+            "\"message\":\"Device will reboot in 2 seconds\","
+            "\"version\":\"%s\"}", st->staged.version_str);
+        send_json(conn, "200 OK", resp_buf);
+        break;
+    }
+    case IMG_CTL_NO_IMAGE:
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"no staged firmware available\"}");
+        break;
+    case IMG_CTL_BUSY:
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"golden promotion in progress\"}");
+        break;
+    default:
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"failed to write boot status\"}");
+        break;
+    }
+}
+
+static void handle_confirm(struct netconn *conn)
+{
+    bool promote;
+    switch (img_confirm(&promote)) {
+    case IMG_CTL_OK:
+        TRice("FWU: confirmed (promote=%d)\n", (int)promote);
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"status\":\"confirmed\",\"promote\":%s}",
+                 promote ? "true" : "false");
+        send_json(conn, "200 OK", resp_buf);
+        break;
+    case IMG_CTL_ALREADY:
+        send_json(conn, "200 OK", "{\"status\":\"already_confirmed\"}");
+        break;
+    default:
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"failed to write boot status\"}");
+        break;
+    }
+}
+
+static void handle_delete(struct netconn *conn)
+{
+    switch (img_delete()) {
+    case IMG_CTL_OK:
+        send_json(conn, "200 OK", "{\"status\":\"deleted\"}");
+        break;
+    case IMG_CTL_BUSY:
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"transfer or promotion in progress\"}");
+        break;
+    default:
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"flash erase failed\"}");
+        break;
+    }
+}
+
+static void handle_verify(struct netconn *conn)
+{
+    eFwuRes res = img_verify_running();
+
+    const char *reason = NULL;
+    switch (res) {
+        case FWU_OK:             break;
+        case FWU_ERR_WRONG_MAGIC: reason = "no app header";      break;
+        case FWU_ERR_IMAGE_SIZE:  reason = "unsigned image";     break;
+        case FWU_ERR_NO_IMAGE:    reason = "BL API unavailable"; break;
+        default:                  reason = "HMAC mismatch";      break;
+    }
+
+    if (reason) {
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"verified\":false,\"reason\":\"%s\",\"code\":%d}",
+                 reason, (int)res);
+    } else {
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"verified\":true,\"code\":0}");
+    }
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* --------------------------------------------------------------------------
+ * Crash log endpoints
  * -------------------------------------------------------------------------- */
 
 static const char * const crash_type_names[] = {
@@ -188,222 +573,165 @@ static const char * const task_state_names[] = {
     "Run", "Rdy", "Blk", "Sus", "Del"
 };
 
-static err_t crash_get_handler(struct tcp_pcb *pcb)
+static void handle_crash_get(struct netconn *conn)
 {
-    char *resp = (char *)pvPortMalloc(1024);
-    if (resp == NULL) {
-        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
-        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        return ERR_OK;
-    }
-
     sCrashLog *log = (sCrashLog *)pvPortMalloc(sizeof(sCrashLog));
     if (log == NULL) {
-        vPortFree(resp);
-        const char *err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
-        tcp_write(pcb, err, strlen(err), TCP_WRITE_FLAG_COPY);
-        tcp_output(pcb);
-        return ERR_OK;
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
     }
 
-    int len;
-    bool valid = Crash_ReadFromFlash(log);
-
-    if (!valid) {
-        len = snprintf(resp, 1024,
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"valid\":false}\r\n");
-    } else {
-        const char *type_str = (log->crash_type < 6)
-            ? crash_type_names[log->crash_type] : "Unknown";
-        int pos = snprintf(resp, 1024,
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-            "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
-            "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"sp\":\"%08lX\","
-            "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
-            "\"cfsr\":\"%08lX\",\"hfsr\":\"%08lX\","
-            "\"mmfar\":\"%08lX\",\"bfar\":\"%08lX\","
-            "\"task\":\"%s\",\"backtrace\":[",
-            type_str, (unsigned long)log->tick,
-            (unsigned long)log->pc, (unsigned long)log->lr,
-            (unsigned long)log->sp, (unsigned long)log->r0,
-            (unsigned long)log->r12, (unsigned long)log->psr,
-            (unsigned long)log->cfsr, (unsigned long)log->hfsr,
-            (unsigned long)log->mmfar, (unsigned long)log->bfar,
-            log->task_name);
-
-        for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
-            pos += snprintf(resp + pos, 1024 - pos, "%s\"%08lX\"",
-                i > 0 ? "," : "", (unsigned long)log->bt_addr[i]);
-        }
-
-        pos += snprintf(resp + pos, 1024 - pos, "],\"tasks\":[");
-        for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
-            const char *st = (log->tasks[i].state < 5)
-                ? task_state_names[log->tasks[i].state] : "???";
-            pos += snprintf(resp + pos, 1024 - pos,
-                "%s{\"name\":\"%s\",\"state\":\"%s\","
-                "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
-                i > 0 ? "," : "",
-                log->tasks[i].name, st,
-                (unsigned long)log->tasks[i].pc,
-                (unsigned long)log->tasks[i].lr,
-                log->tasks[i].free_stack);
-        }
-        len = pos + snprintf(resp + pos, 1024 - pos, "]}\r\n");
+    if (!Crash_ReadFromFlash(log)) {
+        vPortFree(log);
+        send_json(conn, "200 OK", "{\"valid\":false}");
+        return;
     }
+
+    const char *type_str = (log->crash_type < 6)
+        ? crash_type_names[log->crash_type] : "Unknown";
+    int pos = snprintf(resp_buf, sizeof(resp_buf),
+        "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
+        "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"sp\":\"%08lX\","
+        "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
+        "\"cfsr\":\"%08lX\",\"hfsr\":\"%08lX\","
+        "\"mmfar\":\"%08lX\",\"bfar\":\"%08lX\","
+        "\"task\":\"%s\",\"backtrace\":[",
+        type_str, (unsigned long)log->tick,
+        (unsigned long)log->pc, (unsigned long)log->lr,
+        (unsigned long)log->sp, (unsigned long)log->r0,
+        (unsigned long)log->r12, (unsigned long)log->psr,
+        (unsigned long)log->cfsr, (unsigned long)log->hfsr,
+        (unsigned long)log->mmfar, (unsigned long)log->bfar,
+        log->task_name);
+
+    for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
+        pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "%s\"%08lX\"",
+            i > 0 ? "," : "", (unsigned long)log->bt_addr[i]);
+    }
+
+    pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "],\"tasks\":[");
+    for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
+        const char *st = (log->tasks[i].state < 5)
+            ? task_state_names[log->tasks[i].state] : "???";
+        pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos,
+            "%s{\"name\":\"%s\",\"state\":\"%s\","
+            "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
+            i > 0 ? "," : "",
+            log->tasks[i].name, st,
+            (unsigned long)log->tasks[i].pc,
+            (unsigned long)log->tasks[i].lr,
+            log->tasks[i].free_stack);
+    }
+    snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "]}");
 
     vPortFree(log);
-    tcp_write(pcb, resp, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
-    vPortFree(resp);
-    return ERR_OK;
+    send_json(conn, "200 OK", resp_buf);
 }
 
-static err_t crash_delete_handler(struct tcp_pcb *pcb)
+static void handle_crash_delete(struct netconn *conn)
 {
     Crash_ClearFlash();
-    const char *resp =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\nConnection: close\r\n\r\n"
-        "{\"status\":\"cleared\"}\r\n";
-    tcp_write(pcb, resp, strlen(resp), TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
-    return ERR_OK;
+    send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
 }
 
-static void http_err_callback(void *arg, err_t err)
+/* --------------------------------------------------------------------------
+ * Request dispatch
+ * -------------------------------------------------------------------------- */
+
+static bool route_is(const char *method_path)
 {
-    (void)err;
-    if (arg != NULL) {
-        image_upload_abort_session_ptr(arg);
-    }
+    return strncmp(req_buf, method_path, strlen(method_path)) == 0;
 }
 
-static err_t http_recv_callback(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
+static void handle_connection(struct netconn *conn)
 {
-    (void)err;
+    sConnStream stream;
+    cs_init(&stream, conn);
 
-    if (p == NULL) {
-        if (arg != NULL) {
-            image_upload_abort_session(pcb);
-        }
-        tcp_close(pcb);
-        return ERR_OK;
+    if (read_request_header(&stream) < 0) {
+        cs_cleanup(&stream);
+        return;
     }
 
-    char *request = (char *)p->payload;
-
-    /* Continuation of an active upload session */
-    if (arg != NULL) {
-        err_t result = image_upload_handler(pcb, p);
-        pbuf_free(p);
-        return result;
-    }
-
-    /* POST /api/firmware/upload */
-    if (p->len >= 25 && strncmp(request, "POST /api/firmware/upload", 25) == 0) {
-        err_t result = image_upload_handler(pcb, p);
-        pbuf_free(p);
-        return result;
-    }
-
-    /* GET /api/firmware/download */
-    if (p->len >= 26 && strncmp(request, "GET /api/firmware/download", 26) == 0) {
-        err_t result = image_download_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        return result;
-    }
-
-    /* POST /api/firmware/install */
-    if (p->len >= 26 && strncmp(request, "POST /api/firmware/install", 26) == 0) {
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        return image_install_handler(pcb);
-    }
-
-    /* DELETE /api/firmware/staged */
-    if (p->len >= 27 && strncmp(request, "DELETE /api/firmware/staged", 27) == 0) {
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        return image_delete_handler(pcb);
-    }
-
-    /* GET /api/firmware/status */
-    if (p->len >= 24 && strncmp(request, "GET /api/firmware/status", 24) == 0) {
-        err_t result = image_status_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        tcp_close(pcb);
-        return result;
-    }
-
-    /* GET /api/crash/latest */
-    if (p->len >= 21 && strncmp(request, "GET /api/crash/latest", 21) == 0) {
-        err_t result = crash_get_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        tcp_close(pcb);
-        return result;
-    }
-
-    /* DELETE /api/crash/latest */
-    if (p->len >= 24 && strncmp(request, "DELETE /api/crash/latest", 24) == 0) {
-        err_t result = crash_delete_handler(pcb);
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        tcp_close(pcb);
-        return result;
-    }
-
-    /* GET / — web UI */
-    if (p->len >= 6 && strncmp(request, "GET / ", 6) == 0) {
-        tcp_recved(pcb, p->tot_len);
-        pbuf_free(p);
-        return http_serve_index(pcb);
-    }
-
-    /* Everything else → 404 */
-    err_t werr = tcp_write(pcb, http_404, strlen(http_404), TCP_WRITE_FLAG_COPY);
-    tcp_recved(pcb, p->tot_len);
-    pbuf_free(p);
-    if (werr == ERR_OK) {
-        tcp_output(pcb);
-        tcp_close(pcb);
-        return ERR_OK;
+    if (route_is("POST /api/firmware/upload")) {
+        handle_upload(conn, &stream);
+    } else if (route_is("GET /api/firmware/download")) {
+        handle_download(conn);
+    } else if (route_is("POST /api/firmware/install")) {
+        handle_install(conn);
+    } else if (route_is("POST /api/firmware/confirm")) {
+        handle_confirm(conn);
+    } else if (route_is("GET /api/firmware/verify")) {
+        handle_verify(conn);
+    } else if (route_is("DELETE /api/firmware/staged")) {
+        handle_delete(conn);
+    } else if (route_is("GET /api/firmware/status")) {
+        handle_status(conn);
+    } else if (route_is("GET /api/crash/latest")) {
+        handle_crash_get(conn);
+    } else if (route_is("DELETE /api/crash/latest")) {
+        handle_crash_delete(conn);
+    } else if (route_is("GET / ")) {
+        char hdr[96];
+        int hlen = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n\r\n",
+            (unsigned)(sizeof(index_html) - 1));
+        send_all(conn, hdr, hlen);
+        send_all(conn, index_html, sizeof(index_html) - 1);
     } else {
-        tcp_abort(pcb);
-        return ERR_ABRT;
+        send_body(conn, "404 Not Found", "text/html",
+                  "<html><body><h1>404 Not Found</h1></body></html>");
     }
+
+    cs_cleanup(&stream);
 }
 
-static err_t http_accept_callback(void *arg, struct tcp_pcb *newpcb, err_t err)
+/* --------------------------------------------------------------------------
+ * Server task
+ * -------------------------------------------------------------------------- */
+
+static const osThreadAttr_t s_httpAttr = {
+    .name       = "http",
+    .stack_size = 1024U * 4U,
+    .priority   = osPriorityNormal,
+};
+
+static void http_task(void *arg)
 {
     (void)arg;
-    if (err != ERR_OK || newpcb == NULL) {
-        return ERR_VAL;
+
+    struct netconn *listener = netconn_new(NETCONN_TCP);
+    if (listener == NULL ||
+        netconn_bind(listener, IP_ADDR_ANY, HTTP_SERVER_PORT) != ERR_OK ||
+        netconn_listen(listener) != ERR_OK) {
+        TRice("HTTP: listener setup FAILED\n");
+        if (listener) netconn_delete(listener);
+        osThreadExit();
     }
-    tcp_recv(newpcb, http_recv_callback);
-    tcp_err(newpcb, http_err_callback);
-    return ERR_OK;
+
+    TRice("HTTP: listening on port %d\n", HTTP_SERVER_PORT);
+
+    for (;;) {
+        struct netconn *conn;
+        if (netconn_accept(listener, &conn) != ERR_OK) {
+            continue;
+        }
+
+        netconn_set_recvtimeout(conn, HTTP_IO_TIMEOUT_MS);
+        netconn_set_sendtimeout(conn, HTTP_IO_TIMEOUT_MS);
+
+        handle_connection(conn);
+
+        netconn_close(conn);
+        netconn_delete(conn);
+    }
 }
 
 void http_server_init(void)
 {
     image_transfer_init();
-
-    struct tcp_pcb *pcb = tcp_new();
-    if (pcb != NULL) {
-        err_t err = tcp_bind(pcb, IP_ADDR_ANY, HTTP_SERVER_PORT);
-        if (err == ERR_OK) {
-            pcb = tcp_listen(pcb);
-            tcp_accept(pcb, http_accept_callback);
-        } else {
-            memp_free(MEMP_TCP_PCB, pcb);
-        }
-    }
+    osThreadNew(http_task, NULL, &s_httpAttr);
 }

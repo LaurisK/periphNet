@@ -43,9 +43,11 @@ static uint32_t sub_word(uint32_t w)
            ((uint32_t)sbox[(w >> 24) & 0xFF] << 24);
 }
 
+/* RotWord([a0,a1,a2,a3]) = [a1,a2,a3,a0].  Words are packed little-endian
+ * (a0 in bits 0-7), so the byte rotation is a right rotate of the word. */
 static uint32_t rot_word(uint32_t w)
 {
-    return (w << 8) | (w >> 24);
+    return (w >> 8) | (w << 24);
 }
 
 void aes128_init(sAes128Ctx *ctx, const uint8_t key[AES128_KEY_SIZE])

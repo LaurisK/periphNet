@@ -4,22 +4,19 @@
 #include <string.h>
 #include <stddef.h>
 
-#ifdef BOOTLOADER_BUILD
-#include "secrets.h"
-#endif
-
 /* Offset of the flags field inside sBootStatus.
  * Flags live outside the CRC so individual bits can be cleared
  * without erasing/rewriting the whole header. */
 #define FLAGS_OFFSET  offsetof(sBootStatus, flags)
 
 /* --------------------------------------------------------------------------
- * Header CRC covers magic..staged_version (everything before header_crc32).
+ * Header CRC covers magic..last_fwu_result (everything before header_crc32).
  * -------------------------------------------------------------------------- */
 
 static uint32_t compute_header_crc(const sBootStatus *st)
 {
-    return ImgMgmt_Crc32((const uint8_t *)st, FLAGS_OFFSET - sizeof(uint32_t));
+    return ImgMgmt_Crc32((const uint8_t *)st,
+                         offsetof(sBootStatus, header_crc32));
 }
 
 /* --------------------------------------------------------------------------
@@ -37,7 +34,9 @@ int BootStatus_Read(sBootStatus *status)
         return -1;
     }
 
-    if (status->magic != BOOT_STATUS_MAGIC) {
+    if (status->magic != BOOT_STATUS_MAGIC ||
+        status->version != BOOT_STATUS_VERSION ||
+        status->header_crc32 != compute_header_crc(status)) {
         memset(status, 0, sizeof(sBootStatus));
         return -1;
     }
@@ -55,19 +54,10 @@ int BootStatus_Write(const sBootStatus *status)
         return -1;
     }
 
-    /* Write in 256-byte pages */
-    const uint8_t *data = (const uint8_t *)status;
-    uint32_t remaining = sizeof(sBootStatus);
-    uint32_t offset = 0;
-
-    while (remaining > 0) {
-        uint32_t chunk = (remaining > 256u) ? 256u : remaining;
-        if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + offset,
-                              data + offset, chunk) != W25Q128_OK) {
-            return -1;
-        }
-        offset    += chunk;
-        remaining -= chunk;
+    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR,
+                          (const uint8_t *)status,
+                          sizeof(sBootStatus)) != W25Q128_OK) {
+        return -1;
     }
 
     return 0;
@@ -87,50 +77,59 @@ int BootStatus_EnsureValid(void)
 
     /* Write fresh default */
     memset(&st, 0, sizeof(st));
-    st.magic        = BOOT_STATUS_MAGIC;
-    st.version      = 2;
-#ifdef BOOTLOADER_BUILD
-    memcpy(st.aes_key, GLB_blKey, AES128_KEY_SIZE);
-#endif
-    st.header_crc32 = compute_header_crc(&st);
-    st.flags.word   = 0xFFFFFFFFu;          /* all flags at erased state */
+    st.magic           = BOOT_STATUS_MAGIC;
+    st.version         = BOOT_STATUS_VERSION;
+    st.last_fwu_result = FWU_NO_RESULT;
+    st.header_crc32    = compute_header_crc(&st);
+    st.flags.word      = 0xFFFFFFFFu;       /* all flags at erased state */
 
     return BootStatus_Write(&st);
 }
 
 /* --------------------------------------------------------------------------
- * RequestFwu — stage an image and arm the FWU flag
+ * Flag helpers — NOR bit-clear on the flags word (no sector erase)
  * -------------------------------------------------------------------------- */
 
-int BootStatus_RequestFwu(uint32_t image_size, uint32_t image_crc32,
-                          const sFwVerArea *staged_ver)
+static int write_flags(const sBootFlags *flags)
 {
-    /* Read existing status to preserve aes_key */
-    sBootStatus old;
-    bool had_key = (BootStatus_Read(&old) == 0);
-
-    sBootStatus st;
-    memset(&st, 0, sizeof(st));
-
-    st.magic      = BOOT_STATUS_MAGIC;
-    st.version    = 2;
-    if (had_key) {
-        memcpy(st.aes_key, old.aes_key, AES128_KEY_SIZE);
+    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
+                          (const uint8_t *)flags, sizeof(*flags)) != W25Q128_OK) {
+        return -1;
     }
-    st.image_size = image_size;
-    st.image_crc32 = image_crc32;
+    return 0;
+}
 
-    if (staged_ver) {
-        memcpy(&st.staged_version, staged_ver, sizeof(sFwVerArea));
+int BootStatus_GetFlags(sBootFlags *flags)
+{
+    if (!flags) {
+        return -1;
     }
 
-    st.header_crc32 = compute_header_crc(&st);
+    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
+                     (uint8_t *)flags, sizeof(*flags)) != W25Q128_OK) {
+        return -1;
+    }
 
-    /* fwu_requested = 0 (cleared), rest at erased state */
-    st.flags.word = 0xFFFFFFFFu;
-    st.flags.bits.fwu_requested = 0;
+    return 0;
+}
 
-    return BootStatus_Write(&st);
+/* --------------------------------------------------------------------------
+ * RequestFwu — arm the FWU flag (bit-clear only, header untouched)
+ * -------------------------------------------------------------------------- */
+
+int BootStatus_RequestFwu(void)
+{
+    if (BootStatus_EnsureValid() != 0) {
+        return -1;
+    }
+
+    sBootFlags flags;
+    if (BootStatus_GetFlags(&flags) != 0) {
+        return -1;
+    }
+
+    flags.bits.fwu_requested = 0;
+    return write_flags(&flags);
 }
 
 /* --------------------------------------------------------------------------
@@ -141,19 +140,12 @@ int BootStatus_ConfirmApp(void)
 {
     sBootFlags flags;
 
-    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
+    if (BootStatus_GetFlags(&flags) != 0) {
         return -1;
     }
 
     flags.bits.confirmed = 0;
-
-    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                          (const uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
-        return -1;
-    }
-
-    return 0;
+    return write_flags(&flags);
 }
 
 /* --------------------------------------------------------------------------
@@ -164,8 +156,7 @@ int BootStatus_ConsumeBootAttempt(void)
 {
     sBootFlags flags;
 
-    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
+    if (BootStatus_GetFlags(&flags) != 0) {
         return -1;
     }
 
@@ -176,34 +167,41 @@ int BootStatus_ConsumeBootAttempt(void)
         flags.bits.boot_attempt_1 = 0;
     } else if (flags.bits.boot_attempt_2) {
         flags.bits.boot_attempt_2 = 0;
-    } else if (flags.bits.boot_attempt_3) {
-        flags.bits.boot_attempt_3 = 0;
     } else {
         return 0;   /* all attempts already consumed */
     }
 
-    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                          (const uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
-        return -1;
-    }
-
-    return 0;
+    return write_flags(&flags);
 }
 
 /* --------------------------------------------------------------------------
- * IsUnconfirmed — confirmed bit still at 1 means APP hasn't confirmed yet
+ * IsUnconfirmed — confirmed bit still at 1 means nobody confirmed yet
  * -------------------------------------------------------------------------- */
 
 bool BootStatus_IsUnconfirmed(void)
 {
     sBootFlags flags;
 
-    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
+    if (BootStatus_GetFlags(&flags) != 0) {
         return false;
     }
 
     return flags.bits.confirmed != 0;
+}
+
+uint8_t BootStatus_AttemptsRemaining(void)
+{
+    sBootFlags flags;
+
+    if (BootStatus_GetFlags(&flags) != 0) {
+        return BOOT_ATTEMPTS_MAX;
+    }
+
+    uint8_t left = 0;
+    if (flags.bits.boot_attempt_0) left++;
+    if (flags.bits.boot_attempt_1) left++;
+    if (flags.bits.boot_attempt_2) left++;
+    return left;
 }
 
 /* --------------------------------------------------------------------------
@@ -223,11 +221,11 @@ eFwuAction BootStatus_GetFwuAction(void)
         return fwu_install;
     }
 
-    /* All boot attempts exhausted? (all 4 bits cleared = 0) */
-    if (st.flags.bits.boot_attempt_0 == 0 &&
+    /* Unconfirmed with all boot attempts exhausted? */
+    if (st.flags.bits.confirmed != 0 &&
+        st.flags.bits.boot_attempt_0 == 0 &&
         st.flags.bits.boot_attempt_1 == 0 &&
-        st.flags.bits.boot_attempt_2 == 0 &&
-        st.flags.bits.boot_attempt_3 == 0) {
+        st.flags.bits.boot_attempt_2 == 0) {
         return fwu_rollback;
     }
 
@@ -235,61 +233,23 @@ eFwuAction BootStatus_GetFwuAction(void)
 }
 
 /* --------------------------------------------------------------------------
- * ClearFlags — rewrite boot status with all flags reset (erased state)
+ * FinishFwu — record result and rewrite flags fresh
  * -------------------------------------------------------------------------- */
 
-int BootStatus_ClearFlags(void)
+int BootStatus_FinishFwu(eFwuRes result, bool pre_confirmed)
 {
     sBootStatus st;
 
-    if (BootStatus_Read(&st) != 0) {
-        return -1;
-    }
+    memset(&st, 0, sizeof(st));
+    st.magic           = BOOT_STATUS_MAGIC;
+    st.version         = BOOT_STATUS_VERSION;
+    st.last_fwu_result = (uint32_t)result;
+    st.header_crc32    = compute_header_crc(&st);
 
     st.flags.word = 0xFFFFFFFFu;
-
-    return BootStatus_Write(&st);
-}
-
-/* --------------------------------------------------------------------------
- * GetAesKey — read the AES key from boot status
- * -------------------------------------------------------------------------- */
-
-int BootStatus_GetAesKey(uint8_t key[AES128_KEY_SIZE])
-{
-    sBootStatus st;
-
-    if (!key) {
-        return -1;
+    if (pre_confirmed) {
+        st.flags.bits.confirmed = 0;
     }
-
-    if (BootStatus_Read(&st) != 0) {
-        memset(key, 0, AES128_KEY_SIZE);
-        return -1;
-    }
-
-    memcpy(key, st.aes_key, AES128_KEY_SIZE);
-    return 0;
-}
-
-/* --------------------------------------------------------------------------
- * SetAesKey — update the AES key in boot status (full sector rewrite)
- * -------------------------------------------------------------------------- */
-
-int BootStatus_SetAesKey(const uint8_t key[AES128_KEY_SIZE])
-{
-    sBootStatus st;
-
-    if (!key) {
-        return -1;
-    }
-
-    if (BootStatus_Read(&st) != 0) {
-        return -1;
-    }
-
-    memcpy(st.aes_key, key, AES128_KEY_SIZE);
-    st.header_crc32 = compute_header_crc(&st);
 
     return BootStatus_Write(&st);
 }

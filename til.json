@@ -11,6 +11,18 @@
 		"Type": "TRice",
 		"Strg": "R0  = 0x%08X\\n"
 	},
+	"1059": {
+		"Type": "TRice",
+		"Strg": "FWU: erasing %u x 64KB blocks at 0x%X\\n"
+	},
+	"1070": {
+		"Type": "TRice",
+		"Strg": " Today: PV=%u.%u Grid+=%u.%u Grid-=%u.%u kWh\\n"
+	},
+	"1076": {
+		"Type": "TRice",
+		"Strg": "BMS sim set: V=%d.%01d I=%d.%01d SOC=%d T=%d.%01d\\n"
+	},
 	"1077": {
 		"Type": "TRICE",
 		"Strg": "FWU: Upload handler called, data_len=%u\\n"
@@ -26,6 +38,14 @@
 	"1115": {
 		"Type": "TRice",
 		"Strg": "R3  = 0x%08X\\n"
+	},
+	"1122": {
+		"Type": "TRice",
+		"Strg": "BMS rx=0x%02X"
+	},
+	"1142": {
+		"Type": "TRice",
+		"Strg": "  t=%us flags=0x%02X link=%u ip=0x%08X\\n"
 	},
 	"1177": {
 		"Type": "TRice",
@@ -51,6 +71,14 @@
 		"Type": "TRice",
 		"Strg": "Heartbeat: tick=%u heap=%u\\n"
 	},
+	"1245": {
+		"Type": "TRice",
+		"Strg": "Modbus already running\\n"
+	},
+	"1292": {
+		"Type": "TRice",
+		"Strg": "FWU: done %u bytes\\n"
+	},
 	"1390": {
 		"Type": "TRice",
 		"Strg": "CFSR = 0x%08X\\n"
@@ -71,13 +99,33 @@
 		"Type": "TRice",
 		"Strg": "\\nTo disassemble fault address:\\n"
 	},
+	"1547": {
+		"Type": "TRice",
+		"Strg": "BmsSim: started on CAN1 (500 kbps)\\n"
+	},
 	"1559": {
 		"Type": "TRICE",
 		"Strg": "ERR: Bind FAILED, err=%d\\n"
 	},
+	"1574": {
+		"Type": "TRice",
+		"Strg": "DHCP timeout – no IP (flags=0x%02X)\\n"
+	},
+	"1595": {
+		"Type": "TRice",
+		"Strg": "Modbus baud set to %u (restart to apply)\\n"
+	},
+	"1634": {
+		"Type": "TRice",
+		"Strg": "HTTP: listening on port %d\\n"
+	},
 	"1639": {
 		"Type": "TRICE0",
 		"Strg": "  - Undefined instruction\\n"
+	},
+	"1645": {
+		"Type": "TRice",
+		"Strg": "BMS sim=%s reader=%s\\n"
 	},
 	"1657": {
 		"Type": "TRice",
@@ -143,6 +191,10 @@
 		"Type": "TRice",
 		"Strg": "BTN3: triggering BusFault (invalid SRAM)\\n"
 	},
+	"2205": {
+		"Type": "TRice",
+		"Strg": "Modbus write queued: reg %u = %u\\n"
+	},
 	"2207": {
 		"Type": "trice",
 		"Strg": "\\t R12 = 0x%08X\\n\\t LR  = 0x%08X\\n"
@@ -151,9 +203,21 @@
 		"Type": "trice",
 		"Strg": "err:Fault Status:\\n"
 	},
+	"2282": {
+		"Type": "TRiceS",
+		"Strg": "%-16s"
+	},
 	"2286": {
 		"Type": "TRICE0",
 		"Strg": "  - Invalid PC load\\n"
+	},
+	"2335": {
+		"Type": "TRiceS",
+		"Strg": " mfg=\\\"%s\\\""
+	},
+	"2352": {
+		"Type": "TRice",
+		"Strg": "FWU: erase done\\n"
 	},
 	"2396": {
 		"Type": "TRice",
@@ -163,9 +227,17 @@
 		"Type": "TRice",
 		"Strg": "  - Fault address: 0x%08X (BFAR)\\n"
 	},
+	"2427": {
+		"Type": "TRice",
+		"Strg": "n/a\\n"
+	},
 	"2450": {
 		"Type": "TRice",
 		"Strg": "FWU: page addr=0x%X len=%u last=%u total=%lu\\n"
+	},
+	"2454": {
+		"Type": "TRice",
+		"Strg": "BmsReader: no data received\\n"
 	},
 	"2455": {
 		"Type": "TRICE",
@@ -183,13 +255,41 @@
 		"Type": "TRice",
 		"Strg": "  - Divide by zero\\n"
 	},
+	"2531": {
+		"Type": "TRice",
+		"Strg": "Flash INIT FAILED\\n"
+	},
 	"2564": {
 		"Type": "TRICE0",
 		"Strg": "  - Instruction access violation\\n"
 	},
+	"2572": {
+		"Type": "TRice",
+		"Strg": "FWU: page addr=0x%X len=%u last=%u\\n"
+	},
+	"2580": {
+		"Type": "TRice",
+		"Strg": "Modbus slave set to %u\\n"
+	},
+	"2582": {
+		"Type": "TRice",
+		"Strg": "Modbus: USART2 init failed\\n"
+	},
 	"2636": {
 		"Type": "TRICE",
 		"Strg": "ERR: Invalid content length: %u (max %u)\\n"
+	},
+	"2648": {
+		"Type": "TRice",
+		"Strg": "Unknown command: %s\\n"
+	},
+	"2733": {
+		"Type": "TRice",
+		"Strg": "DHCP OK: %d.%d.%d.%d\\n"
+	},
+	"2761": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt start|stop|status|set\\n"
 	},
 	"2788": {
 		"Type": "TRice",
@@ -207,6 +307,10 @@
 		"Type": "TRICE0",
 		"Strg": "  Stack: Main Stack (MSP)\\n"
 	},
+	"2838": {
+		"Type": "TRice",
+		"Strg": "BmsReader: started on CAN2 (500 kbps, IRQ)\\n"
+	},
 	"2862": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Bus Fault ---\\n"
@@ -219,6 +323,10 @@
 		"Type": "trice",
 		"Strg": "========== Tasks (%u) ==============\\n"
 	},
+	"2939": {
+		"Type": "TRice",
+		"Strg": "Trice UDP started on port %u\\n"
+	},
 	"2943": {
 		"Type": "TRice",
 		"Strg": "FWU: erase_done 0x%X\\n"
@@ -226,6 +334,10 @@
 	"2980": {
 		"Type": "TRice",
 		"Strg": "FWU: erase_start 0x%X\\n"
+	},
+	"3017": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus set slave \u003c1-247\u003e\\n"
 	},
 	"3027": {
 		"Type": "TRice",
@@ -246,6 +358,22 @@
 	"3098": {
 		"Type": "TRice",
 		"Strg": "R2  = 0x%08X\\n"
+	},
+	"3106": {
+		"Type": "TRice",
+		"Strg": "Promoting staged blob to golden...\\n"
+	},
+	"3116": {
+		"Type": "TRice",
+		"Strg": " Load: house=%uW backup=%uW meter=%dW\\n"
+	},
+	"3122": {
+		"Type": "TRice",
+		"Strg": "MQTT: task create failed\\n"
+	},
+	"3149": {
+		"Type": "TRice",
+		"Strg": "\\n"
 	},
 	"3151": {
 		"Type": "TRICE0",
@@ -283,6 +411,18 @@
 		"Type": "TRICE0",
 		"Strg": "  - No coprocessor\\n"
 	},
+	"3402": {
+		"Type": "TRice",
+		"Strg": " chg=%u dsg=%u"
+	},
+	"3414": {
+		"Type": "TRice",
+		"Strg": "BmsReader: stopped\\n"
+	},
+	"3426": {
+		"Type": "TRice",
+		"Strg": "DHCP timeout – no IP\\n"
+	},
 	"3447": {
 		"Type": "TRice",
 		"Strg": "  Stack: Process Stack (PSP)\\n"
@@ -294,6 +434,10 @@
 	"3458": {
 		"Type": "TRICE",
 		"Strg": "ERR: Final flash write failed\\n"
+	},
+	"3467": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus write \u003cregister\u003e \u003cvalue\u003e\\n"
 	},
 	"3480": {
 		"Type": "TRICE0",
@@ -307,6 +451,10 @@
 		"Type": "TRICE",
 		"Strg": "CFSR = 0x%08X\\n"
 	},
+	"3589": {
+		"Type": "TRice",
+		"Strg": "FWU: erase FAIL 0x%X\\n"
+	},
 	"3640": {
 		"Type": "TRice",
 		"Strg": "FWU: erase_FAIL 0x%X\\n"
@@ -314,6 +462,10 @@
 	"3660": {
 		"Type": "TRICE0",
 		"Strg": "\\nTo debug with GDB:\\n"
+	},
+	"3674": {
+		"Type": "TRice",
+		"Strg": "Modbus: wrote reg %u = %u\\n"
 	},
 	"3753": {
 		"Type": "TRICE",
@@ -330,6 +482,10 @@
 	"3811": {
 		"Type": "TRice",
 		"Strg": "\\n--- Fault Status Registers ---\\n"
+	},
+	"3828": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt set ip \u003ca.b.c.d\u003e\\n"
 	},
 	"3829": {
 		"Type": "TRice",
@@ -354,6 +510,10 @@
 	"3929": {
 		"Type": "TRICE",
 		"Strg": "INFO: HTTP server ready\\n"
+	},
+	"3937": {
+		"Type": "TRice",
+		"Strg": "HTTP: write stalled\\n"
 	},
 	"3948": {
 		"Type": "TRICE",
@@ -399,9 +559,21 @@
 		"Type": "TRice",
 		"Strg": "\\n\\n"
 	},
+	"4320": {
+		"Type": "TRice",
+		"Strg": "FWU: upload start, size=%u\\n"
+	},
+	"4344": {
+		"Type": "TRice",
+		"Strg": "  %-16s %s\\n"
+	},
 	"4361": {
 		"Type": "TRICE",
 		"Strg": "HFSR = 0x%08X\\n"
+	},
+	"4371": {
+		"Type": "TRice",
+		"Strg": "Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\\n"
 	},
 	"4388": {
 		"Type": "TRICE0",
@@ -435,9 +607,17 @@
 		"Type": "TRICE0",
 		"Strg": "  - Instruction bus error\\n"
 	},
+	"4664": {
+		"Type": "TRice",
+		"Strg": "DHCP poll: flags=0x%02X link=%u ip=0x%08X\\n"
+	},
 	"4687": {
 		"Type": "trice",
 		"Strg": "\\t  #%d 0x%08X\\n"
+	},
+	"4724": {
+		"Type": "TRice",
+		"Strg": "FWU: confirmed (promote=%d)\\n"
 	},
 	"4757": {
 		"Type": "TRice",
@@ -447,6 +627,14 @@
 		"Type": "TRice",
 		"Strg": "  1. Load ELF: file build/application.elf\\n"
 	},
+	"4772": {
+		"Type": "TRice",
+		"Strg": "MQTT already running\\n"
+	},
+	"4796": {
+		"Type": "TRice",
+		"Strg": "MQTT broker IP set to %u.%u.%u.%u\\n"
+	},
 	"4797": {
 		"Type": "TRICE0",
 		"Strg": "  - Invalid state (e.g., trying to switch to ARM mode)\\n"
@@ -454,6 +642,10 @@
 	"4801": {
 		"Type": "TRICE",
 		"Strg": "DBG: Connection accepted\\n"
+	},
+	"4851": {
+		"Type": "TRice",
+		"Strg": "Solis polls=%u errs=%u\\n"
 	},
 	"4858": {
 		"Type": "TRICE0",
@@ -467,6 +659,10 @@
 		"Type": "trice",
 		"Strg": " LPWR"
 	},
+	"4891": {
+		"Type": "TRice",
+		"Strg": "Boot confirmed\\n"
+	},
 	"4905": {
 		"Type": "TRice",
 		"Strg": "FWU: write_ok 0x%X %uB\\n"
@@ -479,6 +675,10 @@
 		"Type": "TRice",
 		"Strg": "DFSR = 0x%08X\\n"
 	},
+	"4948": {
+		"Type": "TRice",
+		"Strg": "HTTP: listener setup FAILED\\n"
+	},
 	"4951": {
 		"Type": "TRICE",
 		"Strg": "ERR: Accept rejected\\n"
@@ -486,6 +686,10 @@
 	"4960": {
 		"Type": "TRICE0",
 		"Strg": "  - MemManage fault on stacking\\n"
+	},
+	"4994": {
+		"Type": "TRice",
+		"Strg": " polls=%u errors=%u\\n"
 	},
 	"4999": {
 		"Type": "TRICE0",
@@ -495,9 +699,17 @@
 		"Type": "TRICE",
 		"Strg": "  2. Set PC: set $pc = 0x%08X\\n"
 	},
+	"5092": {
+		"Type": "TRice",
+		"Strg": "MQTT: publishing HA discovery\\n"
+	},
 	"5158": {
 		"Type": "TRice",
 		"Strg": "  - Undefined instruction\\n"
+	},
+	"5181": {
+		"Type": "TRiceS",
+		"Strg": " %s\\n"
 	},
 	"5229": {
 		"Type": "trice",
@@ -507,9 +719,17 @@
 		"Type": "TRice",
 		"Strg": "\\n--- Stack Unwinding Information ---\\n"
 	},
+	"5293": {
+		"Type": "TRice",
+		"Strg": "BmsSim: stopped\\n"
+	},
 	"5297": {
 		"Type": "TRice",
 		"Strg": "\\nTo find function at fault address:\\n"
+	},
+	"5347": {
+		"Type": "TRice",
+		"Strg": "MQTT: stopped (published %u times, reconnects %u)\\n"
 	},
 	"5393": {
 		"Type": "TRICE",
@@ -535,6 +755,10 @@
 		"Type": "TRICE",
 		"Strg": "FWU: No firmware available for download (status=%d)\\n"
 	},
+	"5457": {
+		"Type": "TRice",
+		"Strg": "Waiting for link + DHCP...\\n"
+	},
 	"5476": {
 		"Type": "TRICE",
 		"Strg": "  3. Set SP: set $sp = 0x%08X\\n"
@@ -559,13 +783,33 @@
 		"Type": "TRICE0",
 		"Strg": "  - Unaligned access\\n"
 	},
+	"5543": {
+		"Type": "TRice",
+		"Strg": "MQTT: connect failed, retry in %us\\n"
+	},
+	"5546": {
+		"Type": "TRice",
+		"Strg": "FWU: install requested, rebooting\\n"
+	},
 	"5555": {
 		"Type": "TRICE",
 		"Strg": "R2  = 0x%08X\\n"
 	},
+	"5584": {
+		"Type": "TRice",
+		"Strg": "Modbus: no data yet\\n"
+	},
 	"5586": {
 		"Type": "TRice",
 		"Strg": "========================================\\n"
+	},
+	"5588": {
+		"Type": "TRice",
+		"Strg": "FWU: write FAIL 0x%X\\n"
+	},
+	"5621": {
+		"Type": "TRice",
+		"Strg": "MQTT: connected to broker\\n"
 	},
 	"5649": {
 		"Type": "TRice",
@@ -607,6 +851,10 @@
 		"Type": "TRICE",
 		"Strg": "PSR = 0x%08X\\n"
 	},
+	"6004": {
+		"Type": "TRice",
+		"Strg": "BmsSim: CAN1 init failed\\n"
+	},
 	"6045": {
 		"Type": "TRICE",
 		"Strg": "DBG: HTTP accept, pcb=%p, err=%d\\n"
@@ -627,9 +875,29 @@
 		"Type": "TRice",
 		"Strg": "FWU: write_FAIL 0x%X\\n"
 	},
+	"6110": {
+		"Type": "TRice",
+		"Strg": "MQTT: bridge starting, broker %u.%u.%u.%u:%u prefix=\\\"%s\\\"\\n"
+	},
+	"6113": {
+		"Type": "TRice",
+		"Strg": "FWU: staged %u B\\n"
+	},
 	"6121": {
 		"Type": "TRice",
 		"Strg": "  Return to: Thread mode (PSP)\\n"
+	},
+	"6141": {
+		"Type": "TRice",
+		"Strg": " SOC=%u%% SOH=%u%%"
+	},
+	"6162": {
+		"Type": "TRice",
+		"Strg": "Modbus %s baud=%u slave=%u\\n"
+	},
+	"6175": {
+		"Type": "TRice",
+		"Strg": "Rebooting...\\n"
 	},
 	"6209": {
 		"Type": "trice",
@@ -638,6 +906,10 @@
 	"6220": {
 		"Type": "trice",
 		"Strg": "\\t PRIMASK = 0x%08X\\n"
+	},
+	"6232": {
+		"Type": "TRice",
+		"Strg": "Modbus write failed (not running or queue full)\\n"
 	},
 	"6248": {
 		"Type": "TRice",
@@ -663,9 +935,25 @@
 		"Type": "TRice",
 		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
 	},
+	"6364": {
+		"Type": "TRice",
+		"Strg": "Modbus: stopped (polls=%u errors=%u)\\n"
+	},
 	"6402": {
 		"Type": "TRICE",
 		"Strg": "FWU: Upload complete - flushing buffer\\n"
+	},
+	"6426": {
+		"Type": "TRice",
+		"Strg": "Modbus not running\\n"
+	},
+	"6438": {
+		"Type": "TRice",
+		"Strg": "Modbus: task create failed\\n"
+	},
+	"6456": {
+		"Type": "TRice",
+		"Strg": " V=%d.%02dV I=%d.%01dA T=%d.%01dC"
 	},
 	"6471": {
 		"Type": "TRICE0",
@@ -683,6 +971,10 @@
 		"Type": "TRICE",
 		"Strg": "DBG: Client closed connection\\n"
 	},
+	"6535": {
+		"Type": "TRice",
+		"Strg": "Modbus: polling slave %u at %u baud\\n"
+	},
 	"6573": {
 		"Type": "TRice",
 		"Strg": "HFSR = 0x%08X\\n"
@@ -691,17 +983,45 @@
 		"Type": "TRice",
 		"Strg": "\\n--- Bus Fault ---\\n"
 	},
+	"6622": {
+		"Type": "TRice",
+		"Strg": "Golden promotion done\\n"
+	},
 	"6666": {
 		"Type": "TRICE0",
 		"Strg": "========================================\\n"
+	},
+	"6668": {
+		"Type": "TRice",
+		"Strg": "BMS frames sent\\n"
 	},
 	"6697": {
 		"Type": "trice",
 		"Strg": " POR"
 	},
+	"6709": {
+		"Type": "TRice",
+		"Strg": "BmsReader: CAN2 init failed\\n"
+	},
+	"6773": {
+		"Type": "TRice",
+		"Strg": "Available commands:\\n"
+	},
+	"6781": {
+		"Type": "TRice",
+		"Strg": "BMS sim not running\\n"
+	},
+	"6794": {
+		"Type": "TRice",
+		"Strg": " Grid: %u.%uV %u.%02uHz %dW\\n"
+	},
 	"6796": {
 		"Type": "TRice",
 		"Strg": "BTN1: triggering HardFault (null write)\\n"
+	},
+	"6806": {
+		"Type": "TRice",
+		"Strg": "BmsReader: stopped (rx=%u frames)\\n"
 	},
 	"6814": {
 		"Type": "TRice",
@@ -739,6 +1059,10 @@
 		"Type": "TRICE",
 		"Strg": "AFSR = 0x%08X\\n"
 	},
+	"7007": {
+		"Type": "TRice",
+		"Strg": " Bat: %u.%uV %d.%uA SOC=%u%% %dW\\n"
+	},
 	"7047": {
 		"Type": "TRice",
 		"Strg": "EXC_RETURN = 0x%08X\\n"
@@ -747,13 +1071,29 @@
 		"Type": "TRice",
 		"Strg": "R1  = 0x%08X\\n"
 	},
+	"7056": {
+		"Type": "TRice",
+		"Strg": "Boot confirm FAILED (ext flash write)\\n"
+	},
 	"7073": {
 		"Type": "TRice",
 		"Strg": "FWU: upload_done %u bytes -\u003e HTTP 200\\n"
 	},
+	"7094": {
+		"Type": "TRice",
+		"Strg": "BmsReader: started on CAN2 (500 kbps)\\n"
+	},
 	"7101": {
 		"Type": "TRice",
 		"Strg": "Reset cause (RCC_CSR=0x%08X):"
+	},
+	"7115": {
+		"Type": "TRice",
+		"Strg": "HTTP server started on port 80\\n"
+	},
+	"7148": {
+		"Type": "TRice",
+		"Strg": "Waiting for DHCP...\\n"
 	},
 	"7173": {
 		"Type": "TRice",
@@ -775,9 +1115,17 @@
 		"Type": "TRICE0",
 		"Strg": "  Stack: Process Stack (PSP)\\n"
 	},
+	"7258": {
+		"Type": "TRiceS",
+		"Strg": "Unknown command: %s\\n"
+	},
 	"7263": {
 		"Type": "TRice",
 		"Strg": "\\n--- Exception Return ---\\n"
+	},
+	"7264": {
+		"Type": "TRice",
+		"Strg": "Usage: bms set \u003cvoltage\u003e \u003ccurrent\u003e \u003csoc\u003e \u003ctemperature\u003e\\n"
 	},
 	"7281": {
 		"Type": "trice",
@@ -787,9 +1135,17 @@
 		"Type": "TRICE",
 		"Strg": "FWU: First packet - creating session\\n"
 	},
+	"7308": {
+		"Type": "TRice",
+		"Strg": "MQTT: %s broker=%u.%u.%u.%u:%u pub=%u reconn=%u\\n"
+	},
 	"7314": {
 		"Type": "TRICE",
 		"Strg": "INFO: HTTP server init, port=%d\\n"
+	},
+	"7315": {
+		"Type": "TRice",
+		"Strg": "Boot UNCONFIRMED: awaiting /api/firmware/confirm\\n"
 	},
 	"7318": {
 		"Type": "trice",
@@ -803,6 +1159,10 @@
 		"Type": "TRICE",
 		"Strg": "R1  = 0x%08X\\n"
 	},
+	"7377": {
+		"Type": "TRice",
+		"Strg": "BMS reader not running\\n"
+	},
 	"7396": {
 		"Type": "TRICE",
 		"Strg": "ERR: tcp_write FAILED, err=%d\\n"
@@ -811,9 +1171,17 @@
 		"Type": "TRice",
 		"Strg": "  System halted - infinite loop below   \\n"
 	},
+	"7446": {
+		"Type": "TRice",
+		"Strg": "  "
+	},
 	"7465": {
 		"Type": "TRice",
 		"Strg": "FWU: tcp_recved cb FAIL err=%d\\n"
+	},
+	"7466": {
+		"Type": "TRice",
+		"Strg": "Usage: bms start|stop|send|read|set|status\\n"
 	},
 	"7472": {
 		"Type": "trice",
@@ -823,13 +1191,41 @@
 		"Type": "TRice",
 		"Strg": "  - Data access violation\\n"
 	},
+	"7501": {
+		"Type": "TRice",
+		"Strg": "Waiting for DHCP... flags=0x%02X\\n"
+	},
 	"7509": {
 		"Type": "TRICE",
 		"Strg": "DBG: Request size=%u, allocating 2048 bytes...\\n"
 	},
+	"7516": {
+		"Type": "TRice",
+		"Strg": "HTTP: write failed, err=%d\\n"
+	},
+	"7539": {
+		"Type": "TRice",
+		"Strg": "Entering DFU mode...\\n"
+	},
+	"7593": {
+		"Type": "TRice",
+		"Strg": " PV: %u.%uV %u.%uA %uW\\n"
+	},
+	"7610": {
+		"Type": "TRice",
+		"Strg": "BMS rx=0x%02X (%u frames)"
+	},
 	"7652": {
 		"Type": "TRICE",
 		"Strg": "DBG: Parsing request (len=%u)\\n"
+	},
+	"7654": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus set baud \u003crate\u003e\\n"
+	},
+	"7669": {
+		"Type": "TRice",
+		"Strg": "Modbus: write reg %u failed (%d)\\n"
 	},
 	"7687": {
 		"Type": "trice",
@@ -843,6 +1239,10 @@
 		"Type": "trice",
 		"Strg": "\\t R2  = 0x%08X\\n\\t R3  = 0x%08X\\n"
 	},
+	"7718": {
+		"Type": "TRice",
+		"Strg": " ChgLim=%d.%01dV DsgLim=%d.%01dV"
+	},
 	"7752": {
 		"Type": "TRICE",
 		"Strg": "DBG: Building HTML (status=%s)\\n"
@@ -854,6 +1254,10 @@
 	"7755": {
 		"Type": "TRICE",
 		"Strg": "DBG: HTTP recv enter, p=%p, err=%d\\n"
+	},
+	"7761": {
+		"Type": "TRice",
+		"Strg": "FWU: erase 0x%X\\n"
 	},
 	"7764": {
 		"Type": "TRICE0",
@@ -871,6 +1275,10 @@
 		"Type": "TRICE",
 		"Strg": "FWU: Content-Length parsed: %u bytes\\n"
 	},
+	"7857": {
+		"Type": "TRice",
+		"Strg": "Rebooting for firmware install...\\n"
+	},
 	"7866": {
 		"Type": "TRICE0",
 		"Strg": "  - MemManage fault during FP lazy state preservation\\n"
@@ -886,5 +1294,9 @@
 	"7954": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- MemManage Fault ---\\n"
+	},
+	"7981": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|set|write|status\\n"
 	}
 }

@@ -96,12 +96,12 @@ void App_DefaultTaskEntry(void)
         TRice("Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\n",
               id.manufacturer_id, id.memory_type, id.capacity);
 
-        /* Confirm boot to bootloader (clears confirmed flag in boot status).
-         * Done early, before HTTP server starts, to avoid SPI bus contention. */
-        if (BootStatus_ConfirmApp() == 0) {
-            TRice("Boot confirmed\n");
-        } else {
-            TRice("Boot confirm FAILED (ext flash write)\n");
+        /* NOTE: the app deliberately does NOT self-confirm.  An outside
+         * actor must POST /api/firmware/confirm after checking the device
+         * is healthy; otherwise the bootloader rolls back to the golden
+         * image after BOOT_ATTEMPTS_MAX unconfirmed boots. */
+        if (BootStatus_IsUnconfirmed()) {
+            TRice("Boot UNCONFIRMED: awaiting /api/firmware/confirm\n");
         }
     } else {
         TRice("Flash INIT FAILED\n");
@@ -152,6 +152,14 @@ void App_DefaultTaskEntry(void)
             TRice("Rebooting for firmware install...\n");
             vTaskDelay(pdMS_TO_TICKS(2000U));  /* let Trice flush + TCP close */
             NVIC_SystemReset();
+        }
+
+        /* Copy staged blob → golden after a confirm (a few seconds of
+         * SPI traffic; runs here so tcpip_thread stays responsive) */
+        if (image_transfer_promote_pending()) {
+            TRice("Promoting staged blob to golden...\n");
+            image_transfer_run_promotion();
+            TRice("Golden promotion done\n");
         }
 
         /* Heartbeat every 1 s (10 × 100 ms) */

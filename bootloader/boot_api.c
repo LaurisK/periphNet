@@ -51,7 +51,7 @@ static bool bl_verify_hmac(const uint8_t *data, uint32_t size,
     }
 
     uint8_t mac[HMAC_SHA256_SIZE];
-    hmac_sha256(GLB_blKey, sizeof(GLB_blKey), data, size, mac);
+    hmac_sha256(GLB_hmacKey, sizeof(GLB_hmacKey), data, size, mac);
 
     uint8_t diff = 0;
     for (uint32_t i = 0; i < DFU_HMAC_SIZE; i++) {
@@ -92,7 +92,7 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
     }
 
     sHmacSha256Ctx ctx;
-    hmac_sha256_init(&ctx, GLB_blKey, sizeof(GLB_blKey));
+    hmac_sha256_init(&ctx, GLB_hmacKey, sizeof(GLB_hmacKey));
 
     uint8_t chunk[HMAC_CHUNK_SIZE];
     uint32_t offset = 0;
@@ -143,7 +143,7 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
  * decrypt_blob — AES-128-GCM decryption of a RAM buffer
  *
  * Blob layout: [nonce:12][ciphertext:N][tag:16]
- * Uses AES key from boot status (runtime key, app-updatable).
+ * Uses the compile-time BL key; the key never leaves the bootloader.
  * -------------------------------------------------------------------------- */
 
 static eFwuRes bl_decrypt_blob(uint8_t *data, uint32_t size)
@@ -152,17 +152,8 @@ static eFwuRes bl_decrypt_blob(uint8_t *data, uint32_t size)
         return FWU_ERR_DECRYPT;
     }
 
-    uint8_t aes_key[AES128_KEY_SIZE];
-    if (BootStatus_GetAesKey(aes_key) != 0) {
-        return FWU_ERR_DECRYPT;
-    }
-
-    bool ok = aes_gcm_decrypt(aes_key, data, size, NULL, 0);
-
-    /* Wipe key from stack */
-    memset(aes_key, 0, sizeof(aes_key));
-
-    return ok ? FWU_OK : FWU_ERR_DECRYPT;
+    return aes_gcm_decrypt(GLB_blKey, data, size, NULL, 0)
+        ? FWU_OK : FWU_ERR_DECRYPT;
 }
 
 /* --------------------------------------------------------------------------

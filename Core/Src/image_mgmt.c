@@ -7,18 +7,31 @@
  * CRC32 (standard polynomial, used for header CRC and image CRC)
  * -------------------------------------------------------------------------- */
 
-uint32_t ImgMgmt_Crc32(const uint8_t *data, uint32_t len)
+uint32_t ImgMgmt_Crc32Init(void)
 {
-    uint32_t crc = 0xFFFFFFFFu;
+    return 0xFFFFFFFFu;
+}
 
+uint32_t ImgMgmt_Crc32Update(uint32_t state, const uint8_t *data, uint32_t len)
+{
     for (uint32_t i = 0; i < len; i++) {
-        crc ^= data[i];
+        state ^= data[i];
         for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+            state = (state >> 1) ^ (0xEDB88320u & -(state & 1u));
         }
     }
 
-    return ~crc;
+    return state;
+}
+
+uint32_t ImgMgmt_Crc32Final(uint32_t state)
+{
+    return ~state;
+}
+
+uint32_t ImgMgmt_Crc32(const uint8_t *data, uint32_t len)
+{
+    return ImgMgmt_Crc32Final(ImgMgmt_Crc32Update(ImgMgmt_Crc32Init(), data, len));
 }
 
 /* --------------------------------------------------------------------------
@@ -101,41 +114,32 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
             }
         }
 
-        if (!hmac_is_placeholder) {
+        /* HMAC only applies to plaintext internal-flash images; external
+         * flash holds opaque encrypted blobs authenticated via GCM. */
+        if (!hmac_is_placeholder && !is_external) {
 #ifdef BOOTLOADER_BUILD
-            /* BL has direct access to key — declared in boot_api.c */
+            /* BL has direct access to the key — declared in boot_api.c */
             extern eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
                                                  uint32_t size,
                                                  const uint8_t expected[DFU_HMAC_SIZE]);
-            eFwuRes hmac_res = bl_verify_image_hmac(base, is_external,
+            eFwuRes hmac_res = bl_verify_image_hmac(base, false,
                                                      info->image_size,
                                                      info->image_hmac);
             if (hmac_res != FWU_OK) {
                 return FWU_ERR_IMAGE_HMAC;
             }
 #else
-            /*
-             * APP context: BL API functions use BL's SPI globals which
-             * are not initialized when the APP is running.  For external
-             * flash images, skip HMAC here — the bootloader will do the
-             * authoritative verification during install.
-             *
-             * For internal flash (memory-mapped), BL API works fine.
-             */
-            if (!is_external) {
-                const sBootloaderApi *bl_api =
-                    (const sBootloaderApi *)BL_API_TABLE_ADDR;
-                if (bl_api->magic == BL_API_MAGIC &&
-                    bl_api->version >= 3 &&
-                    bl_api->verify_image_hmac != NULL) {
-                    eFwuRes hmac_res = bl_api->verify_image_hmac(
-                        base, is_external, info->image_size, info->image_hmac);
-                    if (hmac_res != FWU_OK) {
-                        return FWU_ERR_IMAGE_HMAC;
-                    }
+            const sBootloaderApi *bl_api =
+                (const sBootloaderApi *)BL_API_TABLE_ADDR;
+            if (bl_api->magic == BL_API_MAGIC &&
+                bl_api->version >= 3 &&
+                bl_api->verify_image_hmac != NULL) {
+                eFwuRes hmac_res = bl_api->verify_image_hmac(
+                    base, false, info->image_size, info->image_hmac);
+                if (hmac_res != FWU_OK) {
+                    return FWU_ERR_IMAGE_HMAC;
                 }
             }
-            /* External flash HMAC: deferred to bootloader during install */
 #endif
         }
     }

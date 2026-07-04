@@ -133,6 +133,11 @@
 #define MQTT_OUTPUT_RINGBUF_SIZE  1024
 #define MQTT_VAR_HEADER_BUFFER_LEN 256
 
+/* HTTP server task uses netconn with recv/send timeouts so a dead client
+ * cannot stall the (single-threaded) server task */
+#define LWIP_SO_RCVTIMEO          1
+#define LWIP_SO_SNDTIMEO          1
+
 /* Increase timeout pool for mDNS + MQTT timers */
 #undef MEMP_NUM_SYS_TIMEOUT
 #define MEMP_NUM_SYS_TIMEOUT      12

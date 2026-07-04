@@ -1,7 +1,6 @@
 #ifndef DFU_TYPES_H
 #define DFU_TYPES_H
 
-#include "aes128.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -70,6 +69,11 @@ typedef enum {
     FWU_ERR_BOOT_STATUS     = 11,
     FWU_ERR_WRONG_MAGIC     = 12,
     FWU_ROLLBACK            = 13,
+    FWU_ERR_MANIFEST        = 14,   /* blob manifest inconsistent           */
+    FWU_ERR_BLOB_CRC        = 15,   /* blob CRC32 mismatch (torn transfer)  */
+    FWU_ERR_AUTH_TAG        = 16,   /* AES-GCM authentication tag mismatch  */
+
+    FWU_NO_RESULT           = 0xFF, /* last_fwu_result: no FWU attempted    */
 } eFwuRes;
 
 /* ==========================================================================
@@ -99,25 +103,29 @@ typedef union {
     uint32_t word;                          /* erased value = 0xFFFFFFFF     */
     struct __attribute__((packed)) {
         uint32_t fwu_requested  : 1;        /* 0 = FWU requested by APP     */
-        uint32_t confirmed      : 1;        /* 0 = APP confirmed healthy    */
+        uint32_t confirmed      : 1;        /* 0 = actor confirmed healthy  */
         uint32_t boot_attempt_0 : 1;        /* 0 = 1st unconfirmed boot     */
         uint32_t boot_attempt_1 : 1;        /* 0 = 2nd                      */
-        uint32_t boot_attempt_2 : 1;        /* 0 = 3rd                      */
-        uint32_t boot_attempt_3 : 1;        /* 0 = 4th (rollback trigger)   */
-        uint32_t _reserved      : 26;
+        uint32_t boot_attempt_2 : 1;        /* 0 = 3rd (rollback trigger)   */
+        uint32_t _reserved      : 27;
     } bits;
 } sBootFlags;
 
-#define BOOT_ATTEMPTS_MAX  4u
+#define BOOT_ATTEMPTS_MAX    3u
+#define BOOT_STATUS_VERSION  3u
 
+/*
+ * Boot status is deliberately minimal: staged and golden image metadata
+ * live in the cleartext manifests of the blobs themselves (self-describing
+ * flash areas), so this header only carries control state.
+ */
 typedef struct {
     uint32_t    magic;                      /* BOOT_STATUS_MAGIC             */
-    uint32_t    version;                    /* struct version (2)            */
-    uint8_t     aes_key[AES128_KEY_SIZE];   /* AES-128 key (BL inits)       */
-    uint32_t    image_size;                 /* staged image size             */
-    uint32_t    image_crc32;                /* staged image CRC32            */
-    sFwVerArea  staged_version;             /* staged image version          */
-    uint32_t    header_crc32;               /* CRC32(magic..staged_version)  */
+    uint32_t    version;                    /* BOOT_STATUS_VERSION           */
+    uint32_t    last_fwu_result;            /* eFwuRes of last BL install /
+                                               rollback, FWU_NO_RESULT once
+                                               none was attempted            */
+    uint32_t    header_crc32;               /* CRC32(magic..last_fwu_result) */
     sBootFlags  flags;                      /* boot flags (outside CRC!)     */
 } sBootStatus;
 
@@ -130,6 +138,48 @@ typedef enum {
     fwu_install,            /* install staged image from ext flash       */
     fwu_rollback,           /* boot attempts exhausted → rollback        */
 } eFwuAction;
+
+/* ==========================================================================
+ * FWU blob (.pnfw) — distribution / staged / golden storage format
+ *
+ * The firmware image never exists in plaintext outside the build directory
+ * and internal flash.  Layout:
+ *
+ *   [0x00]              sFwuManifest   (64 B, cleartext, GCM AAD)
+ *   [0x40]              GCM nonce      (12 B)
+ *   [0x4C]              ciphertext     (image_size bytes, AES-128-GCM
+ *                                       over the signed plaintext binary)
+ *   [0x4C+image_size]   GCM tag        (16 B)
+ *   [blob_size-4]       CRC32          (over blob[0 .. blob_size-5],
+ *                                       keyless transfer-integrity check)
+ *
+ *   blob_size = image_size + FWU_BLOB_OVERHEAD
+ * ========================================================================== */
+
+#define FWU_BLOB_MAGIC        0x57464E50u   /* "PNFW" (little-endian)       */
+#define FWU_BLOB_FORMAT       1u
+#define FWU_MANIFEST_SIZE     64u
+#define FWU_GCM_NONCE_SIZE    12u
+#define FWU_GCM_TAG_SIZE      16u
+#define FWU_BLOB_CRC_SIZE     4u
+#define FWU_BLOB_OVERHEAD     (FWU_MANIFEST_SIZE + FWU_GCM_NONCE_SIZE + \
+                               FWU_GCM_TAG_SIZE + FWU_BLOB_CRC_SIZE)   /* 96 */
+
+#define FWU_BLOB_OFF_NONCE    FWU_MANIFEST_SIZE                        /* 0x40 */
+#define FWU_BLOB_OFF_CT       (FWU_MANIFEST_SIZE + FWU_GCM_NONCE_SIZE) /* 0x4C */
+
+typedef struct {
+    uint32_t    magic;                      /* FWU_BLOB_MAGIC                */
+    uint32_t    format;                     /* FWU_BLOB_FORMAT               */
+    sFwVerArea  fw_version;                 /* cleartext copy for UI/gating;
+                                               authenticated as GCM AAD      */
+    uint32_t    image_size;                 /* plaintext image size (= ct len)*/
+    uint32_t    blob_size;                  /* total blob size incl. CRC     */
+    uint8_t     reserved[16];
+} __attribute__((packed)) sFwuManifest;
+
+_Static_assert(sizeof(sFwuManifest) == FWU_MANIFEST_SIZE,
+               "sFwuManifest size mismatch");
 
 /* ==========================================================================
  * Firmware binary layout offsets (relative to image base address)
