@@ -62,8 +62,9 @@ Release/
 .gdbinit_*
 debug_*.gdb
 
-# Core dumps
-core
+# Core dumps (root only — a bare "core" pattern would ignore
+# Middlewares/Third_Party/LwIP/src/core/, i.e. the whole TCP/IP stack)
+/core
 core.*
 
 # Valgrind, profiling
@@ -98,6 +99,8 @@ cmake_install.cmake
 Makefile
 *.cmake
 !CMakeLists.txt
+# toolchain file must stay in the repo
+!cmake/*.cmake
 
 # ----------------------------------------------------------------------------
 # IDE Specific
@@ -194,6 +197,9 @@ __pycache__/
 *.pem
 *.p12
 secrets.h
+# bootloader/secrets.h holds only extern declarations (keys live in
+# secrets.c / secrets_prod.c) and is required to build from a fresh clone
+!bootloader/secrets.h
 credentials.json
 .env
 .env.*

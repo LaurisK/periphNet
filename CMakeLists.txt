@@ -63,10 +63,42 @@ list(FILTER HAL_SOURCES EXCLUDE REGEX ".*template.*")
 set(BASE_INCLUDES
     .
     Core/Inc
+    Shared/Crypto
+    Shared/Fwu
+    Shared/Drivers
     Drivers/CMSIS/Device/ST/STM32F4xx/Include
     Drivers/CMSIS/Include
     Drivers/STM32F4xx_HAL_Driver/Inc
     Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+)
+
+# ==============================================================================
+# Shared/ — first-party code compiled into BOTH targets.
+# Rules: Shared depends only on HAL + libc; never on App/, bootloader/,
+# FreeRTOS or lwIP. Core/ stays CubeMX-owned (regeneration-safe).
+# ==============================================================================
+
+set(SHARED_CRYPTO_SOURCES
+    Shared/Crypto/sha256.c
+    Shared/Crypto/hmac_sha256.c
+    Shared/Crypto/aes128.c
+    Shared/Crypto/aes_gcm.c
+)
+
+set(SHARED_FWU_SOURCES
+    Shared/Fwu/boot_status.c
+    Shared/Fwu/image_mgmt.c
+    Shared/Fwu/version.c
+)
+
+set(SHARED_DRIVER_SOURCES
+    Shared/Drivers/w25q128.c
+)
+
+set(SHARED_SOURCES
+    ${SHARED_CRYPTO_SOURCES}
+    ${SHARED_FWU_SOURCES}
+    ${SHARED_DRIVER_SOURCES}
 )
 
 # ==============================================================================
@@ -118,14 +150,7 @@ set(BL_SOURCES
     Core/Src/system_stm32f4xx.c
     Core/Src/syscalls.c
     Core/Src/sysmem.c
-    Core/Src/w25q128.c
-    Core/Src/boot_status.c
-    Core/Src/image_mgmt.c
-    Core/Src/version.c
-    Core/Src/sha256.c
-    Core/Src/hmac_sha256.c
-    Core/Src/aes128.c
-    Core/Src/aes_gcm.c
+    ${SHARED_SOURCES}
 )
 
 set(BL_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/bootloader.ld)
@@ -197,23 +222,22 @@ set(APP_CORE_SOURCES
     Core/Src/sysmem.c
     Core/Src/system_stm32f4xx.c
     Core/Src/usart.c
-    Core/Src/w25q128.c
-    Core/Src/boot_status.c
-    Core/Src/image_mgmt.c
-    Core/Src/version.c
-    Core/Src/sha256.c
-    Core/Src/hmac_sha256.c
-    Core/Src/aes128.c
-    Core/Src/aes_gcm.c
     Core/Startup/startup_stm32f407vetx.s
-    application/app_info.c
+    ${SHARED_SOURCES}
 )
 
 # --- App/ module sources ---
 
-file(GLOB_RECURSE APP_MODULE_SOURCES
+file(GLOB_RECURSE APP_MODULE_SOURCES CONFIGURE_DEPENDS
     "App/*.c"
 )
+
+# FWU keys must never link into the application (see Key Constraints).
+foreach(_app_src ${APP_MODULE_SOURCES})
+    if(_app_src MATCHES "secrets")
+        message(FATAL_ERROR "secrets source leaked into application: ${_app_src}")
+    endif()
+endforeach()
 
 # --- Backtrace library ---
 
@@ -307,7 +331,7 @@ set(APP_INCLUDES
 
 # --- Linker ---
 
-set(APP_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/application/application.ld)
+set(APP_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/App/application.ld)
 
 set(APP_LINK_FLAGS
     "${MCU_FLAGS} \

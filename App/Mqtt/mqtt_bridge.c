@@ -1,14 +1,13 @@
 /**
  * @file    mqtt_bridge.c
- * @brief   MQTT bridge — Solis register cache → MQTT → Home Assistant
+ * @brief   MQTT bridge — energy telemetry → MQTT → Home Assistant
  *
  * Uses the lwIP built-in MQTT client (mqtt.h).  All lwIP MQTT callbacks
  * run in tcpip_thread context — no Trice calls in callbacks.
  */
 
 #include "App/Mqtt/mqtt_bridge.h"
-#include "App/Modbus/solis_poller.h"
-#include "App/Modbus/solis_registers.h"
+#include "App/Data/telemetry.h"
 #include "cmsis_os.h"
 #include "trice.h"
 
@@ -203,13 +202,14 @@ static void publish_ha_discovery(void)
 }
 
 /* --------------------------------------------------------------------------
- * Publish all current values from poller cache
+ * Publish all current values from the telemetry snapshot
  * -------------------------------------------------------------------------- */
 
 static void publish_all_values(void)
 {
-    const sSolisData *d = SolisPoller_GetData();
-    if (d->pollCount == 0) return;
+    sEnergyTelemetry snapshot;
+    if (Telemetry_GetEnergy(&snapshot) != 0) return;   /* no data yet */
+    const sEnergyTelemetry *d = &snapshot;
 
     publish_float1("pv1_voltage",    d->pv1Voltage_dV);
     publish_float1("pv1_current",    d->pv1Current_dA);

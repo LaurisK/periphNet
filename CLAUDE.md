@@ -82,6 +82,13 @@ attempt counting, so JLink dev flashing is unaffected.
 ./tools/trice log -p COM -args "/dev/ttyUSB0:460800" -i ./til.json -li ./li.json
 ```
 
+**Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
+gate, boot_status flag lifecycle over a NOR-faithful flash mock):
+```bash
+cmake -B tests/build -S tests && cmake --build tests/build -j8
+ctest --test-dir tests/build --output-on-failure
+```
+
 ## Hardware
 
 - **MCU:** STM32F407VET6 (512KB Flash, 128KB SRAM, 168MHz)
@@ -136,44 +143,49 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 
 ```
 PeriphNet/
-  App/                            # Application modules
+  App/                            # Application modules (+ linker/metadata)
     app_freertos.c/h              # FreeRTOS task init, default task, trice task
     system.c/h                    # Reset cause, KickIwdg(), System_Init()
     triceConfig.h                 # Trice configuration (USART3 DMA)
-    Log/crash.c/h                 # Cortex-M4 crash handler + backtrace
-    Http/
-      http_server.c/h             # HTTP server task (netconn API, port 80)
-      image_transfer.c/h          # FWU staging/control domain logic (no lwIP)
-  Core/                           # CubeMX generated + shared drivers
-    Inc/
-      bl_app_contract.h           # BL↔APP contract: addresses, magics, API struct
-      dfu_types.h                 # FWU types: sFwVer, sAppInfo, sBootStatus, eFwuRes
-      version.h                   # Version formatting & compatibility checking
-      boot_status.h               # Boot status API (ext flash flags)
-      image_mgmt.h                # Image validation API
-      w25q128.h                   # External flash driver
-    Src/
-      version.c                   # ver_toString(), ver_checkCompatibility()
-      boot_status.c               # Boot flag read/write with NOR bit-clearing
-      image_mgmt.c                # ImgMgmt_Validate(), CRC32, flash read helpers
-      w25q128.c                   # W25Q64/128 SPI driver
-      main.c, gpio.c, spi.c ...  # CubeMX peripherals
+    app_info.c                    # sAppInfo const in .app_header section
+    application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
+    Can/                          # Pylontech BMS reader + simulator (CAN)
+    Cmd/cmd_parser.c/h            # CLI command parser (composition root)
+    Data/telemetry.c/h            # Neutral telemetry model: producers (Modbus,
+                                  #   CAN) publish, consumers (MQTT) snapshot
+    Fwu/image_transfer.c/h        # FWU staging/control domain logic (no lwIP)
+    Http/http_server.c/h          # HTTP server task (netconn API, port 80)
+    Log/                          # crash handler + backtrace, trice transports
+    Modbus/                       # Modbus-RTU master + Solis register poller
+    Mqtt/mqtt_bridge.c/h          # MQTT bridge + Home Assistant discovery
+  Shared/                         # First-party code compiled into BOTH targets
+                                  #   (depends only on HAL + libc, no RTOS/lwIP)
+    Crypto/                       # sha256, hmac_sha256, aes128, aes_gcm
+                                  #   (NIST-vector-tested, see tests/)
+    Fwu/                          # bl_app_contract.h, dfu_types.h,
+                                  #   version.c/h, boot_status.c/h, image_mgmt.c/h
+    Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver
+  Core/                           # CubeMX-OWNED ONLY (regeneration-safe)
+    Inc/ Src/                     # main.c, gpio.c, spi.c, HAL config ...
     Startup/startup_stm32f407vetx.s
   bootloader/                     # Bootloader (32KB, no RTOS/network)
     boot_main.c                   # Entry point, boot flow, jump-to-app
     boot_api.c                    # API table at 0x08007F00 (.bl_api section)
     boot_stm32f4xx_it.c           # Minimal ISRs (faults → while(1), SysTick)
+    secrets.c/h                   # DEV FWU keys (secrets_prod.c overrides)
     bootloader.ld                 # Linker: 0x08000000, 32KB + BL_API region
-  application/                    # Application metadata + linker
-    app_info.c                    # sAppInfo const in .app_header section
-    application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
+  tests/                          # Host-native unit tests (no ARM toolchain):
+                                  #   crypto NIST/RFC vectors, version gate,
+                                  #   boot_status over NOR-faithful flash mock
   Drivers/                        # STM32 HAL + CMSIS (vendor)
   LWIP/                           # lwIP integration (CubeMX)
+  USB_DEVICE/                     # USB CDC (CubeMX)
   Middlewares/Third_Party/
     FreeRTOS/                     # RTOS
     LwIP/                         # TCP/IP stack
     trice/                        # Trice library (git submodule, uartDma branch)
     backtrace/                    # Cortex-M4 FP unwinder
+  cmake/gcc-arm-none-eabi.cmake   # ARM toolchain file
   CMakeLists.txt                  # Dual-target build (bootloader.elf + application.elf)
   flash_nokill.sh                 # J-Link clone flash wrapper
   flash_both.jlink                # Flash BL + APP
@@ -182,6 +194,12 @@ PeriphNet/
 ```
 
 **Files grouped by module/functionality, NOT by file type.** Keep .c and .h together. Third-party libraries go in `Middlewares/Third_Party/`.
+
+**Ownership rules:** `Core/` is CubeMX-generated only — never hand-edit outside
+USER CODE sections; first-party code lives in `Shared/` (both targets), `App/`
+(application), `bootloader/` (BL). `Shared/` must not depend on App/, bootloader/,
+FreeRTOS, or lwIP. FWU keys (`bootloader/secrets*.c`) never link into the
+application — CMake fails the build if a secrets file leaks into App sources.
 
 ## Firmware Version (Zhaga Pattern)
 
@@ -212,14 +230,14 @@ typedef struct {
     uint32_t    magic;                      /* 0x41505049 "APPI"             */
     sFwVerArea  fw_version;                 /* 32B firmware version          */
     uint32_t    image_size;                 /* binary size (0xFFFFFFFF=raw)  */
-    uint8_t     image_hmac[32];             /* HMAC-SHA256 (stub: 0xFF)     */
+    uint8_t     image_hmac[32];             /* HMAC-SHA256 (build-patched)   */
     uint32_t    features;                   /* APP_FEATURE_* flags           */
     uint32_t    min_bl_version;             /* minimum BL API version        */
     uint32_t    reserved[8];
 } sAppInfo;   /* 112 bytes, placed by linker in .app_header section */
 ```
 
-Current version defined in `application/app_info.c`. The `image_size` and `image_hmac` are placeholders for a future post-build patching tool.
+Current version defined in `App/app_info.c`. The `image_size` and `image_hmac` are patched into the `.bin` by `tools/dfu_image_tool.py sign` after every build.
 
 ### Version Compatibility (ver_checkCompatibility)
 

@@ -11,7 +11,7 @@
  * (promotion, reboot); the W25Q128 driver serializes SPI access.
  */
 
-#include "App/Http/image_transfer.h"
+#include "App/Fwu/image_transfer.h"
 #include "App/system.h"
 #include "w25q128.h"
 #include "boot_status.h"

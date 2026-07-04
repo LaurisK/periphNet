@@ -18,7 +18,7 @@
 #include "App/system.h"
 #include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
-#include "App/Http/image_transfer.h"
+#include "App/Fwu/image_transfer.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "boot_status.h"

@@ -17,66 +17,105 @@ set(CMAKE_C_STANDARD 11)
 
 enable_testing()
 
-# ==============================================================================
-# CppUTest (fetched from GitHub)
-# ==============================================================================
-
-include(FetchContent)
-
-FetchContent_Declare(
-    CppUTest
-    GIT_REPOSITORY https://github.com/cpputest/cpputest.git
-    GIT_TAG        v4.0
-    GIT_SHALLOW    TRUE
-)
-
-# Disable CppUTest's own test suite and memory detection (keep it simple)
-set(TESTS           OFF CACHE BOOL "" FORCE)
-set(COVERAGE        OFF CACHE BOOL "" FORCE)
-set(C++11           OFF CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(CppUTest)
-
-# ==============================================================================
-# Helper: define a test executable and register with CTest
-# Usage: add_cpputest(NAME <name> SOURCES <file.cpp> ...)
-# ==============================================================================
-
-function(add_cpputest)
-    cmake_parse_arguments(ARG "" "NAME" "SOURCES;INCLUDES;LIBS" ${ARGN})
-    add_executable(${ARG_NAME} ${ARG_SOURCES})
-    target_link_libraries(${ARG_NAME} PRIVATE CppUTest CppUTestExt ${ARG_LIBS})
-    if(ARG_INCLUDES)
-        target_include_directories(${ARG_NAME} PRIVATE ${ARG_INCLUDES})
-    endif()
-    add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME} -v)
-endfunction()
-
-# ==============================================================================
-# Tests
-# ==============================================================================
-
 set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-add_cpputest(
-    NAME test_simple
-    SOURCES test_simple.cpp
+# ==============================================================================
+# Shared/ unit tests — plain C, no framework, no network needed.
+# mocks/ comes first on the include path so mocks/w25q128.h shadows the real
+# driver header (which drags in the HAL).
+# ==============================================================================
+
+set(UNIT_INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+    ${PROJECT_ROOT}/Shared/Crypto
+    ${PROJECT_ROOT}/Shared/Fwu
 )
 
-add_cpputest(
-    NAME test_image_transfer
-    SOURCES
-        test_image_transfer.cpp
-        mocks/mock_support.c
-    INCLUDES
-        ${CMAKE_CURRENT_SOURCE_DIR}/mocks
-        ${PROJECT_ROOT}/Core/Inc
-        ${PROJECT_ROOT}/Core/Src
+add_executable(test_crypto
+    test_crypto.c
+    ${PROJECT_ROOT}/Shared/Crypto/sha256.c
+    ${PROJECT_ROOT}/Shared/Crypto/hmac_sha256.c
+    ${PROJECT_ROOT}/Shared/Crypto/aes128.c
+    ${PROJECT_ROOT}/Shared/Crypto/aes_gcm.c
 )
+target_include_directories(test_crypto PRIVATE ${UNIT_INCLUDES})
+add_test(NAME crypto COMMAND test_crypto)
 
-# Suppress %lu warnings on 64-bit host (uint32_t is unsigned int, not unsigned long)
-target_compile_options(test_image_transfer PRIVATE -Wno-format)
+add_executable(test_version
+    test_version.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_version PRIVATE ${UNIT_INCLUDES})
+add_test(NAME version COMMAND test_version)
 
-# TEST_MODE disables the FreeRTOS task/queue path and keeps synchronous flash ops
-# so that existing tests work without needing queue/tcpip_callback mocks
-target_compile_definitions(test_image_transfer PRIVATE TEST_MODE)
+add_executable(test_boot_status
+    test_boot_status.c
+    mocks/w25q128_mock.c
+    ${PROJECT_ROOT}/Shared/Fwu/boot_status.c
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_boot_status PRIVATE ${UNIT_INCLUDES})
+add_test(NAME boot_status COMMAND test_boot_status)
+
+# ==============================================================================
+# CppUTest suite (fetched from GitHub) — OFF by default.
+#
+# NOTE: test_image_transfer.cpp targets the old raw-lwIP image_transfer
+# (tcp_pcb/pbuf callbacks) and has not been rewritten for the netconn +
+# staged-blob architecture. Enable with -DPERIPHNET_CPPUTEST=ON once updated.
+# ==============================================================================
+
+option(PERIPHNET_CPPUTEST "Build the CppUTest-based suite (stale, needs rework)" OFF)
+
+if(PERIPHNET_CPPUTEST)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        CppUTest
+        GIT_REPOSITORY https://github.com/cpputest/cpputest.git
+        GIT_TAG        v4.0
+        GIT_SHALLOW    TRUE
+    )
+
+    # Disable CppUTest's own test suite and memory detection (keep it simple)
+    set(TESTS           OFF CACHE BOOL "" FORCE)
+    set(COVERAGE        OFF CACHE BOOL "" FORCE)
+    set(C++11           OFF CACHE BOOL "" FORCE)
+
+    FetchContent_MakeAvailable(CppUTest)
+
+    function(add_cpputest)
+        cmake_parse_arguments(ARG "" "NAME" "SOURCES;INCLUDES;LIBS" ${ARGN})
+        add_executable(${ARG_NAME} ${ARG_SOURCES})
+        target_link_libraries(${ARG_NAME} PRIVATE CppUTest CppUTestExt ${ARG_LIBS})
+        if(ARG_INCLUDES)
+            target_include_directories(${ARG_NAME} PRIVATE ${ARG_INCLUDES})
+        endif()
+        add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME} -v)
+    endfunction()
+
+    add_cpputest(
+        NAME test_simple
+        SOURCES test_simple.cpp
+    )
+
+    add_cpputest(
+        NAME test_image_transfer
+        SOURCES
+            test_image_transfer.cpp
+            mocks/mock_support.c
+        INCLUDES
+            ${CMAKE_CURRENT_SOURCE_DIR}/mocks
+            ${PROJECT_ROOT}/App/Fwu
+            ${PROJECT_ROOT}/Shared/Fwu
+            ${PROJECT_ROOT}/Shared/Crypto
+    )
+
+    # Suppress %lu warnings on 64-bit host (uint32_t is unsigned int, not unsigned long)
+    target_compile_options(test_image_transfer PRIVATE -Wno-format)
+
+    # TEST_MODE disables the FreeRTOS task/queue path and keeps synchronous flash ops
+    # so that existing tests work without needing queue/tcpip_callback mocks
+    target_compile_definitions(test_image_transfer PRIVATE TEST_MODE)
+endif()

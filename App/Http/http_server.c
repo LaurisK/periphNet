@@ -12,7 +12,7 @@
  */
 
 #include "App/Http/http_server.h"
-#include "App/Http/image_transfer.h"
+#include "App/Fwu/image_transfer.h"
 #include "App/Log/crash.h"
 #include "App/system.h"
 #include "bl_app_contract.h"

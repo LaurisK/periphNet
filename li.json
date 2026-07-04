@@ -17,7 +17,7 @@
 	},
 	"1070": {
 		"File": "solis_poller.c",
-		"Line": 333
+		"Line": 372
 	},
 	"1076": {
 		"File": "cmd_parser.c",
@@ -273,7 +273,7 @@
 	},
 	"2582": {
 		"File": "solis_poller.c",
-		"Line": 192
+		"Line": 231
 	},
 	"2636": {
 		"File": "firmware_update_http.c",
@@ -365,7 +365,7 @@
 	},
 	"3116": {
 		"File": "solis_poller.c",
-		"Line": 331
+		"Line": 370
 	},
 	"3122": {
 		"File": "mqtt_bridge.c",
@@ -465,7 +465,7 @@
 	},
 	"3674": {
 		"File": "solis_poller.c",
-		"Line": 176
+		"Line": 215
 	},
 	"3753": {
 		"File": "http_server.c",
@@ -645,7 +645,7 @@
 	},
 	"4851": {
 		"File": "solis_poller.c",
-		"Line": 317
+		"Line": 356
 	},
 	"4858": {
 		"File": "hardfault_handler.c",
@@ -797,7 +797,7 @@
 	},
 	"5584": {
 		"File": "solis_poller.c",
-		"Line": 313
+		"Line": 352
 	},
 	"5586": {
 		"File": "hardfault_handler.c",
@@ -937,7 +937,7 @@
 	},
 	"6364": {
 		"File": "solis_poller.c",
-		"Line": 228
+		"Line": 267
 	},
 	"6402": {
 		"File": "firmware_update_http.c",
@@ -949,7 +949,7 @@
 	},
 	"6438": {
 		"File": "solis_poller.c",
-		"Line": 259
+		"Line": 298
 	},
 	"6456": {
 		"File": "bms_reader.c",
@@ -973,7 +973,7 @@
 	},
 	"6535": {
 		"File": "solis_poller.c",
-		"Line": 199
+		"Line": 238
 	},
 	"6573": {
 		"File": "hardfault_handler.c",
@@ -1013,7 +1013,7 @@
 	},
 	"6794": {
 		"File": "solis_poller.c",
-		"Line": 322
+		"Line": 361
 	},
 	"6796": {
 		"File": "app_freertos.c",
@@ -1061,7 +1061,7 @@
 	},
 	"7007": {
 		"File": "solis_poller.c",
-		"Line": 326
+		"Line": 365
 	},
 	"7047": {
 		"File": "hardfault_handler.c",
@@ -1209,7 +1209,7 @@
 	},
 	"7593": {
 		"File": "solis_poller.c",
-		"Line": 318
+		"Line": 357
 	},
 	"7610": {
 		"File": "bms_reader.c",
@@ -1225,7 +1225,7 @@
 	},
 	"7669": {
 		"File": "solis_poller.c",
-		"Line": 178
+		"Line": 217
 	},
 	"7687": {
 		"File": "system.c",

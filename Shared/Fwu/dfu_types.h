@@ -86,7 +86,8 @@ typedef struct {
     uint32_t    magic;                      /* APP_INFO_MAGIC                */
     sFwVerArea  fw_version;                 /* 32 B: firmware version        */
     uint32_t    image_size;                 /* binary size (0xFFFFFFFF = raw)*/
-    uint8_t     image_hmac[DFU_HMAC_SIZE];  /* HMAC-SHA256  (stub: 0xFF)    */
+    uint8_t     image_hmac[DFU_HMAC_SIZE];  /* HMAC-SHA256, patched in at
+                                               build time by dfu_image_tool  */
     uint32_t    features;                   /* APP_FEATURE_* flags           */
     uint32_t    min_bl_version;             /* minimum BL API version        */
     uint32_t    reserved[8];                /* future use                    */

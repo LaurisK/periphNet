@@ -5,6 +5,7 @@
 
 #include "App/Modbus/solis_poller.h"
 #include "App/Modbus/modbus_rtu.h"
+#include "App/Data/telemetry.h"
 #include "App/system.h"
 #include "cmsis_os.h"
 #include "trice.h"
@@ -37,6 +38,42 @@ static inline uint32_t u32_from_regs(uint16_t hi, uint16_t lo)
 static inline int32_t s32_from_regs(uint16_t hi, uint16_t lo)
 {
     return (int32_t)(((uint32_t)hi << 16) | lo);
+}
+
+/* --------------------------------------------------------------------------
+ * Telemetry publishing — map the register cache into the neutral data model
+ * -------------------------------------------------------------------------- */
+
+static void publish_telemetry(void)
+{
+    sEnergyTelemetry t = {
+        .pv1Voltage_dV        = s_data.pv1Voltage_dV,
+        .pv1Current_dA        = s_data.pv1Current_dA,
+        .pv2Voltage_dV        = s_data.pv2Voltage_dV,
+        .pv2Current_dA        = s_data.pv2Current_dA,
+        .pvPower_W            = s_data.pvPower_W,
+        .gridVoltage_dV       = s_data.gridVoltage_dV,
+        .gridFrequency_cHz    = s_data.gridFrequency_cHz,
+        .activePower_W        = s_data.activePower_W,
+        .invTemperature_dC    = s_data.invTemperature_dC,
+        .batVoltage_dV        = s_data.batVoltage_dV,
+        .batCurrent_dA        = s_data.batCurrent_dA,
+        .batSoc               = s_data.batSoc,
+        .batSoh               = s_data.batSoh,
+        .batPower_W           = s_data.batPower_W,
+        .houseLoadPower_W     = s_data.houseLoadPower_W,
+        .backupLoadPower_W    = s_data.backupLoadPower_W,
+        .gridPortPower_W      = s_data.gridPortPower_W,
+        .meterPower_W         = s_data.meterPower_W,
+        .todayPv_dkWh         = s_data.todayPv_dkWh,
+        .todayGridImport_dkWh = s_data.todayGridImport_dkWh,
+        .todayGridExport_dkWh = s_data.todayGridExport_dkWh,
+        .todayConsumption_dkWh = s_data.todayConsumption_dkWh,
+        .todayBatChg_dkWh     = s_data.todayBatChg_dkWh,
+        .todayBatDsg_dkWh     = s_data.todayBatDsg_dkWh,
+        .totalPv_kWh          = s_data.totalPv_kWh,
+    };
+    Telemetry_PublishEnergy(&t);
 }
 
 /* --------------------------------------------------------------------------
@@ -99,6 +136,7 @@ static void poll_fast(void)
 
     s_data.lastFastPollTick = HAL_GetTick();
     s_data.pollCount++;
+    publish_telemetry();
 }
 
 static void poll_slow(void)
@@ -156,6 +194,7 @@ static void poll_slow(void)
     }
 
     s_data.lastSlowPollTick = HAL_GetTick();
+    publish_telemetry();
 }
 
 /* --------------------------------------------------------------------------
