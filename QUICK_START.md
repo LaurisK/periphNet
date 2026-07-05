@@ -29,7 +29,7 @@ cmake --build build -j8
 cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 ```
 
-Build output: `build/application.bin` (~168 KB, auto-signed with HMAC-SHA256).
+Build output: `build/application.bin` (~237 KB, auto-signed with HMAC-SHA256) and `build/periphnet_fwu.pnfw` (encrypted OTA blob).
 
 Clean rebuild:
 ```bash
@@ -43,7 +43,7 @@ rm -rf build && cmake -B build -S . && cmake --build build -j8
 curl http://periphnet.local/
 
 # Via IP (DHCP, check your router)
-curl http://10.42.0.203/
+curl http://periphnet.local/
 ```
 
 Open the URL in a browser to get the web UI with image management + firmware update controls and crash log.
@@ -117,8 +117,44 @@ Test sources in `tests/`, mocks for lwIP/FreeRTOS/W25Q128 in `tests/mocks/`.
 
 | Target | Flash | RAM | Limit |
 |--------|-------|-----|-------|
-| Bootloader | ~22 KB (66%) | ~2 KB | 32 KB |
-| Application | ~168 KB (34%) | ~99 KB | 480 KB |
+| Bootloader | ~23 KB (69%) | ~2.7 KB | 32 KB |
+| Application | ~237 KB (49%) | ~108 KB | 480 KB |
+
+## Making a new release
+
+```bash
+# 1. Bump version in App/app_info.c (APP_FW_MAJOR / MINOR / PATCH)
+#    Local build:  fwTarget_local  → version string "Pl1.0.5"
+#    Dev build:    fwTarget_dev    → version string "Pd1.0.5"
+#    Release:      fwTarget_release→ version string "Pv1.0.5"
+
+# 2. Build (auto-signs and packages)
+cmake --build build -j8
+
+# 3. Upload to board over Ethernet (no J-Link needed)
+curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
+  --data-binary @build/periphnet_fwu.pnfw \
+  http://periphnet.local/api/image/upload
+
+# 4. Check stored image + current FWU status
+curl http://periphnet.local/api/image/info
+curl http://periphnet.local/api/fwu/status
+
+# 5. Install (arms FWU + reboots; bootloader decrypts and flashes)
+curl -X POST http://periphnet.local/api/fwu/install
+
+# 6. Wait for board to reboot (~15 s), then verify new version
+sleep 20
+curl http://periphnet.local/api/fwu/status
+
+# 7. Confirm (required within 3 boots for non-local builds)
+curl -X POST http://periphnet.local/api/fwu/confirm
+```
+
+> The OTA restore mechanism is the bootloader: it receives encrypted `.pnfw`
+> (AES-128-GCM + HMAC-SHA256), decrypts in a streaming pass, verifies the
+> signature, then programs internal flash — no plaintext binary ever touches
+> the wire or external storage.
 
 ## USB DFU Flashing (no J-Link needed)
 
