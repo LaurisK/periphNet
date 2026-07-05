@@ -11,6 +11,7 @@
  */
 
 #include "App/Log/crash.h"
+#include "App/Log/trice_consumer.h"
 #include "bl_app_contract.h"
 #include "image_mgmt.h"
 #include "w25q128.h"
@@ -83,6 +84,8 @@ static void flushTrice(void)
     if (huart3.gState != HAL_UART_STATE_READY) {
         huart3.gState = HAL_UART_STATE_READY;
     }
+
+    TriceConsumer_ResetAll();
 
     TriceTransfer();
 

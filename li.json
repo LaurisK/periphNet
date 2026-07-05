@@ -133,7 +133,7 @@
 	},
 	"1686": {
 		"File": "crash.c",
-		"Line": 221
+		"Line": 224
 	},
 	"1721": {
 		"File": "hardfault_handler.c",
@@ -177,7 +177,7 @@
 	},
 	"2041": {
 		"File": "crash.c",
-		"Line": 206
+		"Line": 209
 	},
 	"2053": {
 		"File": "app_freertos.c",
@@ -185,11 +185,11 @@
 	},
 	"2070": {
 		"File": "crash.c",
-		"Line": 148
+		"Line": 151
 	},
 	"2153": {
 		"File": "crash.c",
-		"Line": 147
+		"Line": 150
 	},
 	"2170": {
 		"File": "app_freertos.c",
@@ -201,11 +201,11 @@
 	},
 	"2207": {
 		"File": "crash.c",
-		"Line": 210
+		"Line": 213
 	},
 	"2266": {
 		"File": "crash.c",
-		"Line": 217
+		"Line": 220
 	},
 	"2282": {
 		"File": "cmd_parser.c",
@@ -305,7 +305,7 @@
 	},
 	"2794": {
 		"File": "crash.c",
-		"Line": 208
+		"Line": 211
 	},
 	"2826": {
 		"File": "hardfault_handler.c",
@@ -329,7 +329,7 @@
 	},
 	"2905": {
 		"File": "crash.c",
-		"Line": 141
+		"Line": 144
 	},
 	"2939": {
 		"File": "app_freertos.c",
@@ -513,7 +513,7 @@
 	},
 	"3900": {
 		"File": "crash.c",
-		"Line": 218
+		"Line": 221
 	},
 	"3929": {
 		"File": "http_server.c",
@@ -545,7 +545,7 @@
 	},
 	"4177": {
 		"File": "crash.c",
-		"Line": 169
+		"Line": 172
 	},
 	"4178": {
 		"File": "hardfault_handler.c",
@@ -605,7 +605,7 @@
 	},
 	"4538": {
 		"File": "crash.c",
-		"Line": 207
+		"Line": 210
 	},
 	"4562": {
 		"File": "hardfault_handler.c",
@@ -621,7 +621,7 @@
 	},
 	"4687": {
 		"File": "crash.c",
-		"Line": 111
+		"Line": 114
 	},
 	"4724": {
 		"File": "http_server.c",
@@ -721,7 +721,7 @@
 	},
 	"5229": {
 		"File": "crash.c",
-		"Line": 211
+		"Line": 214
 	},
 	"5292": {
 		"File": "hardfault_handler.c",
@@ -833,11 +833,11 @@
 	},
 	"5707": {
 		"File": "crash.c",
-		"Line": 212
+		"Line": 215
 	},
 	"5714": {
 		"File": "crash.c",
-		"Line": 347
+		"Line": 350
 	},
 	"5780": {
 		"File": "image_transfer.c",
@@ -913,11 +913,11 @@
 	},
 	"6209": {
 		"File": "crash.c",
-		"Line": 213
+		"Line": 216
 	},
 	"6220": {
 		"File": "crash.c",
-		"Line": 214
+		"Line": 217
 	},
 	"6232": {
 		"File": "cmd_parser.c",
@@ -1057,7 +1057,7 @@
 	},
 	"6961": {
 		"File": "crash.c",
-		"Line": 109
+		"Line": 112
 	},
 	"6988": {
 		"File": "hardfault_handler.c",
@@ -1161,7 +1161,7 @@
 	},
 	"7318": {
 		"File": "crash.c",
-		"Line": 219
+		"Line": 222
 	},
 	"7342": {
 		"File": "hardfault_handler.c",
@@ -1249,7 +1249,7 @@
 	},
 	"7698": {
 		"File": "crash.c",
-		"Line": 209
+		"Line": 212
 	},
 	"7718": {
 		"File": "bms_reader.c",

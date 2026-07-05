@@ -21,7 +21,7 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
-
+#include "App/Log/trice_consumer.h"
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;
@@ -295,33 +295,30 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 
 #include "trice.h"
 
-/**
- * @brief  Non-blocking Trice output via USART3 DMA.
- *
- * Aborts any in-progress transfer first (resets HAL state machine), then
- * starts a new DMA transfer.  Called only when TriceOutDepthUartA() == 0.
- */
 void TriceNonBlockingWriteUartA(const void *buf, size_t nByte)
 {
     HAL_UART_Abort(&huart3);
     HAL_UART_Transmit_DMA(&huart3, (uint8_t *)buf, nByte);
 }
 
-/**
- * @brief  Bytes remaining in the current USART3 DMA TX transfer.
- * @retval 0 when idle, non-zero while transmitting.
- */
 unsigned TriceOutDepthUartA(void)
 {
-    return __HAL_DMA_GET_COUNTER(huart3.hdmatx);
+    if (__HAL_DMA_GET_COUNTER(huart3.hdmatx) != 0U) {
+        return 1U;
+    }
+    return TriceConsumer_Pending();
 }
 
-/**
- * @brief  True when USART3 TX DMA transfer is complete (safe to TriceTransfer).
- */
 int MX_USART3_Ready(void)
 {
     return (huart3.gState == HAL_UART_STATE_READY);
+}
+
+void HAL_DMA_TxCpltCallback(DMA_HandleTypeDef *hdma)
+{
+    if (hdma->Instance == DMA1_Stream3) {
+        TriceConsumer_Done(TRICE_CONSUMER_UART);
+    }
 }
 
 /* USER CODE END 1 */
