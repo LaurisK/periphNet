@@ -57,19 +57,21 @@ rm -rf build && cmake -B build -S . && cmake --build build -j8
 ```bash
 ping 10.42.0.203
 curl http://10.42.0.203/
-curl http://10.42.0.203/api/firmware/status
+curl http://10.42.0.203/api/image/info                 # stored image (name/version/size/crc)
+curl http://10.42.0.203/api/fwu/status                 # FWU state (running/golden/confirmed)
 
 # Full OTA cycle (blob only — plaintext .bin uploads are rejected)
-curl -X POST --data-binary @build/periphnet_fwu.pnfw \
-  http://10.42.0.203/api/firmware/upload
-curl -X POST http://10.42.0.203/api/firmware/install   # arms FWU + reboots
+curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
+  --data-binary @build/periphnet_fwu.pnfw \
+  http://10.42.0.203/api/image/upload
+curl -X POST http://10.42.0.203/api/fwu/install        # arms FWU + reboots
 # ...device reboots, BL installs, new FW comes up UNCONFIRMED...
-curl http://10.42.0.203/api/firmware/status            # check health/version
-curl -X POST http://10.42.0.203/api/firmware/confirm   # REQUIRED within 3 boots,
-                                                       # also promotes staged→golden
+curl http://10.42.0.203/api/fwu/status                 # check health/version
+curl -X POST http://10.42.0.203/api/fwu/confirm        # REQUIRED within 3 boots,
+                                                       # also promotes stored→golden
 
-# Download staged blob / verify round-trip
-curl http://10.42.0.203/api/firmware/download -o downloaded.pnfw
+# Download stored blob / verify round-trip
+curl http://10.42.0.203/api/image/download -o downloaded.pnfw
 md5sum build/periphnet_fwu.pnfw downloaded.pnfw
 ```
 
@@ -127,10 +129,12 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 0x0000_0000  ┌───────────────────┐
              │ Boot Status (4KB) │ sBootStatus v3: flags + last_fwu_result
 0x0000_1000  ├───────────────────┤
-             │ Staged Blob       │ 488KB — uploaded .pnfw awaiting install
-0x0007_B000  ├───────────────────┤
+             │ Stored Blob       │ 488KB — uploaded .pnfw (image store;
+0x0007_B000  ├───────────────────┤          installed from here by the BL)
              │ Golden Blob       │ 488KB — last CONFIRMED image (encrypted),
 0x000F_5000  ├───────────────────┤          rollback target
+             │ Image Meta (4KB)  │ sImageMeta: file name, bound by blob CRC32
+0x000F_6000  ├───────────────────┤
              │ (gap)             │
 0x000F_8000  ├───────────────────┤
              │ Crash Log (4KB)   │
@@ -153,7 +157,8 @@ PeriphNet/
     Cmd/cmd_parser.c/h            # CLI command parser (composition root)
     Data/telemetry.c/h            # Neutral telemetry model: producers (Modbus,
                                   #   CAN) publish, consumers (MQTT) snapshot
-    Fwu/image_transfer.c/h        # FWU staging/control domain logic (no lwIP)
+    Fwu/fwu_control.c/h           # FWU process: install/confirm/verify/golden
+    Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
     Log/                          # crash handler + backtrace, trice transports
     Modbus/                       # Modbus-RTU master + Solis register poller
@@ -281,7 +286,7 @@ typedef union {
 
 `sBootStatus` v3 is minimal: magic (`"BOOT"`), version, `last_fwu_result`
 (eFwuRes of the last install/rollback, `FWU_NO_RESULT` if none — exposed via
-`/api/firmware/status` so BL-side failures are diagnosable), header CRC32
+`/api/fwu/status` so BL-side failures are diagnosable), header CRC32
 (verified on read), and flags. Flags are **outside the CRC** so they can be
 bit-cleared independently. Staged/golden metadata lives in the blob
 manifests, not here.
@@ -318,17 +323,19 @@ a power cut mid-install retries cleanly on next boot.
 ```
 Build:    application.bin → sign (HMAC) → package → periphnet_fwu.pnfw
 
-Operator: POST /api/firmware/upload  (blob → staged area; independent of FWU)
-          POST /api/firmware/install (arms fwu_requested flag → reboot)
+Operator: POST /api/image/upload  (blob → image store; independent of FWU)
+          POST /api/fwu/install   (arms fwu_requested flag → reboot)
           ...BL installs, new FW boots UNCONFIRMED...
-          verify health via /api/firmware/status, MQTT, etc.
-          POST /api/firmware/confirm (REQUIRED — clears confirmed bit AND
-                                      promotes staged blob → golden area)
+          verify health via /api/fwu/status, MQTT, etc.
+          POST /api/fwu/confirm   (REQUIRED — clears confirmed bit AND
+                                   promotes stored blob → golden area)
 ```
 
-Transfer and FWU are fully independent: the staged blob is persistent and
-self-describing (rescanned at boot), installing needs no upload session, and
-an upload alone never triggers an install.
+Image management and FWU are fully independent modules: the stored blob is
+persistent and self-describing (rescanned at boot), installing needs no
+upload session, and an upload alone never triggers an install.  FWU code
+consumes the stored image only through the image-store API (a read hold
+protects it during golden promotion).
 
 ### Boot Attempt Counter & Rollback
 
@@ -338,7 +345,7 @@ gone, the BL installs the **golden blob** (last confirmed image, kept
 encrypted in ext flash), marks it pre-confirmed, and erases the staged
 manifest so the failed image can't be re-installed by accident.
 
-The app never self-confirms — `POST /api/firmware/confirm` is the outside
+The app never self-confirms — `POST /api/fwu/confirm` is the outside
 actor's job. Local-target (`'l'`) builds skip attempt counting entirely
 (developer owns the device; JLink flashing stays friction-free).
 
@@ -395,30 +402,36 @@ Shared code compiled into both bootloader and application.
 
 ## HTTP API
 
+Two independent sections: **image management** (`/api/image/*`, owned by
+`App/Img/image_store.c`) and the **FWU process** (`/api/fwu/*`, owned by
+`App/Fwu/fwu_control.c`).
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Web UI (upload/install/confirm/delete + crash log) |
-| `/api/firmware/upload` | POST | Upload `.pnfw` blob to staged area (Content-Length required) |
-| `/api/firmware/download` | GET | Download staged blob (still encrypted) |
-| `/api/firmware/install` | POST | Arm FWU flag + reboot (needs valid staged blob) |
-| `/api/firmware/confirm` | POST | Outside actor confirms running FW; promotes staged→golden |
-| `/api/firmware/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
-| `/api/firmware/staged` | DELETE | Erase staged blob manifest |
-| `/api/firmware/status` | GET | JSON: status, running/staged/golden versions, confirmed, attempts_remaining, last_fwu_result, progress, error |
+| `/` | GET | Web UI (Image Management + Firmware Update cards + crash log) |
+| `/api/image/upload` | POST | Upload `.pnfw` blob (Content-Length required; optional `X-Filename` header, persisted) |
+| `/api/image/info` | GET | JSON: status, present, name, version, size, image_size, crc32, progress, error |
+| `/api/image/download` | GET | Download stored blob (still encrypted), original filename |
+| `/api/image` | DELETE | Erase stored image (manifest + metadata) |
+| `/api/fwu/install` | POST | Arm FWU flag + reboot (needs valid stored image) |
+| `/api/fwu/confirm` | POST | Outside actor confirms running FW; promotes stored→golden |
+| `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
+| `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
 
 **Server architecture:** dedicated `http` task using the lwIP **netconn API**
 (one connection at a time; 10s recv/send timeouts so dead clients can't stall
-it). `App/Http/http_server.c` owns all HTTP parsing/JSON; `image_transfer.c`
-is protocol-agnostic domain logic (blobs, flash, boot status) with an
-`img_upload_begin/write/finish` streaming API. Headers are read through a
-byte-stream cursor, so TCP segmentation cannot break parsing; `Expect:
-100-continue` is answered (no curl stall). Upload does synchronous flash
-writes with lazy 4KB sector erase; on completion the blob is validated
-(manifest + CRC32) and becomes the persistent staged image. tcpip_thread is
-never blocked by firmware transfers (MQTT keepalives unaffected). Golden
-promotion runs in defaultTask; the W25Q128 driver serializes SPI access with
-a mutex (skipped in BL and fault-handler context).
+it). `App/Http/http_server.c` owns all HTTP parsing/JSON; `image_store.c`
+(blob storage, `ImgStore_Upload*` streaming API, filename metadata) and
+`fwu_control.c` (install/confirm/verify/golden, boot status) are
+protocol-agnostic domain logic. Headers are read through a byte-stream
+cursor, so TCP segmentation cannot break parsing; `Expect: 100-continue` is
+answered (no curl stall). Upload does synchronous flash writes with lazy 4KB
+sector erase; on completion the blob is validated (manifest + CRC32) and
+becomes the persistent stored image. tcpip_thread is never blocked by image
+transfers (MQTT keepalives unaffected). Golden promotion runs in defaultTask
+under an image-store read hold; the W25Q128 driver serializes SPI access
+with a mutex (skipped in BL and fault-handler context).
 
 ## Coding Standards
 
@@ -450,5 +463,5 @@ TRice("Message: %d\n", value);
 - **NOR flash bit-clearing** — boot flags can be modified without sector erase (1→0 only)
 - **FWU keys are build+BL only** — never store keys in ext flash, never link `secrets.c` into the application, never expose key material through the BL API
 - **OTA accepts only .pnfw blobs** — plaintext binaries are rejected at upload (manifest check); plaintext exists only in `build/` and internal flash
-- **Confirm or roll back** — non-local builds must be confirmed via `POST /api/firmware/confirm` within 3 boots of an install, otherwise the BL restores the golden image
+- **Confirm or roll back** — non-local builds must be confirmed via `POST /api/fwu/confirm` within 3 boots of an install, otherwise the BL restores the golden image
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)

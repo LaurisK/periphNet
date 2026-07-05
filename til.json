@@ -147,6 +147,10 @@
 		"Type": "TRICE0",
 		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
 	},
+	"1855": {
+		"Type": "TRice",
+		"Strg": "Promoting stored blob to golden...\\n"
+	},
 	"1894": {
 		"Type": "TRICE0",
 		"Strg": "  - Divide by zero\\n"
@@ -282,6 +286,10 @@
 	"2648": {
 		"Type": "TRice",
 		"Strg": "Unknown command: %s\\n"
+	},
+	"2702": {
+		"Type": "TRice",
+		"Strg": "Boot UNCONFIRMED: awaiting /api/fwu/confirm\\n"
 	},
 	"2733": {
 		"Type": "TRice",
@@ -854,6 +862,10 @@
 	"6004": {
 		"Type": "TRice",
 		"Strg": "BmsSim: CAN1 init failed\\n"
+	},
+	"6008": {
+		"Type": "TRice",
+		"Strg": "IMG: stored %u B\\n"
 	},
 	"6045": {
 		"Type": "TRICE",

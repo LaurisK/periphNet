@@ -18,7 +18,7 @@
 #include "App/system.h"
 #include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
-#include "App/Fwu/image_transfer.h"
+#include "App/Fwu/fwu_control.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "boot_status.h"
@@ -97,11 +97,11 @@ void App_DefaultTaskEntry(void)
               id.manufacturer_id, id.memory_type, id.capacity);
 
         /* NOTE: the app deliberately does NOT self-confirm.  An outside
-         * actor must POST /api/firmware/confirm after checking the device
+         * actor must POST /api/fwu/confirm after checking the device
          * is healthy; otherwise the bootloader rolls back to the golden
          * image after BOOT_ATTEMPTS_MAX unconfirmed boots. */
         if (BootStatus_IsUnconfirmed()) {
-            TRice("Boot UNCONFIRMED: awaiting /api/firmware/confirm\n");
+            TRice("Boot UNCONFIRMED: awaiting /api/fwu/confirm\n");
         }
     } else {
         TRice("Flash INIT FAILED\n");
@@ -148,7 +148,7 @@ void App_DefaultTaskEntry(void)
         KickIwdg();
 
         /* Reboot for firmware install if requested via HTTP */
-        if (image_transfer_reboot_pending()) {
+        if (FwuCtl_RebootPending()) {
             TRice("Rebooting for firmware install...\n");
             vTaskDelay(pdMS_TO_TICKS(2000U));  /* let Trice flush + TCP close */
             NVIC_SystemReset();
@@ -156,9 +156,9 @@ void App_DefaultTaskEntry(void)
 
         /* Copy staged blob → golden after a confirm (a few seconds of
          * SPI traffic; runs here so tcpip_thread stays responsive) */
-        if (image_transfer_promote_pending()) {
-            TRice("Promoting staged blob to golden...\n");
-            image_transfer_run_promotion();
+        if (FwuCtl_PromotePending()) {
+            TRice("Promoting stored blob to golden...\n");
+            FwuCtl_RunPromotion();
             TRice("Golden promotion done\n");
         }
 

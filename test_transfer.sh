@@ -11,9 +11,9 @@ set -euo pipefail
 DEVICE="${1:-10.42.0.203}"
 PORT=80
 BASE_URL="http://${DEVICE}:${PORT}"
-UPLOAD_URL="${BASE_URL}/api/firmware/upload"
-DOWNLOAD_URL="${BASE_URL}/api/firmware/download"
-STATUS_URL="${BASE_URL}/api/firmware/status"
+UPLOAD_URL="${BASE_URL}/api/image/upload"
+DOWNLOAD_URL="${BASE_URL}/api/image/download"
+STATUS_URL="${BASE_URL}/api/image/info"
 
 TMPDIR_BASE="$(mktemp -d /tmp/periph_test_XXXXXX)"
 trap 'rm -rf "$TMPDIR_BASE"; kill_bg_pings' EXIT

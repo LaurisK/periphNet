@@ -46,34 +46,38 @@ curl http://periphnet.local/
 curl http://10.42.0.203/
 ```
 
-Open the URL in a browser to get the web UI with firmware update controls and crash log.
+Open the URL in a browser to get the web UI with image management + firmware update controls and crash log.
 
 ## HTTP API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Web UI (HTML) |
-| `/api/firmware/status` | GET | JSON: running version, staged version, transfer state |
-| `/api/firmware/upload` | POST | Upload binary to external flash (octet-stream, 480 KB max) |
-| `/api/firmware/download` | GET | Download staged image |
-| `/api/firmware/install` | POST | Validate staged image, arm FWU flag, reboot |
-| `/api/firmware/staged` | DELETE | Erase staged image |
+| `/api/image/upload` | POST | Upload `.pnfw` blob (octet-stream; optional `X-Filename` header) |
+| `/api/image/info` | GET | JSON: stored image name, version, size, CRC32, transfer state |
+| `/api/image/download` | GET | Download stored blob |
+| `/api/image` | DELETE | Erase stored image |
+| `/api/fwu/status` | GET | JSON: running/golden version, confirmed, attempts, last result |
+| `/api/fwu/install` | POST | Arm FWU flag (uses stored image), reboot |
+| `/api/fwu/confirm` | POST | Confirm running FW; promotes stored image → golden |
+| `/api/fwu/verify` | GET | Authenticate running image via BL HMAC |
 | `/api/crash/latest` | GET | JSON: last crash (registers, backtrace, task list) |
 | `/api/crash/latest` | DELETE | Clear stored crash log |
 
 ## OTA Update (curl)
 
 ```bash
-# Upload
-curl -X POST -H "Content-Type: application/octet-stream" \
-  -H "Content-Length: $(stat -c%s build/application.bin)" \
-  --data-binary @build/application.bin http://periphnet.local/api/firmware/upload
+# Upload the encrypted blob (plaintext .bin is rejected)
+curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
+  --data-binary @build/periphnet_fwu.pnfw http://periphnet.local/api/image/upload
 
-# Check status
-curl http://periphnet.local/api/firmware/status
+# Check what is stored / FWU state
+curl http://periphnet.local/api/image/info
+curl http://periphnet.local/api/fwu/status
 
-# Install (board reboots)
-curl -X POST http://periphnet.local/api/firmware/install
+# Install (board reboots), then confirm within 3 boots
+curl -X POST http://periphnet.local/api/fwu/install
+curl -X POST http://periphnet.local/api/fwu/confirm
 ```
 
 ## Trice Logging

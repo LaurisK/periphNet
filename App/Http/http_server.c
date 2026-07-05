@@ -7,12 +7,15 @@
  * upload body is streamed straight into the staging logic, and Trice
  * logging is allowed here (task context, not tcpip_thread).
  *
- * Firmware/FWU domain logic lives in image_transfer.c; this file owns all
- * HTTP parsing and response formatting.
+ * Domain logic is split between image_store.c (image management: upload/
+ * download/delete of the stored blob) and fwu_control.c (FWU process:
+ * install/confirm/verify/golden); this file owns all HTTP parsing and
+ * response formatting.
  */
 
 #include "App/Http/http_server.h"
-#include "App/Fwu/image_transfer.h"
+#include "App/Img/image_store.h"
+#include "App/Fwu/fwu_control.h"
 #include "App/Log/crash.h"
 #include "App/system.h"
 #include "bl_app_contract.h"
@@ -47,46 +50,63 @@ static const char index_html[] =
     ".btn-up{background:#37c;color:#fff}.btn-dl{background:#666;color:#fff}"
     ".btn-inst{background:#e63;color:#fff}.btn-del{background:#a33;color:#fff}"
     "button:disabled{opacity:.5;cursor:default}"
-    "#msg{margin:8px 0;padding:8px;border-radius:4px;display:none}"
+    ".msg{margin:8px 0;padding:8px;border-radius:4px;display:none}"
     ".ok{background:#dfd;color:#060}.err{background:#fdd;color:#600}"
-    "#info{color:#555;font-size:.9em}"
+    ".info{color:#555;font-size:.9em;margin:6px 0}"
     "pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}"
     "</style></head><body>"
     "<h1>PeriphNet</h1><div id=ver></div>"
-    "<div class=card><h3>Firmware Update</h3>"
+    "<div class=card><h3>Image Management</h3>"
     "<input type=file id=file accept='.pnfw'>"
     "<button class=btn-up onclick=upload()>Upload</button>"
     "<div id=bar><div id=fill></div></div>"
-    "<div id=info></div><div id=msg></div>"
+    "<div id=iinfo class=info></div><div id=imsg class=msg></div>"
     "<div style='margin-top:8px'>"
-    "<button class=btn-dl onclick=download() id=bdl disabled>Download Staged</button>"
+    "<button class=btn-dl onclick=download() id=bdl disabled>Download</button>"
+    "<button class=btn-del onclick=del() id=bdel disabled>Delete</button>"
+    "</div></div>"
+    "<div class=card><h3>Firmware Update</h3>"
+    "<div id=finst class=info></div><div id=finfo class=info></div>"
+    "<div id=fmsg class=msg></div>"
+    "<div style='margin-top:8px'>"
     "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
     "<button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button>"
-    "<button class=btn-del onclick=del() id=bdel disabled>Delete Staged</button>"
     "</div></div>"
     "<div class=card><h3>Last Crash</h3>"
     "<div id=crash>Loading...</div></div>"
     "<script>"
     "var B='http://'+location.host;"
-    "function show(t,ok){var m=document.getElementById('msg');m.textContent=t;"
-    "m.className=ok?'ok':'err';m.style.display='block'}"
-    "function poll(){fetch(B+'/api/firmware/status').then(r=>r.json()).then(j=>{"
+    "function show(id,t,ok){var m=document.getElementById(id);m.textContent=t;"
+    "m.className='msg '+(ok?'ok':'err');m.style.display='block'}"
+    "function pollImg(){fetch(B+'/api/image/info').then(r=>r.json()).then(j=>{"
+    "var t;"
+    "if(j.present){t='Name: '+(j.name||'(unnamed)')+' | Version: '+j.version"
+    "+' | Size: '+j.size+' B | CRC32: '+j.crc32}"
+    "else if(j.status=='uploading'){t='Uploading... '+j.progress+'%'}"
+    "else if(j.status=='error'){t='Error: '+j.error}"
+    "else{t='No image uploaded.'}"
+    "document.getElementById('iinfo').textContent=t;"
+    "document.getElementById('bdl').disabled=!j.present;"
+    "document.getElementById('bdel').disabled=!j.present;"
+    "document.getElementById('binst').disabled=!j.present;"
+    "document.getElementById('finst').textContent=j.present?"
+    "'Image ready to install: '+j.version+(j.name?' ('+j.name+')':''):"
+    "'No image available - upload one in Image Management.';"
+    "}).catch(()=>{})}"
+    "function pollFwu(){fetch(B+'/api/fwu/status').then(r=>r.json()).then(j=>{"
     "document.getElementById('ver').textContent='Running: '+j.running_version"
     "+(j.confirmed?' (confirmed)':' UNCONFIRMED, '+j.attempts_remaining+' boots left');"
-    "var has=!!j.staged_version;"
-    "var t=has?'Staged: '+j.staged_version:'';"
-    "if(j.golden_version)t+=(t?' | ':'')+'Golden: '+j.golden_version;"
+    "var t='';"
+    "if(j.golden_version)t='Golden: '+j.golden_version;"
     "if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;"
-    "if(j.promote_pending)t+=' | promoting...';"
-    "document.getElementById('info').textContent=t;"
-    "document.getElementById('bdl').disabled=!has;"
-    "document.getElementById('binst').disabled=!has;"
-    "document.getElementById('bdel').disabled=!has;"
+    "if(j.promote_pending)t+=(t?' | ':'')+'promoting to golden...';"
+    "document.getElementById('finfo').textContent=t;"
     "document.getElementById('bconf').disabled=j.confirmed;"
     "}).catch(()=>{})}"
-    "function confirmFw(){fetch(B+'/api/firmware/confirm',{method:'POST'})"
-    ".then(r=>r.json()).then(j=>{show('Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
-    ".catch(e=>show(e,0))}"
+    "function poll(){pollImg();pollFwu()}"
+    "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
+    ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
+    ".catch(e=>show('fmsg',e,0))}"
     "function crashPoll(){fetch(B+'/api/crash/latest').then(r=>r.json()).then(j=>{"
     "var d=document.getElementById('crash');"
     "if(!j.valid){d.innerHTML='No crash recorded.';return}"
@@ -103,7 +123,7 @@ static const char index_html[] =
     "function clearCrash(){fetch(B+'/api/crash/latest',{method:'DELETE'})"
     ".then(()=>crashPoll()).catch(()=>{})}"
     "function upload(){var f=document.getElementById('file').files[0];"
-    "if(!f){show('Select a file first',0);return}"
+    "if(!f){show('imsg','Select a file first',0);return}"
     "var bar=document.getElementById('bar'),fill=document.getElementById('fill');"
     "bar.style.display='block';fill.style.width='0%';"
     "var x=new XMLHttpRequest();"
@@ -111,20 +131,21 @@ static const char index_html[] =
     "fill.style.width=Math.round(100*e.loaded/e.total)+'%'};"
     "x.onload=function(){bar.style.display='none';"
     "if(x.status==200){var r=JSON.parse(x.responseText);"
-    "show('Upload OK: '+r.version+' ('+r.bytes+' B)',1)}else{"
-    "show('Upload failed: '+x.responseText,0)}poll()};"
-    "x.onerror=function(){bar.style.display='none';show('Network error',0)};"
-    "x.open('POST',B+'/api/firmware/upload');"
+    "show('imsg','Upload OK: '+r.version+' ('+r.size+' B)',1)}else{"
+    "show('imsg','Upload failed: '+x.responseText,0)}poll()};"
+    "x.onerror=function(){bar.style.display='none';show('imsg','Network error',0)};"
+    "x.open('POST',B+'/api/image/upload');"
     "x.setRequestHeader('Content-Type','application/octet-stream');"
+    "x.setRequestHeader('X-Filename',f.name.replace(/[^\\x20-\\x7e]/g,'_'));"
     "x.send(f)}"
-    "function download(){window.location=B+'/api/firmware/download'}"
-    "function install(){if(!confirm('Install staged firmware? Device will reboot.'))return;"
-    "fetch(B+'/api/firmware/install',{method:'POST'}).then(r=>r.json()).then(j=>{"
-    "if(j.status=='deploying'){show('Installing... device will reboot',1)}else{"
-    "show('Install failed: '+(j.error||JSON.stringify(j)),0)}}).catch(e=>show(e,0))}"
-    "function del(){fetch(B+'/api/firmware/staged',{method:'DELETE'}).then(r=>r.json())"
-    ".then(j=>{show(j.status=='deleted'?'Staged image deleted':'Delete failed: '+(j.error||''),j.status=='deleted');poll()})"
-    ".catch(e=>show(e,0))}"
+    "function download(){window.location=B+'/api/image/download'}"
+    "function install(){if(!confirm('Install uploaded image? Device will reboot.'))return;"
+    "fetch(B+'/api/fwu/install',{method:'POST'}).then(r=>r.json()).then(j=>{"
+    "if(j.status=='deploying'){show('fmsg','Installing... device will reboot',1)}else{"
+    "show('fmsg','Install failed: '+(j.error||JSON.stringify(j)),0)}}).catch(e=>show('fmsg',e,0))}"
+    "function del(){fetch(B+'/api/image',{method:'DELETE'}).then(r=>r.json())"
+    ".then(j=>{show('imsg',j.status=='deleted'?'Image deleted':'Delete failed: '+(j.error||''),j.status=='deleted');poll()})"
+    ".catch(e=>show('imsg',e,0))}"
     "poll();setInterval(poll,5000);crashPoll();"
     "</script></body></html>";
 
@@ -276,6 +297,52 @@ static bool header_expects_continue(const char *header)
     return false;
 }
 
+/** Copy the value of a header (name given lowercase incl. ':') into out.
+ *  @return true if the header was found. */
+static bool header_value(const char *header, const char *name,
+                         char *out, size_t out_size)
+{
+    for (const char *p = header; *p; p++) {
+        const char *h = p, *n = name;
+        while (*n && *h) {
+            char c = (*h >= 'A' && *h <= 'Z') ? *h + 32 : *h;
+            if (c != *n) break;
+            h++; n++;
+        }
+        if (*n == '\0') {
+            while (*h == ' ' || *h == '\t') h++;
+            size_t i = 0;
+            while (*h && *h != '\r' && *h != '\n' && i < out_size - 1) {
+                out[i++] = *h++;
+            }
+            while (i > 0 && (out[i-1] == ' ' || out[i-1] == '\t')) i--;
+            out[i] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Reduce a client-supplied file name to its basename with a safe
+ *  character set (JSON/header friendly). */
+static void sanitize_filename(const char *in, char *out, size_t out_size)
+{
+    const char *base = in;
+    for (const char *p = in; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+
+    size_t i = 0;
+    for (const char *p = base; *p && i < out_size - 1; p++) {
+        char c = *p;
+        bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '.' || c == '_' || c == '-' || c == '+';
+        out[i++] = safe ? c : '_';
+    }
+    out[i] = '\0';
+}
+
 /** Read the request header (through \r\n\r\n) into req_buf.
  *  @return header length, or -1 on stream error / oversized header. */
 static int read_request_header(sConnStream *s)
@@ -304,12 +371,17 @@ static int read_request_header(sConnStream *s)
  * Endpoint handlers
  * -------------------------------------------------------------------------- */
 
-static void handle_upload(struct netconn *conn, sConnStream *s)
+static void handle_image_upload(struct netconn *conn, sConnStream *s)
 {
     uint32_t content_length = parse_content_length(req_buf);
 
+    char raw_name[IMG_STORE_NAME_MAX], name[IMG_STORE_NAME_MAX] = "";
+    if (header_value(req_buf, "x-filename:", raw_name, sizeof(raw_name))) {
+        sanitize_filename(raw_name, name, sizeof(name));
+    }
+
     const char *err;
-    if (!img_upload_begin(content_length, &err)) {
+    if (!ImgStore_UploadBegin(content_length, name, &err)) {
         snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}", err);
         send_json(conn, "409 Conflict", resp_buf);
         return;
@@ -324,7 +396,7 @@ static void handle_upload(struct netconn *conn, sConnStream *s)
     uint32_t remaining = content_length;
     while (remaining > 0) {
         if (cs_fill(s) != ERR_OK) {
-            img_upload_abort("Connection lost");
+            ImgStore_UploadAbort("Connection lost");
             send_json(conn, "408 Request Timeout",
                       "{\"error\":\"connection lost during upload\"}");
             return;
@@ -333,7 +405,7 @@ static void handle_upload(struct netconn *conn, sConnStream *s)
         uint32_t n = (uint32_t)(s->len - s->off);
         if (n > remaining) n = remaining;
 
-        if (!img_upload_write((uint8_t *)s->data + s->off, n)) {
+        if (!ImgStore_UploadWrite((uint8_t *)s->data + s->off, n)) {
             send_json(conn, "500 Internal Server Error",
                       "{\"error\":\"flash write error\"}");
             return;
@@ -342,12 +414,14 @@ static void handle_upload(struct netconn *conn, sConnStream *s)
         remaining -= n;
     }
 
-    const image_state_t *st = image_transfer_get_status();
-    if (img_upload_finish()) {
-        TRice("FWU: staged %u B\n", (unsigned)st->staged.blob_size);
+    const sImageStoreState *st = ImgStore_GetState();
+    if (ImgStore_UploadFinish()) {
+        TRice("IMG: stored %u B\n", (unsigned)st->blob.blob_size);
         snprintf(resp_buf, sizeof(resp_buf),
-                 "{\"status\":\"staged\",\"bytes\":%lu,\"version\":\"%s\"}",
-                 (unsigned long)st->staged.blob_size, st->staged.version_str);
+                 "{\"status\":\"stored\",\"name\":\"%s\","
+                 "\"size\":%lu,\"version\":\"%s\"}",
+                 st->name, (unsigned long)st->blob.blob_size,
+                 st->blob.version_str);
         send_json(conn, "200 OK", resp_buf);
     } else {
         snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}",
@@ -356,27 +430,28 @@ static void handle_upload(struct netconn *conn, sConnStream *s)
     }
 }
 
-static void handle_download(struct netconn *conn)
+static void handle_image_download(struct netconn *conn)
 {
-    const image_state_t *st = image_transfer_get_status();
+    const sImageStoreState *st = ImgStore_GetState();
 
-    if (st->status != IMG_STATUS_STAGED || !st->staged.valid) {
+    if (st->status != IMG_STORE_READY || !st->blob.valid) {
         send_body(conn, "404 Not Found", "text/plain",
-                  "No staged firmware available for download\r\n");
+                  "No image available for download\r\n");
         return;
     }
 
-    img_download_begin();
+    ImgStore_DownloadBegin();
 
-    uint32_t total = st->staged.blob_size;
-    char hdr[192];
+    uint32_t total = st->blob.blob_size;
+    char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/octet-stream\r\n"
         "Content-Length: %lu\r\n"
-        "Content-Disposition: attachment; filename=\"firmware.pnfw\"\r\n"
+        "Content-Disposition: attachment; filename=\"%s\"\r\n"
         "Connection: close\r\n\r\n",
-        (unsigned long)total);
+        (unsigned long)total,
+        st->name[0] != '\0' ? st->name : "image.pnfw");
     send_all(conn, hdr, hlen);
 
     uint8_t buf[DOWNLOAD_CHUNK_SIZE];
@@ -384,37 +459,91 @@ static void handle_download(struct netconn *conn)
         uint32_t n = total - off;
         if (n > DOWNLOAD_CHUNK_SIZE) n = DOWNLOAD_CHUNK_SIZE;
 
-        if (!img_read_staged(off, buf, n)) {
-            img_download_end(false, "Flash read error");
+        if (!ImgStore_Read(off, buf, n)) {
+            ImgStore_DownloadEnd(false, "Flash read error");
             return;
         }
         if (!send_all(conn, buf, n)) {
-            img_download_end(false, "TCP write error");
+            ImgStore_DownloadEnd(false, "TCP write error");
             return;
         }
     }
 
-    img_download_end(true, NULL);
+    ImgStore_DownloadEnd(true, NULL);
 }
 
-static void handle_status(struct netconn *conn)
+static void handle_image_info(struct netconn *conn)
 {
-    const image_state_t *st = image_transfer_get_status();
+    const sImageStoreState *st = ImgStore_GetState();
 
     const char *status_str;
     switch (st->status) {
-        case IMG_STATUS_IDLE:        status_str = "idle";        break;
-        case IMG_STATUS_UPLOADING:   status_str = "uploading";   break;
-        case IMG_STATUS_STAGED:      status_str = "staged";      break;
-        case IMG_STATUS_DOWNLOADING: status_str = "downloading"; break;
-        case IMG_STATUS_ERROR:       status_str = "error";       break;
-        default:                     status_str = "unknown";     break;
+        case IMG_STORE_EMPTY:       status_str = "empty";       break;
+        case IMG_STORE_UPLOADING:   status_str = "uploading";   break;
+        case IMG_STORE_READY:       status_str = "ready";       break;
+        case IMG_STORE_DOWNLOADING: status_str = "downloading"; break;
+        case IMG_STORE_ERROR:       status_str = "error";       break;
+        default:                    status_str = "unknown";     break;
     }
 
     uint32_t progress_pct = 0;
     if (st->total_bytes > 0)
         progress_pct = (st->bytes_transferred * 100) / st->total_bytes;
 
+    char version_field[32];
+    if (st->blob.valid) {
+        snprintf(version_field, sizeof(version_field), "\"%s\"",
+                 st->blob.version_str);
+    } else {
+        strcpy(version_field, "null");
+    }
+
+    snprintf(resp_buf, sizeof(resp_buf),
+        "{\"status\":\"%s\","
+        "\"present\":%s,"
+        "\"name\":\"%s\","
+        "\"version\":%s,"
+        "\"size\":%lu,"
+        "\"image_size\":%lu,"
+        "\"crc32\":\"0x%08lX\","
+        "\"bytes_transferred\":%lu,"
+        "\"total_bytes\":%lu,"
+        "\"progress\":%lu,"
+        "\"error\":\"%s\"}",
+        status_str,
+        st->blob.valid ? "true" : "false",
+        st->name,
+        version_field,
+        (unsigned long)st->blob.blob_size,
+        (unsigned long)st->blob.image_size,
+        (unsigned long)st->blob.blob_crc32,
+        (unsigned long)st->bytes_transferred,
+        (unsigned long)st->total_bytes,
+        (unsigned long)progress_pct,
+        st->error_message);
+
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_image_delete(struct netconn *conn)
+{
+    switch (ImgStore_Delete()) {
+    case IMG_STORE_OK:
+        send_json(conn, "200 OK", "{\"status\":\"deleted\"}");
+        break;
+    case IMG_STORE_BUSY:
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"image in use (transfer or FWU)\"}");
+        break;
+    default:
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"flash erase failed\"}");
+        break;
+    }
+}
+
+static void handle_fwu_status(struct netconn *conn)
+{
     char running_ver[24] = {0};
     const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
     if (app->magic == APP_INFO_MAGIC) {
@@ -427,69 +556,52 @@ static void handle_status(struct netconn *conn)
     uint8_t  attempts    = BootStatus_AttemptsRemaining();
     uint32_t last_result = bs_ok ? bs.last_fwu_result : (uint32_t)FWU_NO_RESULT;
 
-    char staged_field[32], golden_field[32];
-    if (st->staged.valid) {
-        snprintf(staged_field, sizeof(staged_field), "\"%s\"",
-                 st->staged.version_str);
-    } else {
-        strcpy(staged_field, "null");
-    }
-    if (st->golden.valid) {
+    const sBlobInfo *golden = FwuCtl_GetGolden();
+    char golden_field[32];
+    if (golden->valid) {
         snprintf(golden_field, sizeof(golden_field), "\"%s\"",
-                 st->golden.version_str);
+                 golden->version_str);
     } else {
         strcpy(golden_field, "null");
     }
 
     snprintf(resp_buf, sizeof(resp_buf),
-        "{\"status\":\"%s\","
-        "\"running_version\":\"%s\","
-        "\"staged_version\":%s,"
-        "\"golden_version\":%s,"
+        "{\"running_version\":\"%s\","
         "\"confirmed\":%s,"
         "\"attempts_remaining\":%u,"
         "\"last_fwu_result\":%lu,"
+        "\"golden_version\":%s,"
         "\"promote_pending\":%s,"
-        "\"bytes_transferred\":%lu,"
-        "\"total_bytes\":%lu,"
-        "\"progress\":%lu,"
-        "\"reset_cause\":\"0x%08lX\","
-        "\"error\":\"%s\"}",
-        status_str,
+        "\"reset_cause\":\"0x%08lX\"}",
         running_ver,
-        staged_field,
-        golden_field,
         unconfirmed ? "false" : "true",
         (unsigned)attempts,
         (unsigned long)last_result,
-        image_transfer_promote_pending() ? "true" : "false",
-        (unsigned long)st->bytes_transferred,
-        (unsigned long)st->total_bytes,
-        (unsigned long)progress_pct,
-        (unsigned long)System_GetResetCause(),
-        st->error_message);
+        golden_field,
+        FwuCtl_PromotePending() ? "true" : "false",
+        (unsigned long)System_GetResetCause());
 
     send_json(conn, "200 OK", resp_buf);
 }
 
-static void handle_install(struct netconn *conn)
+static void handle_fwu_install(struct netconn *conn)
 {
-    switch (img_install_request()) {
-    case IMG_CTL_OK: {
-        const image_state_t *st = image_transfer_get_status();
+    switch (FwuCtl_RequestInstall()) {
+    case FWU_CTL_OK: {
+        const sImageStoreState *st = ImgStore_GetState();
         TRice("FWU: install requested, rebooting\n");
         snprintf(resp_buf, sizeof(resp_buf),
             "{\"status\":\"deploying\","
             "\"message\":\"Device will reboot in 2 seconds\","
-            "\"version\":\"%s\"}", st->staged.version_str);
+            "\"version\":\"%s\"}", st->blob.version_str);
         send_json(conn, "200 OK", resp_buf);
         break;
     }
-    case IMG_CTL_NO_IMAGE:
+    case FWU_CTL_NO_IMAGE:
         send_json(conn, "409 Conflict",
-                  "{\"error\":\"no staged firmware available\"}");
+                  "{\"error\":\"no image available\"}");
         break;
-    case IMG_CTL_BUSY:
+    case FWU_CTL_BUSY:
         send_json(conn, "409 Conflict",
                   "{\"error\":\"golden promotion in progress\"}");
         break;
@@ -500,18 +612,18 @@ static void handle_install(struct netconn *conn)
     }
 }
 
-static void handle_confirm(struct netconn *conn)
+static void handle_fwu_confirm(struct netconn *conn)
 {
     bool promote;
-    switch (img_confirm(&promote)) {
-    case IMG_CTL_OK:
+    switch (FwuCtl_Confirm(&promote)) {
+    case FWU_CTL_OK:
         TRice("FWU: confirmed (promote=%d)\n", (int)promote);
         snprintf(resp_buf, sizeof(resp_buf),
                  "{\"status\":\"confirmed\",\"promote\":%s}",
                  promote ? "true" : "false");
         send_json(conn, "200 OK", resp_buf);
         break;
-    case IMG_CTL_ALREADY:
+    case FWU_CTL_ALREADY:
         send_json(conn, "200 OK", "{\"status\":\"already_confirmed\"}");
         break;
     default:
@@ -521,26 +633,9 @@ static void handle_confirm(struct netconn *conn)
     }
 }
 
-static void handle_delete(struct netconn *conn)
+static void handle_fwu_verify(struct netconn *conn)
 {
-    switch (img_delete()) {
-    case IMG_CTL_OK:
-        send_json(conn, "200 OK", "{\"status\":\"deleted\"}");
-        break;
-    case IMG_CTL_BUSY:
-        send_json(conn, "409 Conflict",
-                  "{\"error\":\"transfer or promotion in progress\"}");
-        break;
-    default:
-        send_json(conn, "500 Internal Server Error",
-                  "{\"error\":\"flash erase failed\"}");
-        break;
-    }
-}
-
-static void handle_verify(struct netconn *conn)
-{
-    eFwuRes res = img_verify_running();
+    eFwuRes res = FwuCtl_VerifyRunning();
 
     const char *reason = NULL;
     switch (res) {
@@ -653,20 +748,22 @@ static void handle_connection(struct netconn *conn)
         return;
     }
 
-    if (route_is("POST /api/firmware/upload")) {
-        handle_upload(conn, &stream);
-    } else if (route_is("GET /api/firmware/download")) {
-        handle_download(conn);
-    } else if (route_is("POST /api/firmware/install")) {
-        handle_install(conn);
-    } else if (route_is("POST /api/firmware/confirm")) {
-        handle_confirm(conn);
-    } else if (route_is("GET /api/firmware/verify")) {
-        handle_verify(conn);
-    } else if (route_is("DELETE /api/firmware/staged")) {
-        handle_delete(conn);
-    } else if (route_is("GET /api/firmware/status")) {
-        handle_status(conn);
+    if (route_is("POST /api/image/upload")) {
+        handle_image_upload(conn, &stream);
+    } else if (route_is("GET /api/image/info")) {
+        handle_image_info(conn);
+    } else if (route_is("GET /api/image/download")) {
+        handle_image_download(conn);
+    } else if (route_is("DELETE /api/image ")) {
+        handle_image_delete(conn);
+    } else if (route_is("POST /api/fwu/install")) {
+        handle_fwu_install(conn);
+    } else if (route_is("POST /api/fwu/confirm")) {
+        handle_fwu_confirm(conn);
+    } else if (route_is("GET /api/fwu/verify")) {
+        handle_fwu_verify(conn);
+    } else if (route_is("GET /api/fwu/status")) {
+        handle_fwu_status(conn);
     } else if (route_is("GET /api/crash/latest")) {
         handle_crash_get(conn);
     } else if (route_is("DELETE /api/crash/latest")) {
@@ -732,6 +829,7 @@ static void http_task(void *arg)
 
 void http_server_init(void)
 {
-    image_transfer_init();
+    ImgStore_Init();
+    FwuCtl_Init();
     osThreadNew(http_task, NULL, &s_httpAttr);
 }
