@@ -407,6 +407,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Data access violation\\n"
 	},
+	"3282": {
+		"Type": "TRice",
+		"Strg": "IMG: CRC verified OK\\n"
+	},
 	"3298": {
 		"Type": "TRICE0",
 		"Strg": "========================================\\n\\n"
@@ -743,6 +747,10 @@
 		"Type": "TRICE",
 		"Strg": "FWU: Erasing %u sectors...\\n"
 	},
+	"5401": {
+		"Type": "TRice",
+		"Strg": "IMG: CRC bypass — accepting blob anyway\\n"
+	},
 	"5410": {
 		"Type": "TRice",
 		"Strg": "FWU: tcp_recved malloc FAIL\\n"
@@ -1059,6 +1067,10 @@
 		"Type": "trice",
 		"Strg": "\u003e\u003e\u003e Backtrace:\\n"
 	},
+	"6979": {
+		"Type": "TRice",
+		"Strg": "WDT: TIM14 overflow — starving detected, recovering\\n"
+	},
 	"6988": {
 		"Type": "TRice",
 		"Strg": "  - Precise data bus error\\n"
@@ -1254,6 +1266,10 @@
 	"7718": {
 		"Type": "TRice",
 		"Strg": " ChgLim=%d.%01dV DsgLim=%d.%01dV"
+	},
+	"7734": {
+		"Type": "TRiceS",
+		"Strg": "err:Fault in task: %s\\n"
 	},
 	"7752": {
 		"Type": "TRICE",

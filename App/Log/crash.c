@@ -53,7 +53,9 @@ static const char * const s_crashTypeStr[] = {
     "BUS FAULT",
     "USAGE FAULT",
     "MEM MANAGE",
-    "SW WATCHDOG TRIGGERED"
+    "SW WATCHDOG TRIGGERED",
+    "STACK OVERFLOW",
+    "ASSERT FAILED"
 };
 
 static const char * const s_taskStateStr[] = {
@@ -284,8 +286,9 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
         log.bt_addr[i] = (uint32_t)bt[i].address;
     }
 
-    /* Task name (for watchdog faults) */
-    if (type == CRASH_SW_WATCHDOG) {
+    /* Task name (current task is the offender for these types) */
+    if (type == CRASH_SW_WATCHDOG || type == CRASH_STACK_OVERFLOW ||
+        type == CRASH_ASSERT) {
         const char *name = pcTaskGetName(NULL);
         if (name) {
             strncpy(log.task_name, name, sizeof(log.task_name) - 1);
@@ -346,8 +349,9 @@ void Crash_GenerateReport(eCrashType type)
     captureRegs(&regs);
     flushTrice();
 
-    if (type == CRASH_SW_WATCHDOG) {
-        TRiceS("err:Watchdog in task: %s\n", pcTaskGetName(NULL));
+    if (type == CRASH_SW_WATCHDOG || type == CRASH_STACK_OVERFLOW ||
+        type == CRASH_ASSERT) {
+        TRiceS("err:Fault in task: %s\n", pcTaskGetName(NULL));
     }
 
     printRegisters(type, &regs);

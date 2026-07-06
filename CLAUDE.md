@@ -397,8 +397,14 @@ Shared code compiled into both bootloader and application.
 | defaultTask | 1024 words | osPriorityNormal (24) | Init, heartbeat (1s), IWDG kick (100ms), reboot/promotion jobs, button faults |
 | http | 1024 words | osPriorityNormal (24) | HTTP server (netconn API, sequential connections) |
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
-| tcpip_thread | 2048 bytes | 24 | lwIP TCP/IP processing |
-| EthIf | 1024 bytes | 3 | Ethernet frame receive |
+| tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
+| tcpip_thread | 4096 bytes | 24 | lwIP TCP/IP processing |
+| EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
+
+Stack overflow checking is ON (`configCHECK_FOR_STACK_OVERFLOW=2`):
+overflow → crash report (`CRASH_STACK_OVERFLOW`) + reset. `configASSERT`
+also records a crash report (`CRASH_ASSERT`) + resets instead of silently
+spinning with interrupts masked.
 
 ## HTTP API
 
@@ -458,7 +464,7 @@ TRice("Message: %d\n", value);
 - **Bootloader must fit in 32KB** — no FreeRTOS, no lwIP, no Trice. Currently ~23KB. Monitor size.
 - **Application starts at 0x08008000** — VTOR relocation via `APPLICATION_BUILD` define in `system_stm32f4xx.c`
 - **BL API at 0x08007F00** — fixed address, function pointers must not use BL globals
-- **tcpip_thread stack is only 2048 bytes** — heap-allocate large structs
+- **tcpip_thread stack is 4096 bytes** — still heap-allocate large structs
 - **IWDG must be kicked every 16.4s** — `KickIwdg()` in default task + upload/scan/promotion paths
 - **NOR flash bit-clearing** — boot flags can be modified without sector erase (1→0 only)
 - **FWU keys are build+BL only** — never store keys in ext flash, never link `secrets.c` into the application, never expose key material through the BL API

@@ -72,7 +72,7 @@
 /*----- Value in opt.h for LWIP_NETIF_LINK_CALLBACK: 0 -----*/
 #define LWIP_NETIF_LINK_CALLBACK 1
 /*----- Value in opt.h for TCPIP_THREAD_STACKSIZE: 0 -----*/
-#define TCPIP_THREAD_STACKSIZE 2048
+#define TCPIP_THREAD_STACKSIZE 4096
 /*----- Value in opt.h for TCPIP_THREAD_PRIO: 1 -----*/
 #define TCPIP_THREAD_PRIO 24
 /*----- Value in opt.h for TCPIP_MBOX_SIZE: 0 -----*/
@@ -138,9 +138,31 @@
 #define LWIP_SO_RCVTIMEO          1
 #define LWIP_SO_SNDTIMEO          1
 
-/* Increase timeout pool for mDNS + MQTT timers */
-#undef MEMP_NUM_SYS_TIMEOUT
-#define MEMP_NUM_SYS_TIMEOUT      12
+/* More heap + pool slots for concurrent HTTP connections (fits within
+ * 128 KB SRAM — 20 KB heap with ~7 KB headroom). */
+#undef  MEM_SIZE
+#define MEM_SIZE                  20480
+#undef  MEMP_NUM_TCP_PCB
+#define MEMP_NUM_TCP_PCB          8
+#undef  MEMP_NUM_NETCONN
+#define MEMP_NUM_NETCONN          8
+#undef  MEMP_NUM_TCP_SEG
+#define MEMP_NUM_TCP_SEG          24
+#undef  MEMP_NUM_SYS_TIMEOUT
+#define MEMP_NUM_SYS_TIMEOUT      16
+
+/* Keep the complete index_html (~4.3 KB) in the TCP send buffer so
+ * that netconn_write can finish the whole response in one go.
+ * 6144 bytes = ~4× the default (1460×2), fitting 4234-byte HTML +
+ * headers with ~1700 bytes headroom. */
+#undef  TCP_SND_BUF
+#define TCP_SND_BUF               6144
+#undef  TCP_SND_QUEUELEN
+#define TCP_SND_QUEUELEN          18
+#undef  TCP_SNDLOWAT
+#define TCP_SNDLOWAT              3072
+#undef  TCP_SNDQUEUELOWAT
+#define TCP_SNDQUEUELOWAT         9
 
 /* USER CODE END 1 */
 

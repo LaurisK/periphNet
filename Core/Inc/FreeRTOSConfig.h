@@ -155,7 +155,11 @@ See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html. */
 /* Normal assert() semantics without relying on the provision of an assert.h
 header file. */
 /* USER CODE BEGIN 1 */
-#define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
+/* A silent taskDISABLE_INTERRUPTS()+for(;;) masks TIM14/SysTick and leaves
+   only a diagnostics-free IWDG reset ~33 s later. Record a crash report
+   (Trice + ext flash) and reset immediately instead. */
+extern void App_AssertFailed(void);
+#define configASSERT( x ) if ((x) == 0) { App_AssertFailed(); }
 /* USER CODE END 1 */
 
 /* Definitions that map the FreeRTOS port interrupt handlers to their CMSIS
@@ -169,6 +173,9 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+/* Detect task stack overflows (method 2: watermark pattern check on context
+   switch) — an EthIf overflow corrupted TxPktSemaphore silently (2026-07-06). */
+#define configCHECK_FOR_STACK_OVERFLOW 2
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

@@ -77,6 +77,9 @@ void App_DefaultTaskEntry(void)
     /* Reconfigure buttons as polled input with pull-up (active-low) */
     App_GPIO_InitButtons();
 
+    /* LED1 boot indicator — rapid blink for ~5 s */
+    uint32_t ledFastCtr = 50U;
+
     /* Start trice USB CDC output (available immediately, no network needed) */
     Trice_UsbInit();
 
@@ -113,6 +116,13 @@ void App_DefaultTaskEntry(void)
     for (uint32_t t = 0; t < 300U; t++) {
         vTaskDelay(pdMS_TO_TICKS(100U));
         KickIwdg();
+
+        /* Rapid LED blink during boot */
+        if (ledFastCtr > 0U) {
+            ledFastCtr--;
+            HAL_GPIO_TogglePin(gpio_led1_GPIO_Port, gpio_led1_Pin);
+        }
+
         if ((t % 50U) == 49U) {
             TRice("  t=%us flags=0x%02X link=%u ip=0x%08X\n",
                   (t + 1U) / 10U, gnetif.flags,
@@ -138,14 +148,30 @@ void App_DefaultTaskEntry(void)
     Trice_UdpInit();
     TRice("Trice UDP started on port %u\n", TRICE_UDP_PORT);
 
-    uint32_t btnDebounce[3] = {0U, 0U, 0U};
-    uint32_t heartbeatTick  = 0U;
+    uint32_t btnDebounce[3]  = {0U, 0U, 0U};
+    uint32_t heartbeatTick   = 0U;
+    uint32_t ledPulseCounter = 0U;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100U));
 
         /* Feed watchdog every 100 ms */
         KickIwdg();
+
+        /* ---- LED1 status indication ---- */
+        if (ledFastCtr > 0U) {
+            ledFastCtr--;
+            HAL_GPIO_TogglePin(gpio_led1_GPIO_Port, gpio_led1_Pin);
+        } else {
+            ledPulseCounter = (ledPulseCounter + 1U) % 14U;
+            if (ledPulseCounter == 0U) {
+                HAL_GPIO_WritePin(gpio_led1_GPIO_Port, gpio_led1_Pin,
+                                  GPIO_PIN_SET);
+            } else if (ledPulseCounter == 2U) {
+                HAL_GPIO_WritePin(gpio_led1_GPIO_Port, gpio_led1_Pin,
+                                  GPIO_PIN_RESET);
+            }
+        }
 
         /* Reboot for firmware install if requested via HTTP */
         if (FwuCtl_RebootPending()) {

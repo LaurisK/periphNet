@@ -314,9 +314,14 @@ int MX_USART3_Ready(void)
     return (huart3.gState == HAL_UART_STATE_READY);
 }
 
-void HAL_DMA_TxCpltCallback(DMA_HandleTypeDef *hdma)
+/* HAL_DMA_TxCpltCallback is NOT a HAL callback (the DMA driver uses
+ * function pointers, and HAL_UART_Transmit_DMA installs its own), so the
+ * previous hook there never ran and the UART consumer bit never cleared.
+ * The UART TC callback below fires via USART3_IRQn once the DMA transfer
+ * has fully drained to the wire. */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (hdma->Instance == DMA1_Stream3) {
+    if (huart->Instance == USART3) {
         TriceConsumer_Done(TRICE_CONSUMER_UART);
     }
 }

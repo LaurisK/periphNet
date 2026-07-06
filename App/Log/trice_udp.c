@@ -69,7 +69,9 @@ void Trice_UdpInit(void)
 
     osThreadAttr_t attr = {
         .name       = "tudp",
-        .stack_size = 256U * 4U,
+        /* Runs the full lwIP raw TX path (udp_sendto → etharp →
+         * low_level_output) under the core lock — 1 KB is too tight. */
+        .stack_size = 512U * 4U,
         .priority   = (osPriority_t)(osPriorityNormal),
     };
     osThreadNew(Trice_UdpConsumerTask, NULL, &attr);

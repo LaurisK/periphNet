@@ -42,8 +42,14 @@
 /* Time to block waiting for transmissions to finish */
 #define ETHIF_TX_TIMEOUT (2000U)
 /* USER CODE BEGIN OS_THREAD_STACK_SIZE_WITH_RTOS */
-/* Stack size of the interface thread */
-#define INTERFACE_THREAD_STACK_SIZE ( 350 )
+/* Stack size of the interface thread (bytes).
+ * The CubeMX default of 350 is NOT enough: ethernetif_input →
+ * HAL_ETH_ReadData (rx allocate/link callbacks → pbuf_alloc) →
+ * tcpip_input mbox post overflows it under sustained RX traffic.
+ * Proven on-target 2026-07-06: EthIf pushed ≥32 bytes below pxStack,
+ * corrupting TxPktSemaphore (uxItemSize) → configASSERT in
+ * xQueueGiveFromISR from the ETH IRQ → masked-IRQ spin → IWDG reset. */
+#define INTERFACE_THREAD_STACK_SIZE ( 1024 )
 /* USER CODE END OS_THREAD_STACK_SIZE_WITH_RTOS */
 /* Network interface name */
 #define IFNAME0 's'

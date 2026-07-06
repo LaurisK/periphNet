@@ -12,6 +12,8 @@
 
 #include "App/system.h"
 #include "App/Log/crash.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include "trice.h"
 #include "iwdg.h"
 #include "stm32f4xx_hal.h"
@@ -117,4 +119,42 @@ void TIM14_PeriodElapsed_Callback(void)
 TIM_HandleTypeDef *System_GetTIM14Handle(void)
 {
     return &s_htim14;
+}
+
+/* --------------------------------------------------------------------------
+ * Fatal-error handlers (configASSERT / FreeRTOS stack overflow check)
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief configASSERT handler — record a crash report and reset.
+ *
+ * Callable from any context (task, ISR, masked). The reentry guard
+ * prevents recursion if the crash reporter itself trips an assert.
+ */
+void App_AssertFailed(void)
+{
+    static volatile uint8_t s_inAssert = 0U;
+
+    __disable_irq();
+    if (s_inAssert == 0U) {
+        s_inAssert = 1U;
+        Crash_GenerateReport(CRASH_ASSERT);
+    }
+    NVIC_SystemReset();
+}
+
+/**
+ * @brief FreeRTOS stack overflow hook (configCHECK_FOR_STACK_OVERFLOW = 2).
+ *
+ * Runs in PendSV context while pxCurrentTCB is still the offending
+ * task, so the crash report captures the right task name and stacks.
+ */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+
+    __disable_irq();
+    Crash_GenerateReport(CRASH_STACK_OVERFLOW);
+    NVIC_SystemReset();
 }

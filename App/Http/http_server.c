@@ -55,7 +55,7 @@ static const char index_html[] =
     ".info{color:#555;font-size:.9em;margin:6px 0}"
     "pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}"
     "</style></head><body>"
-    "<h1>PeriphNet</h1><div id=ver></div>"
+    "<h1>PeriphNet</h1><div id=ver></div><div id=uptime class=info></div>"
     "<div class=card><h3>Image Management</h3>"
     "<input type=file id=file accept='.pnfw'>"
     "<button class=btn-up onclick=upload()>Upload</button>"
@@ -96,6 +96,12 @@ static const char index_html[] =
     "function pollFwu(){fetch(B+'/api/fwu/status').then(r=>r.json()).then(j=>{"
     "document.getElementById('ver').textContent='Running: '+j.running_version"
     "+(j.confirmed?' (confirmed)':' UNCONFIRMED, '+j.attempts_remaining+' boots left');"
+    "var u=j.uptime,s='';"
+    "if(u>=86400){s+=Math.floor(u/86400)+'d ';u%=86400}"
+    "if(u>=3600){s+=Math.floor(u/3600)+'h ';u%=3600}"
+    "if(u>=60){s+=Math.floor(u/60)+'m ';u%=60}"
+    "s+=u+'s';"
+    "document.getElementById('uptime').textContent='Uptime: '+s;"
     "var t='';"
     "if(j.golden_version)t='Golden: '+j.golden_version;"
     "if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;"
@@ -565,11 +571,14 @@ static void handle_fwu_status(struct netconn *conn)
         strcpy(golden_field, "null");
     }
 
+    uint32_t uptime = HAL_GetTick() / 1000U;
+
     snprintf(resp_buf, sizeof(resp_buf),
         "{\"running_version\":\"%s\","
         "\"confirmed\":%s,"
         "\"attempts_remaining\":%u,"
         "\"last_fwu_result\":%lu,"
+        "\"uptime\":%lu,"
         "\"golden_version\":%s,"
         "\"promote_pending\":%s,"
         "\"reset_cause\":\"0x%08lX\"}",
@@ -577,6 +586,7 @@ static void handle_fwu_status(struct netconn *conn)
         unconfirmed ? "false" : "true",
         (unsigned)attempts,
         (unsigned long)last_result,
+        (unsigned long)uptime,
         golden_field,
         FwuCtl_PromotePending() ? "true" : "false",
         (unsigned long)System_GetResetCause());
