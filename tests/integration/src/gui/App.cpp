@@ -1,8 +1,12 @@
 #include "gui/App.h"
+#include "core/ModbusTests.h"
+#include "core/MqttTests.h"
 
 App::App()
 {
     registerAllTests(testRunner);
+    registerModbusTests(testRunner);
+    registerMqttTests(testRunner);
 }
 
 App::~App()

@@ -28,6 +28,54 @@ typedef enum {
 } eModbusErr;
 
 /* --------------------------------------------------------------------------
+ * Port selection (integration-test support)
+ * -------------------------------------------------------------------------- */
+
+typedef enum {
+    MODBUS_PORT_UART2    = 0,  /* production RS485 on PD5/PD6/PD7 */
+    MODBUS_PORT_UART6    = 1,  /* test port — deferred until schematic review */
+    MODBUS_PORT_DISABLED = 2,  /* no physical bus; inject-only mode */
+} eModbusPort;
+
+/**
+ * @brief  Select the active Modbus port.  Refused while the poller has the
+ *         UART initialised (stop the poller first).  MODBUS_PORT_UART6 is
+ *         not wired up yet and always returns -1.
+ * @return 0 on success, -1 on failure (refusal is logged via Trice)
+ */
+int Modbus_SetPort(eModbusPort port);
+
+eModbusPort Modbus_GetPort(void);
+
+/**
+ * @brief  Enable/disable raw TX/RX frame monitoring — logs
+ *         "Modbus TX[N]: .." / "Modbus RX[N]: ..".  Off by default.
+ */
+void Modbus_SetMonitor(int enable);
+int  Modbus_GetMonitor(void);
+
+/**
+ * @brief  Validate and decode a raw Modbus response frame submitted via the
+ *         command interface (synchronous — no bus, no poller involvement).
+ *
+ *         Checks length and CRC, logs the contract strings
+ *         "Modbus inject: N bytes" / "Modbus inject: ERR_CRC" /
+ *         "Modbus inject: ERR_SHORT", and decodes FC 0x03/0x04 register
+ *         payloads.  The slave address is NOT validated here (slave
+ *         validation point is still an open design decision).
+ *
+ * @param  frame     Complete frame including trailing CRC
+ * @param  len       Frame length in bytes
+ * @param  regs      Output buffer for decoded register values
+ * @param  maxRegs   Capacity of regs
+ * @param  regCount  Number of decoded registers (output)
+ * @return MODBUS_OK or error code
+ */
+eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
+                                       uint16_t *regs, uint16_t maxRegs,
+                                       uint16_t *regCount);
+
+/* --------------------------------------------------------------------------
  * Init / deinit
  * -------------------------------------------------------------------------- */
 

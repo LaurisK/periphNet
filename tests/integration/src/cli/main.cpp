@@ -2,6 +2,8 @@
 #include "core/Device.h"
 #include "core/TestRunner.h"
 #include "core/TestCases.h"
+#include "core/ModbusTests.h"
+#include "core/MqttTests.h"
 
 #include <cstdio>
 #include <iostream>
@@ -12,6 +14,8 @@ int main(int argc, char* argv[])
 
     TestRunner runner;
     registerAllTests(runner);
+    registerModbusTests(runner);
+    registerMqttTests(runner);
 
     if (config.listTests) {
         std::printf("Available tests:\n");

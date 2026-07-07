@@ -75,6 +75,16 @@ void SolisPoller_SetSlaveAddr(uint8_t addr);
 int SolisPoller_WriteRegister(uint16_t reg, uint16_t value);
 
 /**
+ * @brief  Feed a decoded register block into the data cache as if it had
+ *         been polled from the bus (integration-test injection path).
+ *         The poll transaction is identified by register count:
+ *         47 = PV/inverter, 20 = battery/load, 2 = meter power.
+ *         Updates the cache and publishes telemetry synchronously.
+ * @return 0 if mapped, -1 if the count matches no known transaction
+ */
+int SolisPoller_InjectRegisters(const uint16_t *regs, uint16_t count);
+
+/**
  * @brief  Log current data to Trice output.
  */
 void SolisPoller_LogData(void);

@@ -8,14 +8,17 @@
 
 #include "App/Mqtt/mqtt_bridge.h"
 #include "App/Data/telemetry.h"
+#include "App/Modbus/solis_poller.h"
 #include "cmsis_os.h"
 #include "trice.h"
 
 #include "lwip/apps/mqtt.h"
 #include "lwip/ip_addr.h"
 #include "lwip/dns.h"
+#include "lwip/tcpip.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -43,6 +46,63 @@ static char s_topic[TOPIC_MAX];
 static char s_payload[PAYLOAD_MAX];
 
 /* --------------------------------------------------------------------------
+ * Integration-test support state
+ *
+ * Trice is forbidden in tcpip_thread, so everything observed in the
+ * incoming callbacks is recorded here and logged from mqttTask
+ * (service_test_hooks).
+ * -------------------------------------------------------------------------- */
+
+static volatile int s_monitorEnabled;
+static volatile int s_publishNow;
+
+/* Last incoming topic (written in publish_cb, consumed in data_cb) */
+static char s_inTopic[TOPIC_MAX];
+
+/* Deferred "MQTT sub: topic = payload" monitor log */
+static struct {
+    char         topic[TOPIC_MAX];
+    char         payload[64];
+    volatile int ready;
+} s_subLog;
+
+/* Deferred "Modbus write: reg N = V" log */
+static struct {
+    uint16_t     reg;
+    uint16_t     val;
+    int          res;
+    volatile int ready;
+} s_writeLog;
+
+/* Injected message; processed via tcpip_callback so the real incoming
+ * callbacks run in their native tcpip_thread context */
+#define INJECT_IDLE      0
+#define INJECT_REQUESTED 1
+#define INJECT_ISSUED    2
+#define INJECT_DONE      3
+
+static struct {
+    char         topic[TOPIC_MAX];
+    char         payload[192];
+    uint16_t     len;
+    volatile int state;
+} s_inject;
+
+/* Writable register map: topic suffix (after "prefix/") → wire register */
+typedef struct {
+    const char *suffix;
+    uint16_t    reg;
+    uint16_t    min;
+    uint16_t    max;
+} sSetTopicMap;
+
+static const sSetTopicMap s_setTopics[] = {
+    { "overdischarge_soc/set", 3010,  5,  40 },
+    { "max_charge_soc/set",    3009, 70, 100 },
+    { NULL, 0, 0, 0 }
+};
+
+/* --------------------------------------------------------------------------
  * MQTT callbacks (run in tcpip_thread — no Trice!)
  * -------------------------------------------------------------------------- */
 
@@ -58,9 +118,10 @@ static void mqtt_incoming_publish_cb(void *arg, const char *topic,
                                       u32_t tot_len)
 {
     (void)arg;
-    (void)topic;
     (void)tot_len;
-    /* We only subscribe to .../set topics — handled in data callback */
+
+    strncpy(s_inTopic, topic, sizeof(s_inTopic) - 1);
+    s_inTopic[sizeof(s_inTopic) - 1] = '\0';
 }
 
 static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
@@ -69,17 +130,55 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     (void)arg;
     (void)flags;
 
-    /* Parse incoming set commands.
-     * For now just queue a write to the Solis poller.
-     * Topic already checked in publish_cb — this is the payload. */
-    if (len > 0 && len < 16) {
-        char buf[16];
-        memcpy(buf, data, len);
-        buf[len] = '\0';
-        /* Value is the register value as a plain integer string */
-        /* TODO: map topic to register address + parse value */
-        (void)buf;
+    char buf[64];
+    if (len >= sizeof(buf)) {
+        len = sizeof(buf) - 1;
     }
+    memcpy(buf, data, len);
+    buf[len] = '\0';
+
+    if (s_monitorEnabled && !s_subLog.ready) {
+        strcpy(s_subLog.topic, s_inTopic);
+        strcpy(s_subLog.payload, buf);
+        s_subLog.ready = 1;
+    }
+
+    /* Map "prefix/<suffix>/set" onto a writable Solis register */
+    size_t prefixLen = strlen(s_cfg.prefix);
+    if (strncmp(s_inTopic, s_cfg.prefix, prefixLen) != 0 ||
+        s_inTopic[prefixLen] != '/') {
+        return;
+    }
+    const char *suffix = s_inTopic + prefixLen + 1;
+
+    for (const sSetTopicMap *m = s_setTopics; m->suffix != NULL; m++) {
+        if (strcmp(suffix, m->suffix) == 0) {
+            int val = atoi(buf);
+            if (val >= (int)m->min && val <= (int)m->max &&
+                !s_writeLog.ready) {
+                s_writeLog.reg   = m->reg;
+                s_writeLog.val   = (uint16_t)val;
+                s_writeLog.res   = SolisPoller_WriteRegister(m->reg,
+                                                             (uint16_t)val);
+                s_writeLog.ready = 1;
+            }
+            return;
+        }
+    }
+}
+
+/* Runs in tcpip_thread — replays an injected message through the real
+ * incoming callbacks */
+static void mqtt_inject_cb(void *ctx)
+{
+    (void)ctx;
+    if (s_inject.state != INJECT_ISSUED) {
+        return;
+    }
+    mqtt_incoming_publish_cb(NULL, s_inject.topic, s_inject.len);
+    mqtt_incoming_data_cb(NULL, (const u8_t *)s_inject.payload,
+                          s_inject.len, MQTT_DATA_FLAG_LAST);
+    s_inject.state = INJECT_DONE;
 }
 
 /* --------------------------------------------------------------------------
@@ -88,9 +187,18 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
 
 static void publish(const char *suffix, const char *value)
 {
+    snprintf(s_topic, sizeof(s_topic), "%s/%s", s_cfg.prefix, suffix);
+
+    /* Monitor logs even without a broker so the bridge output is
+     * observable in broker-less (CI) testing.  Runs in mqttTask only. */
+    if (s_monitorEnabled) {
+        static char mon[100];
+        snprintf(mon, sizeof(mon), "%s = %s", s_topic, value);
+        TRiceS("MQTT pub: %s\n", mon);
+    }
+
     if (!s_connected || s_client == NULL) return;
 
-    snprintf(s_topic, sizeof(s_topic), "%s/%s", s_cfg.prefix, suffix);
     mqtt_publish(s_client, s_topic, value, strlen(value),
                  0 /* QoS 0 */, 1 /* retain */, NULL, NULL);
 }
@@ -257,6 +365,49 @@ static void publish_all_values(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Test-hook servicing — runs in mqttTask (Trice safe).  Also called inside
+ * the reconnect backoff wait so injection/publish-now stay responsive with
+ * no broker present (backoff can reach 60 s).
+ * -------------------------------------------------------------------------- */
+
+static void service_test_hooks(void)
+{
+    if (s_inject.state == INJECT_REQUESTED) {
+        s_inject.state = INJECT_ISSUED;
+        if (tcpip_callback(mqtt_inject_cb, NULL) != ERR_OK) {
+            s_inject.state = INJECT_IDLE;
+        }
+    }
+    if (s_inject.state == INJECT_DONE) {
+        TRiceS("MQTT inject: %s\n", s_inject.topic);
+        s_inject.state = INJECT_IDLE;
+    }
+
+    if (s_subLog.ready) {
+        static char line[100];
+        snprintf(line, sizeof(line), "%s = %s",
+                 s_subLog.topic, s_subLog.payload);
+        TRiceS("MQTT sub: %s\n", line);
+        s_subLog.ready = 0;
+    }
+
+    if (s_writeLog.ready) {
+        if (s_writeLog.res == 0) {
+            TRice("Modbus write: reg %u = %u\n",
+                  s_writeLog.reg, s_writeLog.val);
+        } else {
+            TRice("Modbus write: reg %u rejected\n", s_writeLog.reg);
+        }
+        s_writeLog.ready = 0;
+    }
+
+    if (s_publishNow) {
+        s_publishNow = 0;
+        publish_all_values();
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Connect to broker
  * -------------------------------------------------------------------------- */
 
@@ -309,6 +460,8 @@ static void mqttTask(void *arg)
     int      discoveryDone = 0;
 
     while (!s_stopReq) {
+        service_test_hooks();
+
         /* Connect / reconnect */
         if (!s_connected) {
             discoveryDone = 0;
@@ -322,6 +475,7 @@ static void mqttTask(void *arg)
             for (uint32_t w = 0; w < reconnectDelay && !s_connected && !s_stopReq;
                  w += 100) {
                 vTaskDelay(pdMS_TO_TICKS(100));
+                service_test_hooks();
             }
 
             if (!s_connected) {
@@ -338,6 +492,10 @@ static void mqttTask(void *arg)
             snprintf(statusTopic, sizeof(statusTopic), "%s/status", s_cfg.prefix);
             mqtt_publish(s_client, statusTopic, "online", 6,
                          0, 1 /* retain */, NULL, NULL);
+
+            /* Subscribe to writable-register set topics */
+            snprintf(s_topic, sizeof(s_topic), "%s/+/set", s_cfg.prefix);
+            mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
         }
 
         /* Publish HA discovery (once per connection) */
@@ -403,6 +561,10 @@ void MqttBridge_Start(const sMqttBridgeCfg *cfg)
     s_connected = 0;
     s_publishCount = 0;
     s_reconnectCount = 0;
+    s_publishNow = 0;
+    s_inject.state = INJECT_IDLE;
+    s_subLog.ready = 0;
+    s_writeLog.ready = 0;
 
     static const osThreadAttr_t attr = {
         .name       = "mqtt",
@@ -448,10 +610,52 @@ void MqttBridge_SetBrokerIp(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 
 void MqttBridge_LogStatus(void)
 {
-    TRice("MQTT: %s broker=%u.%u.%u.%u:%u pub=%u reconn=%u\n",
-          s_connected ? "connected" : (s_running ? "connecting" : "stopped"),
-          s_cfg.brokerIp[0], s_cfg.brokerIp[1],
-          s_cfg.brokerIp[2], s_cfg.brokerIp[3],
-          s_cfg.brokerPort,
-          s_publishCount, s_reconnectCount);
+    char buf[100];
+    snprintf(buf, sizeof(buf),
+             "%s broker=%u.%u.%u.%u:%u pub=%u reconn=%u monitor=%s",
+             s_connected ? "connected" : (s_running ? "connecting" : "stopped"),
+             (unsigned)s_cfg.brokerIp[0], (unsigned)s_cfg.brokerIp[1],
+             (unsigned)s_cfg.brokerIp[2], (unsigned)s_cfg.brokerIp[3],
+             (unsigned)s_cfg.brokerPort,
+             (unsigned)s_publishCount, (unsigned)s_reconnectCount,
+             s_monitorEnabled ? "on" : "off");
+    TRiceS("MQTT: %s\n", buf);
+}
+
+/* --------------------------------------------------------------------------
+ * Integration-test support
+ * -------------------------------------------------------------------------- */
+
+void MqttBridge_SetMonitor(int enable)
+{
+    s_monitorEnabled = enable ? 1 : 0;
+}
+
+int MqttBridge_GetMonitor(void)
+{
+    return s_monitorEnabled;
+}
+
+int MqttBridge_Inject(const char *topic, const char *payload,
+                      uint16_t payloadLen)
+{
+    if (!s_running || s_inject.state != INJECT_IDLE) {
+        return -1;
+    }
+    if (strlen(topic) >= sizeof(s_inject.topic) ||
+        payloadLen >= sizeof(s_inject.payload)) {
+        return -1;
+    }
+
+    strcpy(s_inject.topic, topic);
+    memcpy(s_inject.payload, payload, payloadLen);
+    s_inject.payload[payloadLen] = '\0';
+    s_inject.len = payloadLen;
+    s_inject.state = INJECT_REQUESTED;
+    return 0;
+}
+
+void MqttBridge_PublishNow(void)
+{
+    s_publishNow = 1;
 }

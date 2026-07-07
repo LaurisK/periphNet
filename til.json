@@ -7,6 +7,10 @@
 		"Type": "TRICE0",
 		"Strg": "  System halted - infinite loop below   \\n"
 	},
+	"1051": {
+		"Type": "TRice",
+		"Strg": "Modbus port: uart2\\n"
+	},
 	"1058": {
 		"Type": "TRice",
 		"Strg": "R0  = 0x%08X\\n"
@@ -115,6 +119,10 @@
 		"Type": "TRice",
 		"Strg": "Modbus baud set to %u (restart to apply)\\n"
 	},
+	"1608": {
+		"Type": "TRiceS",
+		"Strg": "Modbus %s\\n"
+	},
 	"1634": {
 		"Type": "TRice",
 		"Strg": "HTTP: listening on port %d\\n"
@@ -151,6 +159,10 @@
 		"Type": "TRice",
 		"Strg": "Promoting stored blob to golden...\\n"
 	},
+	"1860": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_SHORT\\n"
+	},
 	"1894": {
 		"Type": "TRICE0",
 		"Strg": "  - Divide by zero\\n"
@@ -162,6 +174,10 @@
 	"1903": {
 		"Type": "TRICE",
 		"Strg": "  arm-none-eabi-addr2line -e build/application.elf 0x%08X\\n"
+	},
+	"1907": {
+		"Type": "TRice",
+		"Strg": "Modbus port: stop poller first\\n"
 	},
 	"1932": {
 		"Type": "TRice",
@@ -195,6 +211,10 @@
 		"Type": "TRice",
 		"Strg": "BTN3: triggering BusFault (invalid SRAM)\\n"
 	},
+	"2191": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt start|stop|status|set|monitor|inject|publish\\n"
+	},
 	"2205": {
 		"Type": "TRice",
 		"Strg": "Modbus write queued: reg %u = %u\\n"
@@ -223,9 +243,17 @@
 		"Type": "TRice",
 		"Strg": "FWU: erase done\\n"
 	},
+	"2382": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: %u bytes\\n"
+	},
 	"2396": {
 		"Type": "TRice",
 		"Strg": "FWU: upload_err -\u003e HTTP 500\\n"
+	},
+	"2403": {
+		"Type": "TRice",
+		"Strg": "Modbus RX[%u]: "
 	},
 	"2424": {
 		"Type": "TRice",
@@ -250,6 +278,14 @@
 	"2469": {
 		"Type": "TRICE",
 		"Strg": "DBG: HTML built, len=%d, sending...\\n"
+	},
+	"2480": {
+		"Type": "TRice",
+		"Strg": "MQTT monitor: off\\n"
+	},
+	"2496": {
+		"Type": "TRice8",
+		"Strg": "%02x %02x %02x %02x %02x %02x %02x %02x "
 	},
 	"2497": {
 		"Type": "TRice",
@@ -327,6 +363,10 @@
 		"Type": "TRICE",
 		"Strg": "PC  = 0x%08X (fault address)\\n"
 	},
+	"2895": {
+		"Type": "TRice",
+		"Strg": "Modbus monitor: off\\n"
+	},
 	"2905": {
 		"Type": "trice",
 		"Strg": "========== Tasks (%u) ==============\\n"
@@ -358,6 +398,10 @@
 	"3051": {
 		"Type": "TRice",
 		"Strg": "  - Imprecise data bus error\\n"
+	},
+	"3056": {
+		"Type": "TRice",
+		"Strg": "Modbus TX[%u]: "
 	},
 	"3060": {
 		"Type": "TRICE",
@@ -391,6 +435,10 @@
 		"Type": "TRICE0",
 		"Strg": "\\n--- Exception Return ---\\n"
 	},
+	"3222": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt monitor on|off\\n"
+	},
 	"3249": {
 		"Type": "TRice",
 		"Strg": "  - Vector table read fault\\n"
@@ -410,6 +458,10 @@
 	"3282": {
 		"Type": "TRice",
 		"Strg": "IMG: CRC verified OK\\n"
+	},
+	"3287": {
+		"Type": "TRiceS",
+		"Strg": "MQTT pub: %s\\n"
 	},
 	"3298": {
 		"Type": "TRICE0",
@@ -455,6 +507,14 @@
 		"Type": "TRICE0",
 		"Strg": "\\n========================================\\n"
 	},
+	"3512": {
+		"Type": "TRice",
+		"Strg": "Modbus monitor: on\\n"
+	},
+	"3525": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus port uart2|uart6|disabled\\n"
+	},
 	"3569": {
 		"Type": "TRICE0",
 		"Strg": "\\nTo disassemble fault address:\\n"
@@ -478,6 +538,14 @@
 	"3674": {
 		"Type": "TRice",
 		"Strg": "Modbus: wrote reg %u = %u\\n"
+	},
+	"3682": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus monitor on|off\\n"
+	},
+	"3708": {
+		"Type": "TRice",
+		"Strg": "Modbus write: reg %u rejected\\n"
 	},
 	"3753": {
 		"Type": "TRICE",
@@ -519,6 +587,10 @@
 		"Type": "trice",
 		"Strg": "\\t CFSR = 0x%08X\\n\\t HFSR = 0x%08X\\n"
 	},
+	"3923": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus inject \u003chexbytes\u003e\\n"
+	},
 	"3929": {
 		"Type": "TRICE",
 		"Strg": "INFO: HTTP server ready\\n"
@@ -531,9 +603,17 @@
 		"Type": "TRICE",
 		"Strg": "DBG: Unknown path, sending 404\\n"
 	},
+	"3953": {
+		"Type": "TRice",
+		"Strg": "MQTT monitor: on\\n"
+	},
 	"3966": {
 		"Type": "TRice",
 		"Strg": "\\n--- Usage Fault ---\\n"
+	},
+	"4008": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt inject \u003ctopic\u003e \u003cpayload\u003e\\n"
 	},
 	"4048": {
 		"Type": "TRICE",
@@ -546,6 +626,10 @@
 	"4102": {
 		"Type": "TRICE0",
 		"Strg": "  - Debug event\\n"
+	},
+	"4134": {
+		"Type": "TRice",
+		"Strg": "MQTT not running\\n"
 	},
 	"4177": {
 		"Type": "trice",
@@ -570,6 +654,10 @@
 	"4283": {
 		"Type": "TRice",
 		"Strg": "\\n\\n"
+	},
+	"4305": {
+		"Type": "TRice8",
+		"Strg": "%02x "
 	},
 	"4320": {
 		"Type": "TRice",
@@ -611,6 +699,10 @@
 		"Type": "trice",
 		"Strg": "err:Stacked Registers:\\n"
 	},
+	"4552": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_SHORT\\n"
+	},
 	"4562": {
 		"Type": "TRice",
 		"Strg": "Stack frame at: 0x%08X\\n"
@@ -651,9 +743,17 @@
 		"Type": "TRICE0",
 		"Strg": "  - Invalid state (e.g., trying to switch to ARM mode)\\n"
 	},
+	"4798": {
+		"Type": "TRiceS",
+		"Strg": "MQTT inject: %s\\n"
+	},
 	"4801": {
 		"Type": "TRICE",
 		"Strg": "DBG: Connection accepted\\n"
+	},
+	"4849": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_SHORT\\n"
 	},
 	"4851": {
 		"Type": "TRice",
@@ -674,6 +774,10 @@
 	"4891": {
 		"Type": "TRice",
 		"Strg": "Boot confirmed\\n"
+	},
+	"4892": {
+		"Type": "TRice",
+		"Strg": "Modbus port: UART6 not configured\\n"
 	},
 	"4905": {
 		"Type": "TRice",
@@ -726,6 +830,10 @@
 	"5229": {
 		"Type": "trice",
 		"Strg": "\\t PC  = 0x%08X\\n\\t PSR = 0x%08X\\n"
+	},
+	"5284": {
+		"Type": "TRice",
+		"Strg": "Modbus RX[%u]: "
 	},
 	"5292": {
 		"Type": "TRice",
@@ -819,6 +927,10 @@
 		"Type": "TRice",
 		"Strg": "========================================\\n"
 	},
+	"5587": {
+		"Type": "TRice",
+		"Strg": "Modbus port: disabled\\n"
+	},
 	"5588": {
 		"Type": "TRice",
 		"Strg": "FWU: write FAIL 0x%X\\n"
@@ -826,6 +938,10 @@
 	"5621": {
 		"Type": "TRice",
 		"Strg": "MQTT: connected to broker\\n"
+	},
+	"5623": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_EXCEPTION\\n"
 	},
 	"5649": {
 		"Type": "TRice",
@@ -886,6 +1002,10 @@
 	"6087": {
 		"Type": "trice",
 		"Strg": " BOR"
+	},
+	"6102": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: %s\\n"
 	},
 	"6104": {
 		"Type": "TRICE",
@@ -955,6 +1075,10 @@
 		"Type": "TRice",
 		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
 	},
+	"6355": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_CRC\\n"
+	},
 	"6364": {
 		"Type": "TRice",
 		"Strg": "Modbus: stopped (polls=%u errors=%u)\\n"
@@ -987,6 +1111,10 @@
 		"Type": "TRice",
 		"Strg": "  - Invalid PC load\\n"
 	},
+	"6497": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|set|write|port|monitor|inject|status\\n"
+	},
 	"6525": {
 		"Type": "TRICE",
 		"Strg": "DBG: Client closed connection\\n"
@@ -994,6 +1122,10 @@
 	"6535": {
 		"Type": "TRice",
 		"Strg": "Modbus: polling slave %u at %u baud\\n"
+	},
+	"6571": {
+		"Type": "TRiceS",
+		"Strg": "MQTT sub: %s\\n"
 	},
 	"6573": {
 		"Type": "TRice",
@@ -1014,6 +1146,10 @@
 	"6668": {
 		"Type": "TRice",
 		"Strg": "BMS frames sent\\n"
+	},
+	"6685": {
+		"Type": "TRice",
+		"Strg": "Modbus write: reg %u = %u\\n"
 	},
 	"6697": {
 		"Type": "trice",
@@ -1099,6 +1235,10 @@
 		"Type": "TRice",
 		"Strg": "Boot confirm FAILED (ext flash write)\\n"
 	},
+	"7058": {
+		"Type": "TRice",
+		"Strg": "MQTT inject failed (not running or busy)\\n"
+	},
 	"7073": {
 		"Type": "TRice",
 		"Strg": "FWU: upload_done %u bytes -\u003e HTTP 200\\n"
@@ -1122,6 +1262,10 @@
 	"7173": {
 		"Type": "TRice",
 		"Strg": "AFSR = 0x%08X\\n"
+	},
+	"7187": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: unmapped %u regs\\n"
 	},
 	"7205": {
 		"Type": "TRICE",
@@ -1178,6 +1322,10 @@
 	"7342": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Stack Unwinding Information ---\\n"
+	},
+	"7357": {
+		"Type": "TRice",
+		"Strg": "\\n"
 	},
 	"7368": {
 		"Type": "TRICE",
@@ -1270,6 +1418,10 @@
 	"7734": {
 		"Type": "TRiceS",
 		"Strg": "err:Fault in task: %s\\n"
+	},
+	"7751": {
+		"Type": "TRice",
+		"Strg": "Modbus TX[%u]: "
 	},
 	"7752": {
 		"Type": "TRICE",

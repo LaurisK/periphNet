@@ -397,6 +397,7 @@ Shared code compiled into both bootloader and application.
 | defaultTask | 1024 words | osPriorityNormal (24) | Init, heartbeat (1s), IWDG kick (100ms), reboot/promotion jobs, button faults |
 | http | 1024 words | osPriorityNormal (24) | HTTP server (netconn API, sequential connections) |
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
+| cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | tcpip_thread | 4096 bytes | 24 | lwIP TCP/IP processing |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |

@@ -7,6 +7,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 177
 	},
+	"1051": {
+		"File": "cmd_parser.c",
+		"Line": 249
+	},
 	"1058": {
 		"File": "hardfault_handler.c",
 		"Line": 74
@@ -17,11 +21,11 @@
 	},
 	"1070": {
 		"File": "solis_poller.c",
-		"Line": 372
+		"Line": 417
 	},
 	"1076": {
 		"File": "cmd_parser.c",
-		"Line": 123
+		"Line": 129
 	},
 	"1077": {
 		"File": "firmware_update_http.c",
@@ -73,7 +77,7 @@
 	},
 	"1245": {
 		"File": "cmd_parser.c",
-		"Line": 156
+		"Line": 192
 	},
 	"1292": {
 		"File": "image_transfer.c",
@@ -113,7 +117,11 @@
 	},
 	"1595": {
 		"File": "cmd_parser.c",
-		"Line": 186
+		"Line": 222
+	},
+	"1608": {
+		"File": "cmd_parser.c",
+		"Line": 294
 	},
 	"1634": {
 		"File": "http_server.c",
@@ -125,7 +133,7 @@
 	},
 	"1645": {
 		"File": "cmd_parser.c",
-		"Line": 132
+		"Line": 138
 	},
 	"1657": {
 		"File": "hardfault_handler.c",
@@ -151,6 +159,10 @@
 		"File": "app_freertos.c",
 		"Line": 186
 	},
+	"1860": {
+		"File": "modbus_rtu.c",
+		"Line": 323
+	},
 	"1894": {
 		"File": "hardfault_handler.c",
 		"Line": 152
@@ -162,6 +174,10 @@
 	"1903": {
 		"File": "hardfault_handler.c",
 		"Line": 174
+	},
+	"1907": {
+		"File": "modbus_rtu.c",
+		"Line": 294
 	},
 	"1932": {
 		"File": "image_transfer.c",
@@ -195,9 +211,13 @@
 		"File": "app_freertos.c",
 		"Line": 230
 	},
+	"2191": {
+		"File": "cmd_parser.c",
+		"Line": 390
+	},
 	"2205": {
 		"File": "cmd_parser.c",
-		"Line": 202
+		"Line": 238
 	},
 	"2207": {
 		"File": "crash.c",
@@ -209,7 +229,7 @@
 	},
 	"2282": {
 		"File": "cmd_parser.c",
-		"Line": 335
+		"Line": 454
 	},
 	"2286": {
 		"File": "hardfault_handler.c",
@@ -223,9 +243,17 @@
 		"File": "image_transfer.c",
 		"Line": 147
 	},
+	"2382": {
+		"File": "modbus_rtu.c",
+		"Line": 364
+	},
 	"2396": {
 		"File": "image_transfer.c",
 		"Line": 185
+	},
+	"2403": {
+		"File": "modbus_rtu.c",
+		"Line": 164
 	},
 	"2424": {
 		"File": "hardfault_handler.c",
@@ -233,7 +261,7 @@
 	},
 	"2427": {
 		"File": "cmd_parser.c",
-		"Line": 79
+		"Line": 85
 	},
 	"2450": {
 		"File": "image_transfer.c",
@@ -250,6 +278,14 @@
 	"2469": {
 		"File": "http_server.c",
 		"Line": 155
+	},
+	"2480": {
+		"File": "cmd_parser.c",
+		"Line": 357
+	},
+	"2496": {
+		"File": "modbus_rtu.c",
+		"Line": 35
 	},
 	"2497": {
 		"File": "hardfault_handler.c",
@@ -273,11 +309,11 @@
 	},
 	"2580": {
 		"File": "cmd_parser.c",
-		"Line": 194
+		"Line": 230
 	},
 	"2582": {
 		"File": "solis_poller.c",
-		"Line": 231
+		"Line": 251
 	},
 	"2636": {
 		"File": "firmware_update_http.c",
@@ -327,6 +363,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 93
 	},
+	"2895": {
+		"File": "cmd_parser.c",
+		"Line": 266
+	},
 	"2905": {
 		"File": "crash.c",
 		"Line": 146
@@ -345,7 +385,7 @@
 	},
 	"3017": {
 		"File": "cmd_parser.c",
-		"Line": 196
+		"Line": 232
 	},
 	"3027": {
 		"File": "hardfault_handler.c",
@@ -358,6 +398,10 @@
 	"3051": {
 		"File": "hardfault_handler.c",
 		"Line": 118
+	},
+	"3056": {
+		"File": "modbus_rtu.c",
+		"Line": 111
 	},
 	"3060": {
 		"File": "hardfault_handler.c",
@@ -373,11 +417,11 @@
 	},
 	"3116": {
 		"File": "solis_poller.c",
-		"Line": 370
+		"Line": 415
 	},
 	"3122": {
 		"File": "mqtt_bridge.c",
-		"Line": 417
+		"Line": 579
 	},
 	"3149": {
 		"File": "bms_reader.c",
@@ -390,6 +434,10 @@
 	"3180": {
 		"File": "hardfault_handler.c",
 		"Line": 97
+	},
+	"3222": {
+		"File": "cmd_parser.c",
+		"Line": 359
 	},
 	"3249": {
 		"File": "hardfault_handler.c",
@@ -410,6 +458,10 @@
 	"3282": {
 		"File": "image_store.c",
 		"Line": 302
+	},
+	"3287": {
+		"File": "mqtt_bridge.c",
+		"Line": 197
 	},
 	"3298": {
 		"File": "hardfault_handler.c",
@@ -449,11 +501,19 @@
 	},
 	"3467": {
 		"File": "cmd_parser.c",
-		"Line": 207
+		"Line": 243
 	},
 	"3480": {
 		"File": "hardfault_handler.c",
 		"Line": 176
+	},
+	"3512": {
+		"File": "cmd_parser.c",
+		"Line": 263
+	},
+	"3525": {
+		"File": "cmd_parser.c",
+		"Line": 258
 	},
 	"3569": {
 		"File": "hardfault_handler.c",
@@ -477,7 +537,15 @@
 	},
 	"3674": {
 		"File": "solis_poller.c",
-		"Line": 215
+		"Line": 235
+	},
+	"3682": {
+		"File": "cmd_parser.c",
+		"Line": 268
+	},
+	"3708": {
+		"File": "mqtt_bridge.c",
+		"Line": 399
 	},
 	"3753": {
 		"File": "http_server.c",
@@ -497,7 +565,7 @@
 	},
 	"3828": {
 		"File": "cmd_parser.c",
-		"Line": 266
+		"Line": 349
 	},
 	"3829": {
 		"File": "hardfault_handler.c",
@@ -519,6 +587,10 @@
 		"File": "crash.c",
 		"Line": 223
 	},
+	"3923": {
+		"File": "cmd_parser.c",
+		"Line": 274
+	},
 	"3929": {
 		"File": "http_server.c",
 		"Line": 304
@@ -531,9 +603,17 @@
 		"File": "http_server.c",
 		"Line": 231
 	},
+	"3953": {
+		"File": "cmd_parser.c",
+		"Line": 354
+	},
 	"3966": {
 		"File": "hardfault_handler.c",
 		"Line": 128
+	},
+	"4008": {
+		"File": "cmd_parser.c",
+		"Line": 372
 	},
 	"4048": {
 		"File": "hardfault_handler.c",
@@ -546,6 +626,10 @@
 	"4102": {
 		"File": "hardfault_handler.c",
 		"Line": 160
+	},
+	"4134": {
+		"File": "cmd_parser.c",
+		"Line": 383
 	},
 	"4177": {
 		"File": "crash.c",
@@ -570,6 +654,10 @@
 	"4283": {
 		"File": "hardfault_handler.c",
 		"Line": 67
+	},
+	"4305": {
+		"File": "modbus_rtu.c",
+		"Line": 41
 	},
 	"4320": {
 		"File": "image_transfer.c",
@@ -611,6 +699,10 @@
 		"File": "crash.c",
 		"Line": 212
 	},
+	"4552": {
+		"File": "modbus_rtu.c",
+		"Line": 346
+	},
 	"4562": {
 		"File": "hardfault_handler.c",
 		"Line": 145
@@ -641,23 +733,31 @@
 	},
 	"4772": {
 		"File": "cmd_parser.c",
-		"Line": 237
+		"Line": 320
 	},
 	"4796": {
 		"File": "cmd_parser.c",
-		"Line": 264
+		"Line": 347
 	},
 	"4797": {
 		"File": "hardfault_handler.c",
 		"Line": 148
 	},
+	"4798": {
+		"File": "mqtt_bridge.c",
+		"Line": 382
+	},
 	"4801": {
 		"File": "http_server.c",
 		"Line": 273
 	},
+	"4849": {
+		"File": "modbus_rtu.c",
+		"Line": 353
+	},
 	"4851": {
 		"File": "solis_poller.c",
-		"Line": 356
+		"Line": 401
 	},
 	"4858": {
 		"File": "hardfault_handler.c",
@@ -674,6 +774,10 @@
 	"4891": {
 		"File": "app_freertos.c",
 		"Line": 102
+	},
+	"4892": {
+		"File": "modbus_rtu.c",
+		"Line": 286
 	},
 	"4905": {
 		"File": "image_transfer.c",
@@ -701,7 +805,7 @@
 	},
 	"4994": {
 		"File": "cmd_parser.c",
-		"Line": 216
+		"Line": 297
 	},
 	"4999": {
 		"File": "hardfault_handler.c",
@@ -713,7 +817,7 @@
 	},
 	"5092": {
 		"File": "mqtt_bridge.c",
-		"Line": 345
+		"Line": 503
 	},
 	"5158": {
 		"File": "hardfault_handler.c",
@@ -721,11 +825,15 @@
 	},
 	"5181": {
 		"File": "cmd_parser.c",
-		"Line": 336
+		"Line": 455
 	},
 	"5229": {
 		"File": "crash.c",
 		"Line": 216
+	},
+	"5284": {
+		"File": "modbus_rtu.c",
+		"Line": 335
 	},
 	"5292": {
 		"File": "hardfault_handler.c",
@@ -741,7 +849,7 @@
 	},
 	"5347": {
 		"File": "mqtt_bridge.c",
-		"Line": 374
+		"Line": 532
 	},
 	"5393": {
 		"File": "firmware_update_http.c",
@@ -801,7 +909,7 @@
 	},
 	"5543": {
 		"File": "mqtt_bridge.c",
-		"Line": 316
+		"Line": 469
 	},
 	"5546": {
 		"File": "http_server.c",
@@ -813,11 +921,15 @@
 	},
 	"5584": {
 		"File": "solis_poller.c",
-		"Line": 352
+		"Line": 397
 	},
 	"5586": {
 		"File": "hardfault_handler.c",
 		"Line": 70
+	},
+	"5587": {
+		"File": "cmd_parser.c",
+		"Line": 255
 	},
 	"5588": {
 		"File": "image_transfer.c",
@@ -825,7 +937,11 @@
 	},
 	"5621": {
 		"File": "mqtt_bridge.c",
-		"Line": 334
+		"Line": 488
+	},
+	"5623": {
+		"File": "modbus_rtu.c",
+		"Line": 340
 	},
 	"5649": {
 		"File": "app_freertos.c",
@@ -887,6 +1003,10 @@
 		"File": "system.c",
 		"Line": 82
 	},
+	"6102": {
+		"File": "mqtt_bridge.c",
+		"Line": 622
+	},
 	"6104": {
 		"File": "hardfault_handler.c",
 		"Line": 172
@@ -897,7 +1017,7 @@
 	},
 	"6110": {
 		"File": "mqtt_bridge.c",
-		"Line": 302
+		"Line": 453
 	},
 	"6113": {
 		"File": "http_server.c",
@@ -917,7 +1037,7 @@
 	},
 	"6175": {
 		"File": "cmd_parser.c",
-		"Line": 278
+		"Line": 397
 	},
 	"6209": {
 		"File": "crash.c",
@@ -929,7 +1049,7 @@
 	},
 	"6232": {
 		"File": "cmd_parser.c",
-		"Line": 204
+		"Line": 240
 	},
 	"6248": {
 		"File": "hardfault_handler.c",
@@ -955,9 +1075,13 @@
 		"File": "hardfault_handler.c",
 		"Line": 73
 	},
+	"6355": {
+		"File": "modbus_rtu.c",
+		"Line": 330
+	},
 	"6364": {
 		"File": "solis_poller.c",
-		"Line": 267
+		"Line": 287
 	},
 	"6402": {
 		"File": "firmware_update_http.c",
@@ -965,11 +1089,11 @@
 	},
 	"6426": {
 		"File": "cmd_parser.c",
-		"Line": 178
+		"Line": 214
 	},
 	"6438": {
 		"File": "solis_poller.c",
-		"Line": 298
+		"Line": 318
 	},
 	"6456": {
 		"File": "bms_reader.c",
@@ -987,13 +1111,21 @@
 		"File": "hardfault_handler.c",
 		"Line": 131
 	},
+	"6497": {
+		"File": "cmd_parser.c",
+		"Line": 300
+	},
 	"6525": {
 		"File": "http_server.c",
 		"Line": 87
 	},
 	"6535": {
 		"File": "solis_poller.c",
-		"Line": 238
+		"Line": 258
+	},
+	"6571": {
+		"File": "mqtt_bridge.c",
+		"Line": 390
 	},
 	"6573": {
 		"File": "hardfault_handler.c",
@@ -1013,7 +1145,11 @@
 	},
 	"6668": {
 		"File": "cmd_parser.c",
-		"Line": 107
+		"Line": 113
+	},
+	"6685": {
+		"File": "mqtt_bridge.c",
+		"Line": 396
 	},
 	"6697": {
 		"File": "system.c",
@@ -1025,15 +1161,15 @@
 	},
 	"6773": {
 		"File": "cmd_parser.c",
-		"Line": 332
+		"Line": 451
 	},
 	"6781": {
 		"File": "cmd_parser.c",
-		"Line": 103
+		"Line": 109
 	},
 	"6794": {
 		"File": "solis_poller.c",
-		"Line": 361
+		"Line": 406
 	},
 	"6796": {
 		"File": "app_freertos.c",
@@ -1085,7 +1221,7 @@
 	},
 	"7007": {
 		"File": "solis_poller.c",
-		"Line": 365
+		"Line": 410
 	},
 	"7047": {
 		"File": "hardfault_handler.c",
@@ -1098,6 +1234,10 @@
 	"7056": {
 		"File": "app_freertos.c",
 		"Line": 104
+	},
+	"7058": {
+		"File": "cmd_parser.c",
+		"Line": 379
 	},
 	"7073": {
 		"File": "image_transfer.c",
@@ -1123,6 +1263,10 @@
 		"File": "hardfault_handler.c",
 		"Line": 100
 	},
+	"7187": {
+		"File": "solis_poller.c",
+		"Line": 374
+	},
 	"7205": {
 		"File": "http_server.c",
 		"Line": 151
@@ -1141,7 +1285,7 @@
 	},
 	"7258": {
 		"File": "cmd_parser.c",
-		"Line": 377
+		"Line": 496
 	},
 	"7263": {
 		"File": "hardfault_handler.c",
@@ -1149,7 +1293,7 @@
 	},
 	"7264": {
 		"File": "cmd_parser.c",
-		"Line": 129
+		"Line": 135
 	},
 	"7281": {
 		"File": "system.c",
@@ -1179,13 +1323,17 @@
 		"File": "hardfault_handler.c",
 		"Line": 164
 	},
+	"7357": {
+		"File": "modbus_rtu.c",
+		"Line": 44
+	},
 	"7368": {
 		"File": "hardfault_handler.c",
 		"Line": 88
 	},
 	"7377": {
 		"File": "cmd_parser.c",
-		"Line": 110
+		"Line": 116
 	},
 	"7396": {
 		"File": "http_server.c",
@@ -1197,7 +1345,7 @@
 	},
 	"7446": {
 		"File": "cmd_parser.c",
-		"Line": 334
+		"Line": 453
 	},
 	"7465": {
 		"File": "image_transfer.c",
@@ -1205,7 +1353,7 @@
 	},
 	"7466": {
 		"File": "cmd_parser.c",
-		"Line": 136
+		"Line": 142
 	},
 	"7472": {
 		"File": "system.c",
@@ -1229,11 +1377,11 @@
 	},
 	"7539": {
 		"File": "cmd_parser.c",
-		"Line": 289
+		"Line": 408
 	},
 	"7593": {
 		"File": "solis_poller.c",
-		"Line": 357
+		"Line": 402
 	},
 	"7610": {
 		"File": "bms_reader.c",
@@ -1245,11 +1393,11 @@
 	},
 	"7654": {
 		"File": "cmd_parser.c",
-		"Line": 188
+		"Line": 224
 	},
 	"7669": {
 		"File": "solis_poller.c",
-		"Line": 217
+		"Line": 237
 	},
 	"7687": {
 		"File": "system.c",
@@ -1270,6 +1418,10 @@
 	"7734": {
 		"File": "crash.c",
 		"Line": 354
+	},
+	"7751": {
+		"File": "modbus_rtu.c",
+		"Line": 137
 	},
 	"7752": {
 		"File": "http_server.c",

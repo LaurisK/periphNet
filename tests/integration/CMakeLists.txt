@@ -34,6 +34,8 @@ add_library(periphnet_core STATIC
     src/core/Device.cpp
     src/core/TestRunner.cpp
     src/core/TestCases.cpp
+    src/core/ModbusTests.cpp
+    src/core/MqttTests.cpp
     src/core/transport/SerialTriceSource.cpp
     src/core/transport/UdpTriceSource.cpp
     src/core/transport/UsbTriceSource.cpp

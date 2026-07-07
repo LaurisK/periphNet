@@ -1,13 +1,19 @@
 /**
  * @file    cmd_parser.c
  * @brief   Text command parser — USB CDC + UART1 input, Trice output
+ *
+ * Input bytes are buffered from ISR context (Cmd_Feed); completed lines
+ * are dispatched by the dedicated "cmd" task so command handlers may
+ * block and use RTOS/lwIP APIs freely.
  */
 
 #include "App/Cmd/cmd_parser.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
+#include "App/Modbus/modbus_rtu.h"
 #include "App/Modbus/solis_poller.h"
 #include "App/Mqtt/mqtt_bridge.h"
+#include "cmsis_os.h"
 #include "trice.h"
 #include "usart.h"
 #include "stm32f4xx_hal.h"
@@ -20,7 +26,7 @@
  * Configuration
  * -------------------------------------------------------------------------- */
 
-#define CMD_LINE_MAX  128
+#define CMD_LINE_MAX  256
 
 /* --------------------------------------------------------------------------
  * Line buffer per input source
@@ -61,8 +67,8 @@ static void cmd_mqtt(const char *args);
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
-    { "modbus",      cmd_modbus,      "Modbus RTU (start|stop|read|set|status)" },
-    { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|status)"  },
+    { "modbus",      cmd_modbus,      "Modbus RTU (start|stop|read|set|port|monitor|inject|status)" },
+    { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
     { "help",        cmd_help,        "List available commands"  },
@@ -138,6 +144,33 @@ static void cmd_bms(const char *args)
 }
 
 /**
+ * Parse a no-space hex byte string ("0104280200ff...") into a byte buffer.
+ * Returns byte count, or -1 on malformed input (odd digits / non-hex char).
+ */
+static int parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen)
+{
+    size_t len = 0;
+
+    while (*p != '\0' && *p != ' ' && *p != '\t') {
+        int hi, lo;
+        hi = (*p >= '0' && *p <= '9') ? *p - '0' :
+             (*p >= 'a' && *p <= 'f') ? *p - 'a' + 10 :
+             (*p >= 'A' && *p <= 'F') ? *p - 'A' + 10 : -1;
+        p++;
+        lo = (*p >= '0' && *p <= '9') ? *p - '0' :
+             (*p >= 'a' && *p <= 'f') ? *p - 'a' + 10 :
+             (*p >= 'A' && *p <= 'F') ? *p - 'A' + 10 : -1;
+        if (hi < 0 || lo < 0 || len >= maxLen) {
+            return -1;
+        }
+        out[len++] = (uint8_t)((hi << 4) | lo);
+        p++;
+    }
+
+    return (int)len;
+}
+
+/**
  * Modbus command: control Solis inverter Modbus RTU poller.
  *
  * Usage:
@@ -147,6 +180,9 @@ static void cmd_bms(const char *args)
  *   modbus set baud <rate>       — Change baud rate
  *   modbus set slave <addr>      — Change slave address
  *   modbus write <reg> <value>   — Write a holding register
+ *   modbus port <uart2|uart6|disabled> — Select port (stop poller first)
+ *   modbus monitor <on|off>      — Trice raw TX/RX frame monitoring
+ *   modbus inject <hexbytes>     — Process a frame as if received from bus
  *   modbus status                — Show poller state
  */
 static void cmd_modbus(const char *args)
@@ -206,17 +242,62 @@ static void cmd_modbus(const char *args)
         } else {
             TRice("Usage: modbus write <register> <value>\n");
         }
+    } else if (strncmp(args, "port ", 5) == 0) {
+        const char *p = args + 5;
+        if (strncmp(p, "uart2", 5) == 0) {
+            if (Modbus_SetPort(MODBUS_PORT_UART2) == 0) {
+                TRice("Modbus port: uart2\n");
+            }
+        } else if (strncmp(p, "uart6", 5) == 0) {
+            Modbus_SetPort(MODBUS_PORT_UART6);  /* logs its own refusal */
+        } else if (strncmp(p, "disabled", 8) == 0) {
+            if (Modbus_SetPort(MODBUS_PORT_DISABLED) == 0) {
+                TRice("Modbus port: disabled\n");
+            }
+        } else {
+            TRice("Usage: modbus port uart2|uart6|disabled\n");
+        }
+    } else if (strncmp(args, "monitor ", 8) == 0) {
+        if (strncmp(args + 8, "on", 2) == 0) {
+            Modbus_SetMonitor(1);
+            TRice("Modbus monitor: on\n");
+        } else if (strncmp(args + 8, "off", 3) == 0) {
+            Modbus_SetMonitor(0);
+            TRice("Modbus monitor: off\n");
+        } else {
+            TRice("Usage: modbus monitor on|off\n");
+        }
+    } else if (strncmp(args, "inject ", 7) == 0) {
+        uint8_t frame[128];
+        int len = parse_hex_bytes(args + 7, frame, sizeof(frame));
+        if (len <= 0) {
+            TRice("Usage: modbus inject <hexbytes>\n");
+            return;
+        }
+        uint16_t regs[64];
+        uint16_t regCount = 0;
+        if (Modbus_ProcessInjectedFrame(frame, (uint16_t)len, regs,
+                                        64, &regCount) == MODBUS_OK &&
+            regCount > 0) {
+            SolisPoller_InjectRegisters(regs, regCount);
+        }
     } else if (strncmp(args, "status", 6) == 0) {
         const sSolisPollerCfg *cfg = SolisPoller_GetConfig();
-        TRice("Modbus %s baud=%u slave=%u\n",
-              SolisPoller_IsRunning() ? "running" : "stopped",
-              cfg->baud, cfg->slaveAddr);
+        eModbusPort port = Modbus_GetPort();
+        char buf[100];
+        snprintf(buf, sizeof(buf), "%s port=%s monitor=%s baud=%u slave=%u",
+                 SolisPoller_IsRunning() ? "running" : "stopped",
+                 (port == MODBUS_PORT_UART2)    ? "uart2" :
+                 (port == MODBUS_PORT_UART6)    ? "uart6" : "disabled",
+                 Modbus_GetMonitor() ? "on" : "off",
+                 (unsigned)cfg->baud, (unsigned)cfg->slaveAddr);
+        TRiceS("Modbus %s\n", buf);
         if (SolisPoller_IsRunning()) {
             const sSolisData *d = SolisPoller_GetData();
             TRice(" polls=%u errors=%u\n", d->pollCount, d->errorCount);
         }
     } else {
-        TRice("Usage: modbus start|stop|read|set|write|status\n");
+        TRice("Usage: modbus start|stop|read|set|write|port|monitor|inject|status\n");
     }
 }
 
@@ -228,7 +309,9 @@ static void cmd_modbus(const char *args)
  *   mqtt stop                — Stop bridge
  *   mqtt status              — Show connection state
  *   mqtt set ip <a.b.c.d>   — Change broker IP
- *   mqtt set prefix <str>    — Change topic prefix
+ *   mqtt monitor <on|off>    — Trice pub/sub message monitoring
+ *   mqtt inject <topic> <payload> — Process a message as if from broker
+ *   mqtt publish now         — Publish all values immediately
  */
 static void cmd_mqtt(const char *args)
 {
@@ -265,10 +348,46 @@ static void cmd_mqtt(const char *args)
         } else {
             TRice("Usage: mqtt set ip <a.b.c.d>\n");
         }
+    } else if (strncmp(args, "monitor ", 8) == 0) {
+        if (strncmp(args + 8, "on", 2) == 0) {
+            MqttBridge_SetMonitor(1);
+            TRice("MQTT monitor: on\n");
+        } else if (strncmp(args + 8, "off", 3) == 0) {
+            MqttBridge_SetMonitor(0);
+            TRice("MQTT monitor: off\n");
+        } else {
+            TRice("Usage: mqtt monitor on|off\n");
+        }
+    } else if (strncmp(args, "inject ", 7) == 0) {
+        /* mqtt inject <topic> <payload — rest of line> */
+        const char *p = args + 7;
+        while (*p == ' ') p++;
+        const char *topicStart = p;
+        while (*p != '\0' && *p != ' ') p++;
+        size_t topicLen = (size_t)(p - topicStart);
+        while (*p == ' ') p++;
+
+        char topic[80];
+        if (topicLen == 0 || topicLen >= sizeof(topic) || *p == '\0') {
+            TRice("Usage: mqtt inject <topic> <payload>\n");
+            return;
+        }
+        memcpy(topic, topicStart, topicLen);
+        topic[topicLen] = '\0';
+
+        if (MqttBridge_Inject(topic, p, (uint16_t)strlen(p)) != 0) {
+            TRice("MQTT inject failed (not running or busy)\n");
+        }
+    } else if (strncmp(args, "publish now", 11) == 0) {
+        if (!MqttBridge_IsRunning()) {
+            TRice("MQTT not running\n");
+            return;
+        }
+        MqttBridge_PublishNow();
     } else if (strncmp(args, "status", 6) == 0) {
         MqttBridge_LogStatus();
     } else {
-        TRice("Usage: mqtt start|stop|status|set\n");
+        TRice("Usage: mqtt start|stop|status|set|monitor|inject|publish\n");
     }
 }
 
@@ -401,10 +520,11 @@ void Cmd_Feed(eCmdSrc src, const uint8_t *data, size_t len)
             }
             if (line->pos > 0 && !line->ready) {
                 line->buf[line->pos] = '\0';
+                /* Hand off to cmdTask — command handlers block (vTaskDelay,
+                 * osThreadNew, tcpip_callback) and Cmd_Feed runs in ISR
+                 * context (USB CDC RX / UART1 RX).  The buffer stays
+                 * untouched until cmdTask clears `ready`. */
                 line->ready = true;
-                dispatch(line->buf);
-                line->pos = 0;
-                line->ready = false;
             }
         } else if (c >= ' ' && c <= '~' && line->synced &&
                    line->pos < CMD_LINE_MAX - 1 && !line->ready) {
@@ -425,12 +545,41 @@ void Cmd_Uart1RxCallback(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Command task — dispatches completed lines outside ISR context
+ * -------------------------------------------------------------------------- */
+
+static void cmdTask(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        for (int i = 0; i < CMD_SRC_COUNT; i++) {
+            sCmdLine *line = &s_lines[i];
+            if (line->ready) {
+                dispatch(line->buf);
+                line->pos = 0;
+                line->ready = false;
+            }
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Init
  * -------------------------------------------------------------------------- */
 
 void Cmd_Init(void)
 {
     memset(s_lines, 0, sizeof(s_lines));
+
+    static const osThreadAttr_t attr = {
+        .name       = "cmd",
+        .stack_size = 1024U * 4U,
+        .priority   = (osPriority_t)osPriorityNormal,
+    };
+    osThreadNew(cmdTask, NULL, &attr);
 
     /* Enable USART1 RX interrupt and start receiving */
     HAL_NVIC_SetPriority(USART1_IRQn, 6, 0);

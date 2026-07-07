@@ -84,9 +84,28 @@ modbus status
 ```
 Print poller state:
 ```
-Modbus running baud=9600 slave=1
+Modbus running port=uart2 monitor=off baud=9600 slave=1
  polls=42 errors=0
 ```
+
+```
+modbus port <uart2|uart6|disabled>
+```
+Select the active port (refused while the poller is running — stop first).
+`disabled` = no physical bus, transactions time out instantly; used with
+`modbus inject` for software-only testing.  `uart6` is not wired up yet.
+
+```
+modbus monitor <on|off>
+```
+Stream raw TX/RX frames via Trice: `Modbus TX[8]: 01 04 0c 3c ...`
+
+```
+modbus inject <hexbytes>
+```
+Process a raw response frame (no-space hex) as if received from the bus:
+CRC checked, registers decoded and fed into the poller cache + telemetry.
+Errors: `Modbus inject: ERR_SHORT|ERR_CRC|ERR_EXCEPTION`.
 
 ### MQTT
 
@@ -112,8 +131,26 @@ mqtt status
 ```
 Print MQTT state:
 ```
-MQTT: connected broker=10.42.0.1:1883 pub=128 reconn=1
+MQTT: connected broker=10.42.0.1:1883 pub=128 reconn=1 monitor=off
 ```
+
+```
+mqtt monitor <on|off>
+```
+Stream pub/sub messages via Trice: `MQTT pub: periphnet/battery_soc = 85`.
+Publishes are logged even without a broker connection (CI observability).
+
+```
+mqtt inject <topic> <payload>
+```
+Process a message as if received from the broker (no connection needed).
+Runs through the real incoming callbacks in tcpip_thread; acked with
+`MQTT inject: <topic>`.  Set-topic messages queue Modbus writes.
+
+```
+mqtt publish now
+```
+Publish all values immediately instead of waiting for the 5 s interval.
 
 ## Startup Sequence
 
@@ -299,8 +336,9 @@ After discovery, HA will show a device named "Solis Inverter" with
 ### Limitations
 
 - No TLS/authentication — broker must accept anonymous connections
-- No MQTT subscribe handling yet (set topics defined but not wired to
-  Modbus writes)
+- Subscribes to `<prefix>/+/set` on connect; currently mapped writes:
+  `overdischarge_soc/set` → reg 3010 (5-40), `max_charge_soc/set` →
+  reg 3009 (70-100)
 - All 25 values published every cycle regardless of changes
 - No username/password support in this version
 

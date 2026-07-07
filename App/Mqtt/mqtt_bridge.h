@@ -60,4 +60,33 @@ void MqttBridge_SetBrokerIp(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
  */
 void MqttBridge_LogStatus(void);
 
+/* --------------------------------------------------------------------------
+ * Integration-test support
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief  Enable/disable message monitoring — logs
+ *         "MQTT pub: topic = value" / "MQTT sub: topic = value".
+ *         Publishes are logged even while no broker is connected, so the
+ *         bridge output is observable in broker-less (CI) testing.
+ */
+void MqttBridge_SetMonitor(int enable);
+int  MqttBridge_GetMonitor(void);
+
+/**
+ * @brief  Inject an MQTT message as if it had arrived from the broker.
+ *         Processed through the real incoming-publish callbacks in
+ *         tcpip_thread context; acknowledged with "MQTT inject: topic"
+ *         from the bridge task.
+ * @return 0 if accepted, -1 if bridge not running / previous inject pending
+ */
+int MqttBridge_Inject(const char *topic, const char *payload,
+                      uint16_t payloadLen);
+
+/**
+ * @brief  Request an immediate publish of all values (instead of waiting
+ *         for the periodic interval).  Served by the bridge task.
+ */
+void MqttBridge_PublishNow(void);
+
 #endif /* MQTT_BRIDGE_H_ */

@@ -77,6 +77,51 @@ static void publish_telemetry(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Register mapping — decoded register block → data cache
+ * (shared between the fast poll and injected test frames)
+ * -------------------------------------------------------------------------- */
+
+/* Transaction 1: PV + inverter (33049-33095 → wire 3048, 47 regs) */
+static void map_pv_regs(const uint16_t *buf)
+{
+    /* PV: offsets relative to startReg 3048 */
+    s_data.pv1Voltage_dV  = buf[0];                   /* 3048 */
+    s_data.pv1Current_dA  = buf[1];                   /* 3049 */
+    s_data.pv2Voltage_dV  = buf[2];                   /* 3050 */
+    s_data.pv2Current_dA  = buf[3];                   /* 3051 */
+    s_data.pvPower_W      = u32_from_regs(buf[8], buf[9]); /* 3056-3057 */
+
+    /* Grid: offset 3072-3048 = 24 */
+    s_data.gridVoltage_dV   = buf[24];                 /* 3072 */
+    s_data.gridCurrent_dA   = buf[27];                 /* 3075 */
+    s_data.activePower_W    = s32_from_regs(buf[30], buf[31]); /* 3078-3079 */
+    s_data.invTemperature_dC = (int16_t)buf[44];       /* 3092 */
+    s_data.gridFrequency_cHz = buf[45];                /* 3093 */
+    s_data.invStatus         = buf[46];                /* 3094 */
+}
+
+/* Transaction 2: Battery + load (33133-33152 → wire 3132, 20 regs) */
+static void map_battery_regs(const uint16_t *buf)
+{
+    /* offsets relative to 3132 */
+    s_data.batVoltage_dV    = buf[0];                  /* 3132 */
+    s_data.batCurrent_dA    = (int16_t)buf[1];         /* 3133 */
+    s_data.batDirection     = buf[2];                   /* 3134 */
+    s_data.batSoc           = buf[6];                   /* 3138 */
+    s_data.batSoh           = buf[7];                   /* 3139 */
+    s_data.houseLoadPower_W = buf[14];                  /* 3146 */
+    s_data.backupLoadPower_W = buf[15];                 /* 3147 */
+    s_data.batPower_W       = s32_from_regs(buf[16], buf[17]); /* 3148-3149 */
+    s_data.gridPortPower_W  = s32_from_regs(buf[18], buf[19]); /* 3150-3151 */
+}
+
+/* Transaction 3: Meter total power (33263-33264 → wire 3262, 2 regs) */
+static void map_meter_regs(const uint16_t *buf)
+{
+    s_data.meterPower_W = s32_from_regs(buf[0], buf[1]);
+}
+
+/* --------------------------------------------------------------------------
  * Poll groups
  * -------------------------------------------------------------------------- */
 
@@ -85,51 +130,26 @@ static void poll_fast(void)
     uint16_t buf[48];
     eModbusErr err;
 
-    /* Transaction 1: PV + inverter (33049-33095 → wire 3048, 47 regs) */
     err = Modbus_ReadInputRegisters(s_cfg.slaveAddr, SOLIS_REG_PV1_VOLTAGE,
                                     47, buf, s_cfg.responseTimeoutMs);
     if (err == MODBUS_OK) {
-        /* PV: offsets relative to startReg 3048 */
-        s_data.pv1Voltage_dV  = buf[0];                   /* 3048 */
-        s_data.pv1Current_dA  = buf[1];                   /* 3049 */
-        s_data.pv2Voltage_dV  = buf[2];                   /* 3050 */
-        s_data.pv2Current_dA  = buf[3];                   /* 3051 */
-        s_data.pvPower_W      = u32_from_regs(buf[8], buf[9]); /* 3056-3057 */
-
-        /* Grid: offset 3072-3048 = 24 */
-        s_data.gridVoltage_dV   = buf[24];                 /* 3072 */
-        s_data.gridCurrent_dA   = buf[27];                 /* 3075 */
-        s_data.activePower_W    = s32_from_regs(buf[30], buf[31]); /* 3078-3079 */
-        s_data.invTemperature_dC = (int16_t)buf[44];       /* 3092 */
-        s_data.gridFrequency_cHz = buf[45];                /* 3093 */
-        s_data.invStatus         = buf[46];                /* 3094 */
+        map_pv_regs(buf);
     } else {
         s_data.errorCount++;
     }
 
-    /* Transaction 2: Battery + load (33133-33152 → wire 3132, 20 regs) */
     err = Modbus_ReadInputRegisters(s_cfg.slaveAddr, SOLIS_REG_BAT_VOLTAGE,
                                     20, buf, s_cfg.responseTimeoutMs);
     if (err == MODBUS_OK) {
-        /* offsets relative to 3132 */
-        s_data.batVoltage_dV    = buf[0];                  /* 3132 */
-        s_data.batCurrent_dA    = (int16_t)buf[1];         /* 3133 */
-        s_data.batDirection     = buf[2];                   /* 3134 */
-        s_data.batSoc           = buf[6];                   /* 3138 */
-        s_data.batSoh           = buf[7];                   /* 3139 */
-        s_data.houseLoadPower_W = buf[14];                  /* 3146 */
-        s_data.backupLoadPower_W = buf[15];                 /* 3147 */
-        s_data.batPower_W       = s32_from_regs(buf[16], buf[17]); /* 3148-3149 */
-        s_data.gridPortPower_W  = s32_from_regs(buf[18], buf[19]); /* 3150-3151 */
+        map_battery_regs(buf);
     } else {
         s_data.errorCount++;
     }
 
-    /* Transaction 3: Meter total power (33263-33264 → wire 3262, 2 regs) */
     err = Modbus_ReadInputRegisters(s_cfg.slaveAddr, SOLIS_REG_METER_POWER_HI,
                                     2, buf, s_cfg.responseTimeoutMs);
     if (err == MODBUS_OK) {
-        s_data.meterPower_W = s32_from_regs(buf[0], buf[1]);
+        map_meter_regs(buf);
     } else {
         s_data.errorCount++;
     }
@@ -333,6 +353,31 @@ void SolisPoller_SetBaud(uint32_t baud)
 void SolisPoller_SetSlaveAddr(uint8_t addr)
 {
     s_cfg.slaveAddr = addr;
+}
+
+int SolisPoller_InjectRegisters(const uint16_t *regs, uint16_t count)
+{
+    /* Identify the poll transaction by register count.  Writes race the
+     * poller task only field-wise (16/32-bit stores) — benign for the
+     * test tooling this exists for. */
+    switch (count) {
+    case 47:
+        map_pv_regs(regs);
+        break;
+    case 20:
+        map_battery_regs(regs);
+        break;
+    case 2:
+        map_meter_regs(regs);
+        break;
+    default:
+        TRice("Modbus inject: unmapped %u regs\n", count);
+        return -1;
+    }
+
+    s_data.pollCount++;
+    publish_telemetry();
+    return 0;
 }
 
 int SolisPoller_WriteRegister(uint16_t reg, uint16_t value)

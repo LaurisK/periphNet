@@ -7,6 +7,7 @@
 #include "usart.h"
 #include "main.h"
 #include "stm32f4xx_hal.h"
+#include "trice.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -16,6 +17,32 @@
 #define MODBUS_RX_BUF_SIZE  260  /* max response: 1+1+1+250+2 = 255 */
 
 static volatile int s_initialised;
+static eModbusPort  s_port = MODBUS_PORT_UART2;
+static volatile int s_monitorEnabled;
+
+/* --------------------------------------------------------------------------
+ * Frame monitoring — chunked hex dump; each record stays small and records
+ * without '\n' are joined into one output line by the trice tool
+ * -------------------------------------------------------------------------- */
+
+static void monitor_dump_bytes(const uint8_t *buf, uint16_t len)
+{
+    uint16_t i = 0;
+    while ((uint16_t)(len - i) >= 8U) {
+        const uint8_t *c = &buf[i];
+        uint8_t b0 = c[0], b1 = c[1], b2 = c[2], b3 = c[3];
+        uint8_t b4 = c[4], b5 = c[5], b6 = c[6], b7 = c[7];
+        TRice8("%02x %02x %02x %02x %02x %02x %02x %02x ",
+               b0, b1, b2, b3, b4, b5, b6, b7);
+        i += 8U;
+    }
+    while (i < len) {
+        uint8_t b0 = buf[i];
+        TRice8("%02x ", b0);
+        i++;
+    }
+    TRice("\n");
+}
 
 /* --------------------------------------------------------------------------
  * RS485 direction control (PD7)
@@ -77,6 +104,17 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
         return MODBUS_ERR_BUSY;
     }
 
+    /* Disabled port: no physical bus.  Show the request if monitoring is on
+     * and report an instant timeout (as if no slave answered). */
+    if (s_port == MODBUS_PORT_DISABLED) {
+        if (s_monitorEnabled) {
+            TRice("Modbus TX[%u]: ", txLen);
+            monitor_dump_bytes(txBuf, txLen);
+        }
+        *rxLen = 0;
+        return MODBUS_ERR_TIMEOUT;
+    }
+
     /* Inter-frame gap: 3.5 char times. At 9600 baud = ~4 ms */
     HAL_Delay(4);
 
@@ -93,6 +131,11 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
 
     if (st != HAL_OK) {
         return MODBUS_ERR_BUSY;
+    }
+
+    if (s_monitorEnabled) {
+        TRice("Modbus TX[%u]: ", txLen);
+        monitor_dump_bytes(txBuf, txLen);
     }
 
     /* RX: receive response byte-by-byte with timeout */
@@ -115,6 +158,11 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
 
     if (*rxLen == 0) {
         return MODBUS_ERR_TIMEOUT;
+    }
+
+    if (s_monitorEnabled) {
+        TRice("Modbus RX[%u]: ", *rxLen);
+        monitor_dump_bytes(rxBuf, *rxLen);
     }
 
     return MODBUS_OK;
@@ -190,6 +238,12 @@ static eModbusErr read_registers(uint8_t fc, uint8_t slave, uint16_t startReg,
 
 int Modbus_Init(uint32_t baud)
 {
+    /* Disabled port: no UART to configure — transactions time out instantly */
+    if (s_port == MODBUS_PORT_DISABLED) {
+        s_initialised = 1;
+        return 0;
+    }
+
     /* Reconfigure USART2 to the requested baud rate */
     HAL_UART_DeInit(&huart2);
 
@@ -215,8 +269,100 @@ int Modbus_Init(uint32_t baud)
 void Modbus_DeInit(void)
 {
     s_initialised = 0;
+    if (s_port == MODBUS_PORT_DISABLED) {
+        return;
+    }
     rs485_rx_enable();
     HAL_UART_DeInit(&huart2);
+}
+
+/* --------------------------------------------------------------------------
+ * Port selection / monitoring / injection (integration-test support)
+ * -------------------------------------------------------------------------- */
+
+int Modbus_SetPort(eModbusPort port)
+{
+    if (port == MODBUS_PORT_UART6) {
+        TRice("Modbus port: UART6 not configured\n");
+        return -1;
+    }
+    if (port != MODBUS_PORT_UART2 && port != MODBUS_PORT_DISABLED) {
+        return -1;
+    }
+    /* No live switching: the poller owns the UART while initialised */
+    if (s_initialised) {
+        TRice("Modbus port: stop poller first\n");
+        return -1;
+    }
+    s_port = port;
+    return 0;
+}
+
+eModbusPort Modbus_GetPort(void)
+{
+    return s_port;
+}
+
+void Modbus_SetMonitor(int enable)
+{
+    s_monitorEnabled = enable ? 1 : 0;
+}
+
+int Modbus_GetMonitor(void)
+{
+    return s_monitorEnabled;
+}
+
+eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
+                                       uint16_t *regs, uint16_t maxRegs,
+                                       uint16_t *regCount)
+{
+    *regCount = 0;
+
+    if (len < 4) {
+        TRice("Modbus inject: ERR_SHORT\n");
+        return MODBUS_ERR_SHORT;
+    }
+
+    uint16_t rxCrc = (uint16_t)frame[len - 2] |
+                     ((uint16_t)frame[len - 1] << 8);
+    if (rxCrc != Modbus_CRC16(frame, (size_t)len - 2)) {
+        TRice("Modbus inject: ERR_CRC\n");
+        return MODBUS_ERR_CRC;
+    }
+
+    if (s_monitorEnabled) {
+        TRice("Modbus RX[%u]: ", len);
+        monitor_dump_bytes(frame, len);
+    }
+
+    if (frame[1] & 0x80) {
+        TRice("Modbus inject: ERR_EXCEPTION\n");
+        return MODBUS_ERR_EXCEPTION;
+    }
+
+    /* Only register-read responses (FC 0x03/0x04) carry data to decode */
+    if (frame[1] != 0x03 && frame[1] != 0x04) {
+        TRice("Modbus inject: ERR_SHORT\n");
+        return MODBUS_ERR_SHORT;
+    }
+
+    uint8_t byteCount = frame[2];
+    if ((uint16_t)(byteCount + 5) != len || (byteCount & 1) ||
+        (uint16_t)(byteCount / 2) > maxRegs) {
+        TRice("Modbus inject: ERR_SHORT\n");
+        return MODBUS_ERR_SHORT;
+    }
+
+    uint16_t count = byteCount / 2;
+    for (uint16_t i = 0; i < count; i++) {
+        regs[i] = ((uint16_t)frame[3 + i * 2] << 8) |
+                   (uint16_t)frame[4 + i * 2];
+    }
+    *regCount = count;
+
+    TRice("Modbus inject: %u bytes\n", len);
+    return MODBUS_OK;
 }
 
 eModbusErr Modbus_ReadInputRegisters(uint8_t slave, uint16_t startReg,
