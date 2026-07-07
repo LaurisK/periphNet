@@ -29,6 +29,7 @@ set(UNIT_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
     ${PROJECT_ROOT}/Shared/Crypto
     ${PROJECT_ROOT}/Shared/Fwu
+    ${PROJECT_ROOT}/Shared/Modbus
 )
 
 add_executable(test_crypto
@@ -57,6 +58,49 @@ add_executable(test_boot_status
 )
 target_include_directories(test_boot_status PRIVATE ${UNIT_INCLUDES})
 add_test(NAME boot_status COMMAND test_boot_status)
+
+add_executable(test_modbus_store
+    test_modbus_store.c
+    mocks/w25q128_mock.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_modbus_store PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_store COMMAND test_modbus_store)
+
+add_executable(test_modbus_units
+    test_modbus_units.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
+)
+target_include_directories(test_modbus_units PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_units COMMAND test_modbus_units)
+
+add_executable(test_modbus_compiler
+    test_modbus_compiler.c
+    mocks/w25q128_mock.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_modbus_compiler PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_compiler COMMAND test_modbus_compiler)
+
+add_executable(test_modbus_export
+    test_modbus_export.c
+    mocks/w25q128_mock.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_export.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_decode.c
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_modbus_export PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_export COMMAND test_modbus_export)
 
 # ==============================================================================
 # CppUTest suite (fetched from GitHub) — OFF by default.

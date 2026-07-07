@@ -1,16 +1,22 @@
 /**
  * @file    mqtt_bridge.c
- * @brief   MQTT bridge — energy telemetry → MQTT → Home Assistant
+ * @brief   MQTT bridge — Modbus config points → MQTT → Home Assistant
  *
  * Uses the lwIP built-in MQTT client (mqtt.h).  All lwIP MQTT callbacks
- * run in tcpip_thread context — no Trice calls in callbacks.
+ * run in tcpip_thread context — no Trice calls and no flash access in
+ * callbacks; everything is deferred to mqttTask.  All raw lwIP MQTT calls
+ * go through the tcpip core lock because MqttBridge_Publish is also called
+ * from the Modbus walker task.
  */
 
 #include "App/Mqtt/mqtt_bridge.h"
-#include "App/Data/telemetry.h"
-#include "App/Modbus/solis_poller.h"
+#include "App/Modbus/modbus_walker.h"
 #include "cmsis_os.h"
 #include "trice.h"
+
+#include "modbus_config_store.h"
+#include "modbus_decode.h"
+#include "modbus_units.h"
 
 #include "lwip/apps/mqtt.h"
 #include "lwip/ip_addr.h"
@@ -40,21 +46,20 @@ static uint32_t          s_reconnectCount;
  * -------------------------------------------------------------------------- */
 
 #define TOPIC_MAX   80
-#define PAYLOAD_MAX 512
+#define PAYLOAD_MAX 768
 
 static char s_topic[TOPIC_MAX];
 static char s_payload[PAYLOAD_MAX];
 
 /* --------------------------------------------------------------------------
- * Integration-test support state
+ * Deferred work state
  *
- * Trice is forbidden in tcpip_thread, so everything observed in the
- * incoming callbacks is recorded here and logged from mqttTask
- * (service_test_hooks).
+ * Trice and flash access are forbidden in tcpip_thread, so the incoming
+ * callbacks only record what happened; mqttTask (service_test_hooks)
+ * resolves set-topic writes against the flash config and does the logging.
  * -------------------------------------------------------------------------- */
 
 static volatile int s_monitorEnabled;
-static volatile int s_publishNow;
 
 /* Last incoming topic (written in publish_cb, consumed in data_cb) */
 static char s_inTopic[TOPIC_MAX];
@@ -66,13 +71,12 @@ static struct {
     volatile int ready;
 } s_subLog;
 
-/* Deferred "Modbus write: reg N = V" log */
+/* Deferred inbound ".../set" message awaiting config lookup in mqttTask */
 static struct {
-    uint16_t     reg;
-    uint16_t     val;
-    int          res;
+    char         topic[TOPIC_MAX];
+    char         payload[32];
     volatile int ready;
-} s_writeLog;
+} s_pendingSet;
 
 /* Injected message; processed via tcpip_callback so the real incoming
  * callbacks run in their native tcpip_thread context */
@@ -88,22 +92,8 @@ static struct {
     volatile int state;
 } s_inject;
 
-/* Writable register map: topic suffix (after "prefix/") → wire register */
-typedef struct {
-    const char *suffix;
-    uint16_t    reg;
-    uint16_t    min;
-    uint16_t    max;
-} sSetTopicMap;
-
-static const sSetTopicMap s_setTopics[] = {
-    { "overdischarge_soc/set", 3010,  5,  40 },
-    { "max_charge_soc/set",    3009, 70, 100 },
-    { NULL, 0, 0, 0 }
-};
-
 /* --------------------------------------------------------------------------
- * MQTT callbacks (run in tcpip_thread — no Trice!)
+ * MQTT callbacks (run in tcpip_thread — no Trice, no flash!)
  * -------------------------------------------------------------------------- */
 
 static void mqtt_connection_cb(mqtt_client_t *client, void *arg,
@@ -143,27 +133,14 @@ static void mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
         s_subLog.ready = 1;
     }
 
-    /* Map "prefix/<suffix>/set" onto a writable Solis register */
-    size_t prefixLen = strlen(s_cfg.prefix);
-    if (strncmp(s_inTopic, s_cfg.prefix, prefixLen) != 0 ||
-        s_inTopic[prefixLen] != '/') {
-        return;
-    }
-    const char *suffix = s_inTopic + prefixLen + 1;
-
-    for (const sSetTopicMap *m = s_setTopics; m->suffix != NULL; m++) {
-        if (strcmp(suffix, m->suffix) == 0) {
-            int val = atoi(buf);
-            if (val >= (int)m->min && val <= (int)m->max &&
-                !s_writeLog.ready) {
-                s_writeLog.reg   = m->reg;
-                s_writeLog.val   = (uint16_t)val;
-                s_writeLog.res   = SolisPoller_WriteRegister(m->reg,
-                                                             (uint16_t)val);
-                s_writeLog.ready = 1;
-            }
-            return;
-        }
+    /* Hand ".../set" messages to mqttTask — resolving them needs the flash
+     * config, which must not be touched from tcpip_thread */
+    size_t tlen = strlen(s_inTopic);
+    if (tlen > 4u && strcmp(&s_inTopic[tlen - 4u], "/set") == 0 &&
+        !s_pendingSet.ready && strlen(buf) < sizeof(s_pendingSet.payload)) {
+        strcpy(s_pendingSet.topic, s_inTopic);
+        strcpy(s_pendingSet.payload, buf);
+        s_pendingSet.ready = 1;
     }
 }
 
@@ -182,192 +159,269 @@ static void mqtt_inject_cb(void *ctx)
 }
 
 /* --------------------------------------------------------------------------
- * Publish helpers
+ * Publish core — the single path to the raw lwIP publish API.
+ * Called from mqttTask and the Modbus walker task; the tcpip core lock
+ * serializes both against tcpip_thread and each other.
  * -------------------------------------------------------------------------- */
 
-static void publish(const char *suffix, const char *value)
+static int do_publish(const char *topic, const char *payload, uint16_t len,
+                      uint8_t retain, int monitorLog)
 {
-    snprintf(s_topic, sizeof(s_topic), "%s/%s", s_cfg.prefix, suffix);
-
-    /* Monitor logs even without a broker so the bridge output is
-     * observable in broker-less (CI) testing.  Runs in mqttTask only. */
-    if (s_monitorEnabled) {
-        static char mon[100];
-        snprintf(mon, sizeof(mon), "%s = %s", s_topic, value);
+    if (monitorLog && s_monitorEnabled) {
+        char mon[110];
+        snprintf(mon, sizeof(mon), "%s = %s", topic, payload);
         TRiceS("MQTT pub: %s\n", mon);
     }
 
-    if (!s_connected || s_client == NULL) return;
+    if (!s_connected || s_client == NULL) {
+        return -1;
+    }
 
-    mqtt_publish(s_client, s_topic, value, strlen(value),
-                 0 /* QoS 0 */, 1 /* retain */, NULL, NULL);
+    LOCK_TCPIP_CORE();
+    err_t err = mqtt_publish(s_client, topic, payload, len,
+                             0 /* QoS 0 */, retain, NULL, NULL);
+    UNLOCK_TCPIP_CORE();
+
+    if (err != ERR_OK) {
+        return -1;
+    }
+    s_publishCount++;
+    return 0;
 }
 
-static void publish_int(const char *suffix, int32_t value)
+int MqttBridge_Publish(const char *topic, const char *payload,
+                       uint16_t payloadLen, uint8_t retain)
 {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d", (int)value);
-    publish(suffix, buf);
+    return do_publish(topic, payload, payloadLen, retain, 1);
 }
 
-static void publish_float1(const char *suffix, uint16_t raw_d)
+void MqttBridge_PublishDeviceStatus(const char *topicPrefix, int online)
 {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u.%u", raw_d / 10, raw_d % 10);
-    publish(suffix, buf);
-}
-
-static void publish_float2(const char *suffix, uint16_t raw_c)
-{
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u.%02u", raw_c / 100, raw_c % 100);
-    publish(suffix, buf);
+    char topic[48];
+    snprintf(topic, sizeof(topic), "%s/availability", topicPrefix);
+    do_publish(topic, online ? "online" : "offline",
+               online ? 6 : 7, 1 /* retain */, 1);
 }
 
 /* --------------------------------------------------------------------------
- * Home Assistant MQTT auto-discovery
+ * Config walking helpers (mqttTask only)
  * -------------------------------------------------------------------------- */
 
-typedef struct {
-    const char *name;
-    const char *suffix;
-    const char *deviceClass;
-    const char *stateClass;
-    const char *unit;
-} sHaSensorDef;
+/* Consume the remaining transactions/points of the current device. */
+static int skip_device_body(sMbCfgCursor *c)
+{
+    sModbusTransactionRecord txn;
+    sModbusPointRecord       pt;
+    int rt, rp;
 
-static const sHaSensorDef s_sensors[] = {
-    { "PV1 Voltage",       "pv1_voltage",       "voltage",     "measurement", "V"    },
-    { "PV1 Current",       "pv1_current",       "current",     "measurement", "A"    },
-    { "PV2 Voltage",       "pv2_voltage",       "voltage",     "measurement", "V"    },
-    { "PV2 Current",       "pv2_current",       "current",     "measurement", "A"    },
-    { "PV Power",          "pv_power",          "power",       "measurement", "W"    },
-    { "Grid Voltage",      "grid_voltage",      "voltage",     "measurement", "V"    },
-    { "Grid Frequency",    "grid_frequency",    "frequency",   "measurement", "Hz"   },
-    { "Active Power",      "active_power",      "power",       "measurement", "W"    },
-    { "Temperature",       "inverter_temp",     "temperature", "measurement", "\xc2\xb0""C" },
-    { "Battery Voltage",   "battery_voltage",   "voltage",     "measurement", "V"    },
-    { "Battery Current",   "battery_current",   "current",     "measurement", "A"    },
-    { "Battery SOC",       "battery_soc",       "battery",     "measurement", "%"    },
-    { "Battery SOH",       "battery_soh",       NULL,          "measurement", "%"    },
-    { "Battery Power",     "battery_power",     "power",       "measurement", "W"    },
-    { "House Load",        "house_load_power",  "power",       "measurement", "W"    },
-    { "Backup Load",       "backup_load_power", "power",       "measurement", "W"    },
-    { "Grid Port Power",   "grid_port_power",   "power",       "measurement", "W"    },
-    { "Meter Power",       "meter_power",       "power",       "measurement", "W"    },
-    { "Today PV",          "today_pv",          "energy",      "total_increasing", "kWh" },
-    { "Today Grid Import", "today_grid_import", "energy",      "total_increasing", "kWh" },
-    { "Today Grid Export", "today_grid_export", "energy",      "total_increasing", "kWh" },
-    { "Today Consumption", "today_consumption", "energy",      "total_increasing", "kWh" },
-    { "Today Bat Charge",  "today_bat_charge",  "energy",      "total_increasing", "kWh" },
-    { "Today Bat Discharge","today_bat_discharge","energy",    "total_increasing", "kWh" },
-    { "Total PV",          "total_pv",          "energy",      "total_increasing", "kWh" },
-    { NULL, NULL, NULL, NULL, NULL }
-};
+    while ((rt = MbCfg_NextTransaction(c, &txn)) == 1) {
+        while ((rp = MbCfg_NextPoint(c, &pt)) == 1) { }
+        if (rp != 0) {
+            return -1;
+        }
+    }
+    return (rt == 0) ? 0 : -1;
+}
+
+/* --------------------------------------------------------------------------
+ * Set-topic resolution — "<topicPrefix>/<name>/set" against the active
+ * config's writable points (design §11). Runs in mqttTask.
+ * -------------------------------------------------------------------------- */
+
+static void handle_set_message(const char *topic, const char *payload)
+{
+    char prefix[MB_TOPIC_PREFIX_LEN];
+    char name[MB_POINT_NAME_LEN];
+
+    /* Split "<prefix>/<name>/set" — prefix and name contain no '/' */
+    const char *slash1 = strchr(topic, '/');
+    if (slash1 == NULL) {
+        return;
+    }
+    const char *slash2 = strchr(slash1 + 1, '/');
+    if (slash2 == NULL || strcmp(slash2, "/set") != 0) {
+        return;
+    }
+
+    size_t plen = (size_t)(slash1 - topic);
+    size_t nlen = (size_t)(slash2 - slash1 - 1);
+    if (plen == 0u || plen >= sizeof(prefix) ||
+        nlen == 0u || nlen >= sizeof(name)) {
+        return;
+    }
+    memcpy(prefix, topic, plen);
+    prefix[plen] = '\0';
+    memcpy(name, slash1 + 1, nlen);
+    name[nlen] = '\0';
+
+    sMbPointLookup lk;
+    if (MbCfg_FindWritablePoint(prefix, name, &lk) != 0) {
+        TRiceS("MQTT set: no writable point: %s\n", (char *)topic);
+        return;
+    }
+
+    /* Parse the payload in the point's scaled-int domain (= raw register
+     * value) and enforce the config's write range — this preserves the
+     * safety behaviour of the old hardcoded Solis set-topic map. */
+    int32_t scaled;
+    if (MbParse_Scaled(payload, lk.point.scalePow10, &scaled) != 0 ||
+        scaled < lk.point.writeMin || scaled > lk.point.writeMax ||
+        scaled < 0 || scaled > UINT16_MAX) {
+        TRice("Modbus write: reg %u rejected\n", lk.regAddr);
+        return;
+    }
+
+    if (ModbusWalker_WriteRegister(lk.slaveAddr, lk.regAddr,
+                                   (uint16_t)scaled) == 0) {
+        TRice("Modbus write: reg %u = %u\n", lk.regAddr, (unsigned)scaled);
+    } else {
+        TRice("Modbus write: reg %u rejected\n", lk.regAddr);
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Home Assistant MQTT auto-discovery — generated from the active config
+ * (design §12): sensors for every point, an additional number entity for
+ * writable points. Grouped per device by topicPrefix.
+ * -------------------------------------------------------------------------- */
+
+static void ha_publish_entity(const char *devPrefix,
+                              const sModbusPointRecord *pt,
+                              uint16_t regAddr, int asNumber)
+{
+    (void)regAddr;
+    const sMbUnitInfo *unit = MbUnits_FromCode(pt->unit);
+    int n;
+
+    snprintf(s_topic, sizeof(s_topic), "homeassistant/%s/%s/%s%s/config",
+             asNumber ? "number" : "sensor", devPrefix, pt->name,
+             asNumber ? "_set" : "");
+
+    n = snprintf(s_payload, sizeof(s_payload),
+        "{"
+        "\"name\":\"%s\","
+        "\"state_topic\":\"%s/%s\","
+        "\"unique_id\":\"%s_%s%s\",",
+        pt->name,
+        devPrefix, pt->name,
+        devPrefix, pt->name, asNumber ? "_set" : "");
+
+    if (asNumber) {
+        char minBuf[16], maxBuf[16], stepBuf[16];
+        MbFormat_Scaled(minBuf, sizeof(minBuf), pt->writeMin, pt->scalePow10);
+        MbFormat_Scaled(maxBuf, sizeof(maxBuf), pt->writeMax, pt->scalePow10);
+        MbFormat_Scaled(stepBuf, sizeof(stepBuf), 1, pt->scalePow10);
+        n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+            "\"command_topic\":\"%s/%s/set\","
+            "\"min\":%s,\"max\":%s,\"step\":%s,",
+            devPrefix, pt->name, minBuf, maxBuf, stepBuf);
+    } else {
+        if (unit != NULL && unit->haDeviceClass != NULL) {
+            n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+                "\"device_class\":\"%s\",", unit->haDeviceClass);
+        }
+        if (pt->decodeType != MB_DECODE_ASCII && unit != NULL) {
+            n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+                "\"state_class\":\"%s\",", unit->haStateClass);
+        }
+    }
+
+    if (unit != NULL && unit->haUnit != NULL) {
+        n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+            "\"unit_of_measurement\":\"%s\",", unit->haUnit);
+    }
+
+    n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+        "\"availability\":[{\"topic\":\"%s/status\"},"
+        "{\"topic\":\"%s/availability\"}],"
+        "\"availability_mode\":\"all\","
+        "\"device\":{"
+          "\"name\":\"%s\","
+          "\"identifiers\":[\"%s\"],"
+          "\"sw_version\":\"PeriphNet\","
+          "\"via_device\":\"%s\""
+        "}"
+        "}",
+        s_cfg.prefix, devPrefix,
+        devPrefix, devPrefix, s_cfg.prefix);
+
+    if (n > 0 && n < (int)sizeof(s_payload)) {
+        do_publish(s_topic, s_payload, (uint16_t)n, 1 /* retain */, 0);
+        /* Small delay between discovery messages to avoid overwhelming
+           the lwIP output buffer */
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
 static void publish_ha_discovery(void)
 {
-    for (const sHaSensorDef *s = s_sensors; s->name != NULL; s++) {
-        snprintf(s_topic, sizeof(s_topic),
-                 "homeassistant/sensor/%s/%s/config",
-                 s_cfg.prefix, s->suffix);
+    sMbCfgCursor             c;
+    sModbusDeviceRecord      dev;
+    sModbusTransactionRecord txn;
+    sModbusPointRecord       pt;
 
-        int n = snprintf(s_payload, sizeof(s_payload),
-            "{"
-            "\"name\":\"%s\","
-            "\"state_topic\":\"%s/%s\","
-            "\"unique_id\":\"%s_%s\","
-            "%s%s%s"     /* device_class (optional) */
-            "\"state_class\":\"%s\","
-            "\"unit_of_measurement\":\"%s\","
-            "\"device\":{"
-              "\"name\":\"Solis Inverter\","
-              "\"manufacturer\":\"Ginlong Solis\","
-              "\"identifiers\":[\"%s_solis\"],"
-              "\"sw_version\":\"PeriphNet\","
-              "\"via_device\":\"%s\""
-            "}"
-            "}",
-            s->name,
-            s_cfg.prefix, s->suffix,
-            s_cfg.prefix, s->suffix,
-            s->deviceClass ? "\"device_class\":\"" : "",
-            s->deviceClass ? s->deviceClass : "",
-            s->deviceClass ? "\"," : "",
-            s->stateClass,
-            s->unit,
-            s_cfg.prefix,
-            s_cfg.prefix);
+    if (MbCfg_Open(MbCfgStore_ActiveBase(), &c) != 0) {
+        TRice("MQTT: no valid Modbus config for HA discovery\n");
+        return;
+    }
 
-        if (n > 0 && n < (int)sizeof(s_payload)) {
-            mqtt_publish(s_client, s_topic, s_payload, (u16_t)n,
-                         0, 1 /* retain */, NULL, NULL);
-            /* Small delay between discovery messages to avoid overwhelming
-               the lwIP output buffer */
-            vTaskDelay(pdMS_TO_TICKS(50));
+    while (MbCfg_NextDevice(&c, &dev) == 1 && !s_stopReq) {
+        int rt;
+        while ((rt = MbCfg_NextTransaction(&c, &txn)) == 1) {
+            int rp;
+            while ((rp = MbCfg_NextPoint(&c, &pt)) == 1) {
+                uint16_t regAddr = (uint16_t)(txn.startAddr + pt.offset);
+                ha_publish_entity(dev.topicPrefix, &pt, regAddr, 0);
+                if (pt.flags & MB_POINT_FLAG_WRITABLE) {
+                    ha_publish_entity(dev.topicPrefix, &pt, regAddr, 1);
+                }
+            }
+            if (rp != 0) {
+                return;
+            }
+        }
+        if (rt != 0) {
+            return;
         }
     }
 }
 
 /* --------------------------------------------------------------------------
- * Publish all current values from the telemetry snapshot
+ * Per-device set-topic subscriptions (walked from the active config)
  * -------------------------------------------------------------------------- */
 
-static void publish_all_values(void)
+static void subscribe_set_topics(void)
 {
-    sEnergyTelemetry snapshot;
-    if (Telemetry_GetEnergy(&snapshot) != 0) return;   /* no data yet */
-    const sEnergyTelemetry *d = &snapshot;
+    sMbCfgCursor        c;
+    sModbusDeviceRecord dev;
+    int                 any = 0;
 
-    publish_float1("pv1_voltage",    d->pv1Voltage_dV);
-    publish_float1("pv1_current",    d->pv1Current_dA);
-    publish_float1("pv2_voltage",    d->pv2Voltage_dV);
-    publish_float1("pv2_current",    d->pv2Current_dA);
-    publish_int("pv_power",          (int32_t)d->pvPower_W);
-    publish_float1("grid_voltage",   d->gridVoltage_dV);
-    publish_float2("grid_frequency", d->gridFrequency_cHz);
-    publish_int("active_power",      d->activePower_W);
-
-    {
-        /* Temperature: signed x0.1 */
-        int16_t t = d->invTemperature_dC;
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d.%u",
-                 t / 10, (t < 0 ? -t : t) % 10);
-        publish("inverter_temp", buf);
+    if (MbCfg_Open(MbCfgStore_ActiveBase(), &c) == 0) {
+        while (MbCfg_NextDevice(&c, &dev) == 1) {
+            snprintf(s_topic, sizeof(s_topic), "%s/+/set", dev.topicPrefix);
+            LOCK_TCPIP_CORE();
+            mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
+            UNLOCK_TCPIP_CORE();
+            any = 1;
+            if (skip_device_body(&c) != 0) {
+                break;
+            }
+        }
     }
 
-    publish_float1("battery_voltage", d->batVoltage_dV);
-    {
-        int16_t c = d->batCurrent_dA;
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d.%u",
-                 c / 10, (c < 0 ? -c : c) % 10);
-        publish("battery_current", buf);
+    if (!any) {
+        /* No valid config — keep the old bridge-prefix subscription */
+        snprintf(s_topic, sizeof(s_topic), "%s/+/set", s_cfg.prefix);
+        LOCK_TCPIP_CORE();
+        mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
+        UNLOCK_TCPIP_CORE();
     }
-    publish_int("battery_soc",       (int32_t)d->batSoc);
-    publish_int("battery_soh",       (int32_t)d->batSoh);
-    publish_int("battery_power",     d->batPower_W);
-    publish_int("house_load_power",  (int32_t)d->houseLoadPower_W);
-    publish_int("backup_load_power", (int32_t)d->backupLoadPower_W);
-    publish_int("grid_port_power",   d->gridPortPower_W);
-    publish_int("meter_power",       d->meterPower_W);
-
-    publish_float1("today_pv",           d->todayPv_dkWh);
-    publish_float1("today_grid_import",  d->todayGridImport_dkWh);
-    publish_float1("today_grid_export",  d->todayGridExport_dkWh);
-    publish_float1("today_consumption",  d->todayConsumption_dkWh);
-    publish_float1("today_bat_charge",   d->todayBatChg_dkWh);
-    publish_float1("today_bat_discharge",d->todayBatDsg_dkWh);
-    publish_int("total_pv",             (int32_t)d->totalPv_kWh);
-
-    s_publishCount++;
 }
 
 /* --------------------------------------------------------------------------
  * Test-hook servicing — runs in mqttTask (Trice safe).  Also called inside
- * the reconnect backoff wait so injection/publish-now stay responsive with
- * no broker present (backoff can reach 60 s).
+ * the reconnect backoff wait so injection stays responsive with no broker
+ * present (backoff can reach 60 s).
  * -------------------------------------------------------------------------- */
 
 static void service_test_hooks(void)
@@ -391,19 +445,9 @@ static void service_test_hooks(void)
         s_subLog.ready = 0;
     }
 
-    if (s_writeLog.ready) {
-        if (s_writeLog.res == 0) {
-            TRice("Modbus write: reg %u = %u\n",
-                  s_writeLog.reg, s_writeLog.val);
-        } else {
-            TRice("Modbus write: reg %u rejected\n", s_writeLog.reg);
-        }
-        s_writeLog.ready = 0;
-    }
-
-    if (s_publishNow) {
-        s_publishNow = 0;
-        publish_all_values();
+    if (s_pendingSet.ready) {
+        handle_set_message(s_pendingSet.topic, s_pendingSet.payload);
+        s_pendingSet.ready = 0;
     }
 }
 
@@ -423,7 +467,8 @@ static int mqtt_do_connect(void)
     ci.client_id   = s_cfg.prefix;
     ci.keep_alive  = 60;
 
-    /* Last Will: prefix/status = "offline" */
+    /* Last Will: prefix/status = "offline" (bridge-wide; per-device
+     * availability is walker-driven, see MqttBridge_PublishDeviceStatus) */
     snprintf(s_topic, sizeof(s_topic), "%s/status", s_cfg.prefix);
     ci.will_topic  = s_topic;
     ci.will_msg    = "offline";
@@ -434,11 +479,13 @@ static int mqtt_do_connect(void)
     IP4_ADDR(&addr, s_cfg.brokerIp[0], s_cfg.brokerIp[1],
              s_cfg.brokerIp[2], s_cfg.brokerIp[3]);
 
+    LOCK_TCPIP_CORE();
     mqtt_set_inpub_callback(s_client, mqtt_incoming_publish_cb,
                             mqtt_incoming_data_cb, NULL);
 
     err_t err = mqtt_client_connect(s_client, &addr, s_cfg.brokerPort,
                                     mqtt_connection_cb, NULL, &ci);
+    UNLOCK_TCPIP_CORE();
     return (err == ERR_OK) ? 0 : -1;
 }
 
@@ -456,8 +503,8 @@ static void mqttTask(void *arg)
           s_cfg.brokerPort, s_cfg.prefix);
 
     uint32_t reconnectDelay = 2000;
-    uint32_t lastPublish = 0;
     int      discoveryDone = 0;
+    uint32_t discoveryBase = 0;
 
     while (!s_stopReq) {
         service_test_hooks();
@@ -487,29 +534,27 @@ static void mqttTask(void *arg)
             reconnectDelay = 2000;
             TRice("MQTT: connected to broker\n");
 
-            /* Publish online status */
+            /* Publish online status (bridge-wide LWT counterpart) */
             char statusTopic[48];
             snprintf(statusTopic, sizeof(statusTopic), "%s/status", s_cfg.prefix);
-            mqtt_publish(s_client, statusTopic, "online", 6,
-                         0, 1 /* retain */, NULL, NULL);
+            do_publish(statusTopic, "online", 6, 1 /* retain */, 0);
 
-            /* Subscribe to writable-register set topics */
-            snprintf(s_topic, sizeof(s_topic), "%s/+/set", s_cfg.prefix);
-            mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
+            /* Subscribe to writable-point set topics per config device */
+            subscribe_set_topics();
         }
 
-        /* Publish HA discovery (once per connection) */
-        if (s_connected && !discoveryDone) {
+        /* Publish HA discovery once per connection — and again after a
+         * config hot-swap (active region flipped) so new devices/points
+         * appear without a reconnect */
+        if (s_connected &&
+            (!discoveryDone || discoveryBase != MbCfgStore_ActiveBase())) {
             TRice("MQTT: publishing HA discovery\n");
+            discoveryBase = MbCfgStore_ActiveBase();
             publish_ha_discovery();
+            if (discoveryDone) {
+                subscribe_set_topics();   /* config changed: re-subscribe */
+            }
             discoveryDone = 1;
-        }
-
-        /* Periodic data publish */
-        uint32_t now = HAL_GetTick();
-        if (s_connected && (now - lastPublish) >= s_cfg.publishIntervalMs) {
-            publish_all_values();
-            lastPublish = now;
         }
 
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -520,11 +565,12 @@ static void mqttTask(void *arg)
         if (s_connected) {
             char statusTopic[48];
             snprintf(statusTopic, sizeof(statusTopic), "%s/status", s_cfg.prefix);
-            mqtt_publish(s_client, statusTopic, "offline", 7,
-                         0, 1, NULL, NULL);
+            do_publish(statusTopic, "offline", 7, 1, 0);
             vTaskDelay(pdMS_TO_TICKS(200));
         }
+        LOCK_TCPIP_CORE();
         mqtt_disconnect(s_client);
+        UNLOCK_TCPIP_CORE();
         /* mqtt_client_free not available in lwIP 2.1 — client is static-like */
         s_client = NULL;
     }
@@ -553,18 +599,14 @@ void MqttBridge_Start(const sMqttBridgeCfg *cfg)
     if (s_cfg.brokerPort == 0) {
         s_cfg.brokerPort = 1883;
     }
-    if (s_cfg.publishIntervalMs == 0) {
-        s_cfg.publishIntervalMs = 5000;
-    }
 
     s_stopReq = 0;
     s_connected = 0;
     s_publishCount = 0;
     s_reconnectCount = 0;
-    s_publishNow = 0;
     s_inject.state = INJECT_IDLE;
     s_subLog.ready = 0;
-    s_writeLog.ready = 0;
+    s_pendingSet.ready = 0;
 
     static const osThreadAttr_t attr = {
         .name       = "mqtt",
@@ -657,5 +699,5 @@ int MqttBridge_Inject(const char *topic, const char *payload,
 
 void MqttBridge_PublishNow(void)
 {
-    s_publishNow = 1;
+    ModbusWalker_ForceRepublish();
 }

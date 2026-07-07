@@ -83,6 +83,10 @@
 		"Type": "TRice",
 		"Strg": "FWU: done %u bytes\\n"
 	},
+	"1370": {
+		"Type": "TRiceS",
+		"Strg": "MQTT set: no writable point: %s\\n"
+	},
 	"1390": {
 		"Type": "TRice",
 		"Strg": "CFSR = 0x%08X\\n"
@@ -223,6 +227,10 @@
 		"Type": "trice",
 		"Strg": "\\t R12 = 0x%08X\\n\\t LR  = 0x%08X\\n"
 	},
+	"2246": {
+		"Type": "TRice",
+		"Strg": "Modbus config: apply armed (walker swaps at lap boundary)\\n"
+	},
 	"2266": {
 		"Type": "trice",
 		"Strg": "err:Fault Status:\\n"
@@ -242,6 +250,10 @@
 	"2352": {
 		"Type": "TRice",
 		"Strg": "FWU: erase done\\n"
+	},
+	"2358": {
+		"Type": "TRice",
+		"Strg": "Modbus write: reg %u rejected\\n"
 	},
 	"2382": {
 		"Type": "TRice",
@@ -303,6 +315,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Instruction access violation\\n"
 	},
+	"2565": {
+		"Type": "TRiceS",
+		"Strg": "Modbus: default config rejected: %s\\n"
+	},
 	"2572": {
 		"Type": "TRice",
 		"Strg": "FWU: page addr=0x%X len=%u last=%u\\n"
@@ -338,6 +354,10 @@
 	"2788": {
 		"Type": "TRice",
 		"Strg": "FWU: tcp_recved %u -\u003e tcpip_thread\\n"
+	},
+	"2790": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus inject \u003cstartAddr\u003e \u003chexbytes\u003e\\n"
 	},
 	"2794": {
 		"Type": "trice",
@@ -431,6 +451,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Vector table read fault\\n"
 	},
+	"3172": {
+		"Type": "TRice",
+		"Strg": "Modbus config: region %u, %u devices %u txns %u points\\n"
+	},
 	"3180": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Exception Return ---\\n"
@@ -438,6 +462,10 @@
 	"3222": {
 		"Type": "TRice",
 		"Strg": "Usage: mqtt monitor on|off\\n"
+	},
+	"3231": {
+		"Type": "TRiceS",
+		"Strg": "Modbus: device online: %s\\n"
 	},
 	"3249": {
 		"Type": "TRice",
@@ -479,6 +507,10 @@
 		"Type": "TRice",
 		"Strg": " chg=%u dsg=%u"
 	},
+	"3408": {
+		"Type": "TRice",
+		"Strg": "Modbus config: factory default staged + apply armed\\n"
+	},
 	"3414": {
 		"Type": "TRice",
 		"Strg": "BmsReader: stopped\\n"
@@ -507,6 +539,10 @@
 		"Type": "TRICE0",
 		"Strg": "\\n========================================\\n"
 	},
+	"3485": {
+		"Type": "TRice",
+		"Strg": "Modbus: wrote reg %u = %u\\n"
+	},
 	"3512": {
 		"Type": "TRice",
 		"Strg": "Modbus monitor: on\\n"
@@ -526,6 +562,10 @@
 	"3589": {
 		"Type": "TRice",
 		"Strg": "FWU: erase FAIL 0x%X\\n"
+	},
+	"3619": {
+		"Type": "TRice",
+		"Strg": "MQTT: no valid Modbus config for HA discovery\\n"
 	},
 	"3640": {
 		"Type": "TRice",
@@ -547,6 +587,10 @@
 		"Type": "TRice",
 		"Strg": "Modbus write: reg %u rejected\\n"
 	},
+	"3737": {
+		"Type": "TRice",
+		"Strg": "Walker inject: no valid config\\n"
+	},
 	"3753": {
 		"Type": "TRICE",
 		"Strg": "WARN: Request too large (%u \u003e 512), rejecting\\n"
@@ -558,6 +602,10 @@
 	"3795": {
 		"Type": "TRice",
 		"Strg": "  - Unaligned access\\n"
+	},
+	"3808": {
+		"Type": "TRice",
+		"Strg": "Modbus config: staged %u devices %u txns %u points\\n"
 	},
 	"3811": {
 		"Type": "TRice",
@@ -630,6 +678,10 @@
 	"4134": {
 		"Type": "TRice",
 		"Strg": "MQTT not running\\n"
+	},
+	"4144": {
+		"Type": "TRice",
+		"Strg": "Modbus: default config provisioned (%u txns %u points)\\n"
 	},
 	"4177": {
 		"Type": "trice",
@@ -711,6 +763,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - Instruction bus error\\n"
 	},
+	"4600": {
+		"Type": "TRice",
+		"Strg": "Modbus: stopped (polls=%u errors=%u)\\n"
+	},
 	"4664": {
 		"Type": "TRice",
 		"Strg": "DHCP poll: flags=0x%02X link=%u ip=0x%08X\\n"
@@ -771,6 +827,10 @@
 		"Type": "trice",
 		"Strg": " LPWR"
 	},
+	"4880": {
+		"Type": "TRice",
+		"Strg": "Modbus: task create failed\\n"
+	},
 	"4891": {
 		"Type": "TRice",
 		"Strg": "Boot confirmed\\n"
@@ -826,6 +886,10 @@
 	"5181": {
 		"Type": "TRiceS",
 		"Strg": " %s\\n"
+	},
+	"5189": {
+		"Type": "TRiceS",
+		"Strg": "Modbus: device offline: %s\\n"
 	},
 	"5229": {
 		"Type": "trice",
@@ -963,6 +1027,10 @@
 		"Type": "TRiceS",
 		"Strg": "err:Watchdog in task: %s\\n"
 	},
+	"5769": {
+		"Type": "TRice",
+		"Strg": "Modbus config: none valid\\n"
+	},
 	"5780": {
 		"Type": "TRice",
 		"Strg": "FWU: resp cb FAIL err=%d heap=%u\\n"
@@ -971,6 +1039,14 @@
 		"Type": "TRICE",
 		"Strg": "ERR: HTTP error callback, err=%d\\n"
 	},
+	"5897": {
+		"Type": "TRiceS",
+		"Strg": " device: %s\\n"
+	},
+	"5922": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus inject \u003cstartAddr\u003e \u003chexbytes\u003e\\n"
+	},
 	"5932": {
 		"Type": "TRICE0",
 		"Strg": "  - Bus fault on unstacking\\n"
@@ -978,6 +1054,10 @@
 	"5944": {
 		"Type": "TRICE",
 		"Strg": "R0  = 0x%08X\\n"
+	},
+	"5974": {
+		"Type": "TRice",
+		"Strg": "Modbus: port init failed\\n"
 	},
 	"5986": {
 		"Type": "TRICE",
@@ -1027,6 +1107,10 @@
 		"Type": "TRice",
 		"Strg": "  Return to: Thread mode (PSP)\\n"
 	},
+	"6128": {
+		"Type": "TRice",
+		"Strg": "Modbus: walker started, %u baud\\n"
+	},
 	"6141": {
 		"Type": "TRice",
 		"Strg": " SOC=%u%% SOH=%u%%"
@@ -1046,6 +1130,10 @@
 	"6220": {
 		"Type": "trice",
 		"Strg": "\\t PRIMASK = 0x%08X\\n"
+	},
+	"6229": {
+		"Type": "TRice",
+		"Strg": "Walker inject: slave %u addr %u regs %u\\n"
 	},
 	"6232": {
 		"Type": "TRice",
@@ -1074,6 +1162,10 @@
 	"6296": {
 		"Type": "TRice",
 		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
+	},
+	"6351": {
+		"Type": "TRiceS",
+		"Strg": "Modbus config: rejected: %s\\n"
 	},
 	"6355": {
 		"Type": "TRice",
@@ -1147,6 +1239,10 @@
 		"Type": "TRice",
 		"Strg": "BMS frames sent\\n"
 	},
+	"6676": {
+		"Type": "TRiceS",
+		"Strg": "Modbus walker: %s\\n"
+	},
 	"6685": {
 		"Type": "TRice",
 		"Strg": "Modbus write: reg %u = %u\\n"
@@ -1170,6 +1266,10 @@
 	"6794": {
 		"Type": "TRice",
 		"Strg": " Grid: %u.%uV %u.%02uHz %dW\\n"
+	},
+	"6795": {
+		"Type": "TRice",
+		"Strg": "Modbus: no valid config, walker not started\\n"
 	},
 	"6796": {
 		"Type": "TRice",
@@ -1335,9 +1435,17 @@
 		"Type": "TRice",
 		"Strg": "BMS reader not running\\n"
 	},
+	"7392": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus write \u003cslave\u003e \u003cregister\u003e \u003cvalue\u003e\\n"
+	},
 	"7396": {
 		"Type": "TRICE",
 		"Strg": "ERR: tcp_write FAILED, err=%d\\n"
+	},
+	"7400": {
+		"Type": "TRice",
+		"Strg": "Walker inject: no matching transaction (slave %u addr %u)\\n"
 	},
 	"7425": {
 		"Type": "TRice",
@@ -1455,6 +1563,10 @@
 		"Type": "TRICE",
 		"Strg": "FWU: Content-Length parsed: %u bytes\\n"
 	},
+	"7824": {
+		"Type": "TRice",
+		"Strg": "Modbus: write reg %u failed (%d)\\n"
+	},
 	"7857": {
 		"Type": "TRice",
 		"Strg": "Rebooting for firmware install...\\n"
@@ -1462,6 +1574,10 @@
 	"7866": {
 		"Type": "TRICE0",
 		"Strg": "  - MemManage fault during FP lazy state preservation\\n"
+	},
+	"7894": {
+		"Type": "TRice",
+		"Strg": "Modbus: config swapped, active region %u\\n"
 	},
 	"7914": {
 		"Type": "TRice",

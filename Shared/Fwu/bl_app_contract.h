@@ -36,6 +36,17 @@ extern "C" {
 #define EXT_FLASH_CRASH_LOG_ADDR     0x000F8000u
 #define EXT_FLASH_CRASH_LOG_SIZE     0x00001000u
 
+/* Modbus register-config LUT: two 16 KB record-stream regions (A/B roles —
+ * the selector sector says which one is active; uploads always compile into
+ * the inactive one) + a 4 KB selector sector (NOR bit-clear pattern like the
+ * boot status). Application-owned, never touched by the bootloader.
+ * See Shared/Modbus/modbus_records.h. */
+#define EXT_FLASH_MODBUS_LUT_A_ADDR  0x000F9000u
+#define EXT_FLASH_MODBUS_LUT_B_ADDR  0x000FD000u
+#define EXT_FLASH_MODBUS_LUT_SIZE    0x00004000u
+#define EXT_FLASH_MODBUS_SEL_ADDR    0x00101000u
+#define EXT_FLASH_MODBUS_SEL_SIZE    0x00001000u
+
 /* ==========================================================================
  * Magic numbers
  * ========================================================================== */
@@ -43,6 +54,8 @@ extern "C" {
 #define BL_API_MAGIC                 0x424C4150u   /* "BLAP" */
 #define APP_INFO_MAGIC               0x41505049u   /* "APPI" */
 #define BOOT_STATUS_MAGIC            0x424F4F54u   /* "BOOT" */
+#define MODBUS_LUT_MAGIC             0x4D424346u   /* "MBCF" */
+#define MODBUS_SEL_MAGIC             0x4D42534Cu   /* "MBSL" */
 
 /* ==========================================================================
  * Feature flags  (sAppInfo.features)

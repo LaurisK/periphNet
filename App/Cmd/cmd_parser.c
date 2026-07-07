@@ -11,7 +11,7 @@
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
 #include "App/Modbus/modbus_rtu.h"
-#include "App/Modbus/solis_poller.h"
+#include "App/Modbus/modbus_walker.h"
 #include "App/Mqtt/mqtt_bridge.h"
 #include "cmsis_os.h"
 #include "trice.h"
@@ -171,76 +171,63 @@ static int parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen)
 }
 
 /**
- * Modbus command: control Solis inverter Modbus RTU poller.
+ * Modbus command: control the generic Modbus RTU config walker.
  *
  * Usage:
- *   modbus start [baud] [slave]  — Start polling (default 9600 baud, slave 1)
- *   modbus stop                  — Stop polling
- *   modbus read                  — Log current register data
- *   modbus set baud <rate>       — Change baud rate
- *   modbus set slave <addr>      — Change slave address
- *   modbus write <reg> <value>   — Write a holding register
- *   modbus port <uart2|uart6|disabled> — Select port (stop poller first)
+ *   modbus start [baud]          — Start the walker (default 9600 baud;
+ *                                  devices/registers come from the config)
+ *   modbus stop                  — Stop the walker
+ *   modbus read                  — Log walker/config status
+ *   modbus set baud <rate>       — Change baud rate (restart to apply)
+ *   modbus write <slave> <reg> <value> — Write a holding register
+ *   modbus port <uart2|uart6|disabled> — Select port (stop walker first)
  *   modbus monitor <on|off>      — Trice raw TX/RX frame monitoring
- *   modbus inject <hexbytes>     — Process a frame as if received from bus
- *   modbus status                — Show poller state
+ *   modbus inject <startAddr> <hexbytes> — Feed a response frame to the
+ *                                  {frame slave, startAddr} config transaction
+ *   modbus status                — Show walker state
  */
 static void cmd_modbus(const char *args)
 {
     if (strncmp(args, "start", 5) == 0) {
-        if (SolisPoller_IsRunning()) {
+        if (ModbusWalker_IsRunning()) {
             TRice("Modbus already running\n");
             return;
         }
-        sSolisPollerCfg cfg = {
-            .slaveAddr        = 1,
-            .baud             = 9600,
-            .fastIntervalMs   = 5000,
-            .slowIntervalMs   = 60000,
+        sModbusWalkerCfg cfg = {
+            .baud              = 9600,
             .responseTimeoutMs = 1000,
         };
-        /* Parse optional: modbus start [baud] [slave] */
+        /* Parse optional: modbus start [baud] */
         const char *p = args + 5;
-        unsigned b = 0, s = 0;
-        if (sscanf(p, " %u %u", &b, &s) >= 1) {
-            if (b > 0) cfg.baud = b;
-            if (s > 0 && s <= 247) cfg.slaveAddr = (uint8_t)s;
+        unsigned b = 0;
+        if (sscanf(p, " %u", &b) == 1 && b > 0) {
+            cfg.baud = b;
         }
-        SolisPoller_Start(&cfg);
+        ModbusWalker_Start(&cfg);
     } else if (strncmp(args, "stop", 4) == 0) {
-        SolisPoller_Stop();
+        ModbusWalker_Stop();
     } else if (strncmp(args, "read", 4) == 0) {
-        if (!SolisPoller_IsRunning()) {
-            TRice("Modbus not running\n");
-            return;
-        }
-        SolisPoller_LogData();
+        ModbusWalker_LogStatus();
     } else if (strncmp(args, "set baud ", 9) == 0) {
         unsigned b = 0;
         if (sscanf(args + 9, "%u", &b) == 1 && b > 0) {
-            SolisPoller_SetBaud(b);
+            ModbusWalker_SetBaud(b);
             TRice("Modbus baud set to %u (restart to apply)\n", b);
         } else {
             TRice("Usage: modbus set baud <rate>\n");
         }
-    } else if (strncmp(args, "set slave ", 10) == 0) {
-        unsigned s = 0;
-        if (sscanf(args + 10, "%u", &s) == 1 && s > 0 && s <= 247) {
-            SolisPoller_SetSlaveAddr((uint8_t)s);
-            TRice("Modbus slave set to %u\n", s);
-        } else {
-            TRice("Usage: modbus set slave <1-247>\n");
-        }
     } else if (strncmp(args, "write ", 6) == 0) {
-        unsigned reg = 0, val = 0;
-        if (sscanf(args + 6, "%u %u", &reg, &val) == 2) {
-            if (SolisPoller_WriteRegister((uint16_t)reg, (uint16_t)val) == 0) {
+        unsigned slave = 0, reg = 0, val = 0;
+        if (sscanf(args + 6, "%u %u %u", &slave, &reg, &val) == 3 &&
+            slave >= 1 && slave <= 247) {
+            if (ModbusWalker_WriteRegister((uint8_t)slave, (uint16_t)reg,
+                                           (uint16_t)val) == 0) {
                 TRice("Modbus write queued: reg %u = %u\n", reg, val);
             } else {
                 TRice("Modbus write failed (not running or queue full)\n");
             }
         } else {
-            TRice("Usage: modbus write <register> <value>\n");
+            TRice("Usage: modbus write <slave> <register> <value>\n");
         }
     } else if (strncmp(args, "port ", 5) == 0) {
         const char *p = args + 5;
@@ -268,10 +255,18 @@ static void cmd_modbus(const char *args)
             TRice("Usage: modbus monitor on|off\n");
         }
     } else if (strncmp(args, "inject ", 7) == 0) {
+        /* modbus inject <startAddr> <hexbytes> */
+        unsigned startAddr = 0;
+        int      consumed = 0;
+        if (sscanf(args + 7, "%u %n", &startAddr, &consumed) != 1 ||
+            startAddr > 65535 || consumed == 0) {
+            TRice("Usage: modbus inject <startAddr> <hexbytes>\n");
+            return;
+        }
         uint8_t frame[128];
-        int len = parse_hex_bytes(args + 7, frame, sizeof(frame));
+        int len = parse_hex_bytes(args + 7 + consumed, frame, sizeof(frame));
         if (len <= 0) {
-            TRice("Usage: modbus inject <hexbytes>\n");
+            TRice("Usage: modbus inject <startAddr> <hexbytes>\n");
             return;
         }
         uint16_t regs[64];
@@ -279,23 +274,20 @@ static void cmd_modbus(const char *args)
         if (Modbus_ProcessInjectedFrame(frame, (uint16_t)len, regs,
                                         64, &regCount) == MODBUS_OK &&
             regCount > 0) {
-            SolisPoller_InjectRegisters(regs, regCount);
+            ModbusWalker_InjectResponse(frame[0], (uint16_t)startAddr,
+                                        regs, regCount);
         }
     } else if (strncmp(args, "status", 6) == 0) {
-        const sSolisPollerCfg *cfg = SolisPoller_GetConfig();
         eModbusPort port = Modbus_GetPort();
         char buf[100];
-        snprintf(buf, sizeof(buf), "%s port=%s monitor=%s baud=%u slave=%u",
-                 SolisPoller_IsRunning() ? "running" : "stopped",
+        snprintf(buf, sizeof(buf), "%s port=%s monitor=%s baud=%u",
+                 ModbusWalker_IsRunning() ? "running" : "stopped",
                  (port == MODBUS_PORT_UART2)    ? "uart2" :
                  (port == MODBUS_PORT_UART6)    ? "uart6" : "disabled",
                  Modbus_GetMonitor() ? "on" : "off",
-                 (unsigned)cfg->baud, (unsigned)cfg->slaveAddr);
+                 (unsigned)ModbusWalker_GetBaud());
         TRiceS("Modbus %s\n", buf);
-        if (SolisPoller_IsRunning()) {
-            const sSolisData *d = SolisPoller_GetData();
-            TRice(" polls=%u errors=%u\n", d->pollCount, d->errorCount);
-        }
+        ModbusWalker_LogStatus();
     } else {
         TRice("Usage: modbus start|stop|read|set|write|port|monitor|inject|status\n");
     }

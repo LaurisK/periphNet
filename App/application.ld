@@ -160,6 +160,18 @@ SECTIONS
     . = ALIGN(8);
   } >RAM
 
+  /* CPU-only buffers in core-coupled memory (no DMA/peripheral access!).
+     NOLOAD: zeroed by System_Init(), not the startup code. */
+  .ccmram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    _sccmram = .;
+    *(.ccmram)
+    *(.ccmram*)
+    . = ALIGN(4);
+    _eccmram = .;
+  } >CCMRAM
+
   /* Remove information from the compiler libraries */
   /DISCARD/ :
   {

@@ -43,6 +43,18 @@
 },
 {
   "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/ModbusTests.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/ModbusTests.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/ModbusTests.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/ModbusTests.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/MqttTests.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/MqttTests.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/MqttTests.cpp",
+  "output": "CMakeFiles/periphnet_core.dir/src/core/MqttTests.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
   "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
   "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
   "output": "CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o"
@@ -70,5 +82,83 @@
   "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_cli.dir/src/cli/main.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/cli/main.cpp",
   "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/cli/main.cpp",
   "output": "CMakeFiles/periphnet_cli.dir/src/cli/main.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_demo.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_demo.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_demo.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_demo.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_draw.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_draw.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_draw.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_draw.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_tables.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_tables.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_tables.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_tables.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_widgets.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_widgets.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/imgui_widgets.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/imgui_widgets.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/backends/imgui_impl_sdl2.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends/imgui_impl_sdl2.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends/imgui_impl_sdl2.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/backends/imgui_impl_sdl2.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++  -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/imgui_lib.dir/_deps/imgui-src/backends/imgui_impl_opengl3.cpp.o -c /home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends/imgui_impl_opengl3.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends/imgui_impl_opengl3.cpp",
+  "output": "CMakeFiles/imgui_lib.dir/_deps/imgui-src/backends/imgui_impl_opengl3.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/main.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/main.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/main.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/main.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/App.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/App.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/App.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/App.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/SettingsTab.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/SettingsTab.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/SettingsTab.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/SettingsTab.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/TriceLogTab.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/TriceLogTab.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/TriceLogTab.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/TriceLogTab.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/ConsoleTab.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/ConsoleTab.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/ConsoleTab.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/ConsoleTab.cpp.o"
+},
+{
+  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
+  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src -I/home/laurynas/Projects/PeriphNet/build_integration/_deps/imgui-src/backends -isystem /usr/include/SDL2 -std=gnu++17 -o CMakeFiles/periphnet_gui.dir/src/gui/TestsTab.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/gui/TestsTab.cpp",
+  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/gui/TestsTab.cpp",
+  "output": "CMakeFiles/periphnet_gui.dir/src/gui/TestsTab.cpp.o"
 }
 ]

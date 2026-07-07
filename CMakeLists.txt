@@ -101,6 +101,17 @@ set(SHARED_SOURCES
     ${SHARED_DRIVER_SOURCES}
 )
 
+# Application-only Shared/ code: the Modbus config machinery is host-testable
+# pure logic (libc + W25Q128 only) but must NOT link into the bootloader —
+# the 32 KB BL budget is tight and it has no use for it.
+set(SHARED_MODBUS_SOURCES
+    Shared/Modbus/modbus_config_store.c
+    Shared/Modbus/modbus_config_compiler.c
+    Shared/Modbus/modbus_config_export.c
+    Shared/Modbus/modbus_decode.c
+    Shared/Modbus/modbus_units.c
+)
+
 # ==============================================================================
 # Trice ID management helpers
 # ==============================================================================
@@ -300,6 +311,7 @@ target_include_directories(trice PUBLIC
 
 set(APP_INCLUDES
     ${BASE_INCLUDES}
+    Shared/Modbus
     Core/ThreadSafe
     App
     USB_DEVICE/App
@@ -348,6 +360,7 @@ set(APP_LINK_FLAGS
 add_executable(application.elf
     ${APP_CORE_SOURCES}
     ${APP_MODULE_SOURCES}
+    ${SHARED_MODBUS_SOURCES}
     ${BACKTRACE_SOURCES}
     ${HAL_SOURCES}
     ${BSP_SOURCES}

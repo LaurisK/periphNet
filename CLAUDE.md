@@ -85,7 +85,9 @@ attempt counting, so JLink dev flashing is unaffected.
 ```
 
 **Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
-gate, boot_status flag lifecycle over a NOR-faithful flash mock):
+gate, boot_status flag lifecycle, and the Modbus config machinery — record
+store/selector, JSON compiler accept+reject matrix, export round-trip,
+decode/format vectors — all over a NOR-faithful flash mock):
 ```bash
 cmake -B tests/build -S tests && cmake --build tests/build -j8
 ctest --test-dir tests/build --output-on-failure
@@ -139,7 +141,13 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 0x000F_8000  ├───────────────────┤
              │ Crash Log (4KB)   │
 0x000F_9000  ├───────────────────┤
-             │ Free              │ ~7.4MB
+             │ Modbus LUT A(16KB)│ compiled register-config record stream
+0x000F_D000  ├───────────────────┤
+             │ Modbus LUT B(16KB)│ A/B roles; selector says which is active,
+0x0010_1000  ├───────────────────┤ uploads compile into the inactive one
+             │ Modbus Sel (4KB)  │ active-region selector (NOR bit-clear
+0x0010_2000  ├───────────────────┤ pattern like sBootStatus)
+             │ Free              │ ~7.35MB
              └───────────────────┘
 ```
 
@@ -161,14 +169,22 @@ PeriphNet/
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
     Log/                          # crash handler + backtrace, trice transports
-    Modbus/                       # Modbus-RTU master + Solis register poller
-    Mqtt/mqtt_bridge.c/h          # MQTT bridge + Home Assistant discovery
+    Modbus/                       # modbus_rtu (RTU master), modbus_walker
+                                  #   (config-driven poll task), default
+                                  #   Solis JSON config + provisioning
+    Mqtt/mqtt_bridge.c/h          # MQTT bridge + HA discovery (generated
+                                  #   from the active Modbus config)
   Shared/                         # First-party code compiled into BOTH targets
                                   #   (depends only on HAL + libc, no RTOS/lwIP)
     Crypto/                       # sha256, hmac_sha256, aes128, aes_gcm
                                   #   (NIST-vector-tested, see tests/)
     Fwu/                          # bl_app_contract.h, dfu_types.h,
                                   #   version.c/h, boot_status.c/h, image_mgmt.c/h
+    Modbus/                       # APPLICATION-ONLY Shared code (host-testable,
+                                  #   never linked into the 32KB BL): register
+                                  #   config records/store/selector, streaming
+                                  #   JSON compiler, JSON export, decode/format,
+                                  #   DLMS unit table
     Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver
   Core/                           # CubeMX-OWNED ONLY (regeneration-safe)
     Inc/ Src/                     # main.c, gpio.c, spi.c, HAL config ...
@@ -425,6 +441,11 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
 | `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
+| `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
+| `/api/modbus/config/apply` | POST | Arm the config swap; the walker commits at its next lap boundary (hot reload, no reboot) |
+| `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
+| `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
+| `/api/modbus/config` | DELETE | Stage the built-in Solis default + arm swap (hot factory reset) |
 
 **Server architecture:** dedicated `http` task using the lwIP **netconn API**
 (one connection at a time; 10s recv/send timeouts so dead clients can't stall
@@ -472,3 +493,6 @@ TRice("Message: %d\n", value);
 - **OTA accepts only .pnfw blobs** — plaintext binaries are rejected at upload (manifest check); plaintext exists only in `build/` and internal flash
 - **Confirm or roll back** — non-local builds must be confirmed via `POST /api/fwu/confirm` within 3 boots of an install, otherwise the BL restores the golden image
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)
+- **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
+- **`.ccmram` section is CPU-only memory** — 64KB CCM at 0x10000000, NOLOAD (zeroed by `System_Init`), used for the Modbus walker/compiler state; never put DMA or peripheral-accessed buffers there
+- **MQTT publishes go through `MqttBridge_Publish`** — it wraps `mqtt_publish` in `LOCK_TCPIP_CORE()` because the Modbus walker task publishes concurrently with mqttTask; never call the raw lwIP MQTT API from app tasks without the core lock

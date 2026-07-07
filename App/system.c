@@ -18,6 +18,7 @@
 #include "iwdg.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOSConfig.h"   /* configLIBRARY_LOWEST_INTERRUPT_PRIORITY */
+#include <string.h>
 
 /* External IWDG handle (declared in Core/Src/iwdg.c) */
 extern IWDG_HandleTypeDef hiwdg;
@@ -64,6 +65,11 @@ static void tim14Init(void)
 
 void System_Init(void)
 {
+    /* Zero the .ccmram section — it is NOLOAD, so the startup code does
+     * not touch it (System_Init runs before any user of those buffers) */
+    extern uint8_t _sccmram, _eccmram;
+    memset(&_sccmram, 0, (size_t)(&_eccmram - &_sccmram));
+
     /* Read and clear reset-cause flags before they are lost */
     s_resetCause = RCC->CSR;
     __HAL_RCC_CLEAR_RESET_FLAGS();
