@@ -176,6 +176,10 @@ standard names. */
 /* Detect task stack overflows (method 2: watermark pattern check on context
    switch) — an EthIf overflow corrupted TxPktSemaphore silently (2026-07-06). */
 #define configCHECK_FOR_STACK_OVERFLOW 2
+/* ucHeap is provided by App/system.c, placed in CCM RAM (.ccmheap) to free
+   ~47 KB of DMA-capable SRAM.  Nothing from pvPortMalloc (task stacks,
+   kernel objects) may ever be handed to a DMA peripheral. */
+#define configAPPLICATION_ALLOCATED_HEAP 1
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

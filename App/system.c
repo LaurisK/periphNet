@@ -27,6 +27,13 @@ extern IWDG_HandleTypeDef hiwdg;
  * Private data
  * -------------------------------------------------------------------------- */
 
+/* FreeRTOS heap (configAPPLICATION_ALLOCATED_HEAP=1) in CCM RAM.  CCM is
+ * invisible to DMA masters — fine for task stacks/kernel objects, but no
+ * pvPortMalloc'd (or task-stack) buffer may ever be given to a DMA
+ * peripheral.  Lives in .ccmheap, NOT .ccmram: System_Init() below zeroes
+ * .ccmram after tasks have already been created from this heap. */
+uint8_t ucHeap[configTOTAL_HEAP_SIZE] __attribute__((aligned(8), section(".ccmheap")));
+
 static TIM_HandleTypeDef s_htim14;
 static uint32_t          s_resetCause    = 0U;
 static volatile uint8_t  s_wdgTestMode   = 0U;
@@ -63,13 +70,18 @@ static void tim14Init(void)
  * Public API
  * -------------------------------------------------------------------------- */
 
-void System_Init(void)
+void System_EarlyInit(void)
 {
     /* Zero the .ccmram section — it is NOLOAD, so the startup code does
-     * not touch it (System_Init runs before any user of those buffers) */
+     * not touch it.  Must run from main() BEFORE the scheduler starts:
+     * .ccmram now also holds USB CDC / MQTT / HTTP buffers that are in
+     * use well before System_Init() runs in the default task. */
     extern uint8_t _sccmram, _eccmram;
     memset(&_sccmram, 0, (size_t)(&_eccmram - &_sccmram));
+}
 
+void System_Init(void)
+{
     /* Read and clear reset-cause flags before they are lost */
     s_resetCause = RCC->CSR;
     __HAL_RCC_CLEAR_RESET_FLAGS();

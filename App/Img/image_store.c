@@ -182,7 +182,9 @@ typedef struct {
     char     name[IMG_STORE_NAME_MAX];
 } sUploadSession;
 
-static sUploadSession upload;
+/* CCM RAM: CPU-only — the page buffer goes to ext flash via the polling
+ * (non-DMA) W25Q128 driver */
+static sUploadSession upload __attribute__((section(".ccmram")));
 
 static bool flush_upload_page(void)
 {

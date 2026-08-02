@@ -92,6 +92,10 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  /* Zero the NOLOAD .ccmram section before anything uses CCM buffers
+   * (USB CDC / MQTT / HTTP / Modbus walker state lives there) */
+  extern void System_EarlyInit(void);
+  System_EarlyInit();
   /* Enable configurable fault handlers (BusFault, UsageFault, MemManage) */
   SCB->SHCSR |= SCB_SHCSR_BUSFAULTENA_Msk
               | SCB_SHCSR_USGFAULTENA_Msk

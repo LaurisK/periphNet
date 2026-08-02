@@ -36,9 +36,13 @@
 #define REQ_BUF_SIZE         1024
 #define DOWNLOAD_CHUNK_SIZE  512
 
+/* CPU-only buffers → CCM RAM (never handed to DMA: netconn_write here
+ * always uses NETCONN_COPY, so lwIP copies into SRAM pbufs) */
+#define CCMRAM_BSS __attribute__((section(".ccmram")))
+
 /* Single-task server: static buffers are safe and cheap */
-static char req_buf[REQ_BUF_SIZE];
-static char resp_buf[1024];
+static char req_buf[REQ_BUF_SIZE] CCMRAM_BSS;
+static char resp_buf[1024] CCMRAM_BSS;
 
 static const char index_html[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"

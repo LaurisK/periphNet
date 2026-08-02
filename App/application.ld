@@ -140,8 +140,11 @@ SECTIONS
     /* This is used by the startup in order to initialize the .bss section */
     _sbss = .;         /* define a global symbol at bss start */
     __bss_start__ = _sbss;
-    *(.bss)
-    *(.bss*)
+    /* usbd_cdc_if bss (4 KB UserRx/TxBufferFS) is CubeMX-owned, so it is
+       routed to CCM here instead of via section attributes in the source.
+       CPU-only: the OTG-FS core is FIFO-based, never DMAs to RAM. */
+    EXCLUDE_FILE(*usbd_cdc_if*) *(.bss)
+    EXCLUDE_FILE(*usbd_cdc_if*) *(.bss*)
     *(COMMON)
 
     . = ALIGN(4);
@@ -161,15 +164,29 @@ SECTIONS
   } >RAM
 
   /* CPU-only buffers in core-coupled memory (no DMA/peripheral access!).
-     NOLOAD: zeroed by System_Init(), not the startup code. */
+     NOLOAD: zeroed by System_EarlyInit() from main(), not the startup
+     code — so it is ready before the scheduler starts. */
   .ccmram (NOLOAD) :
   {
     . = ALIGN(4);
     _sccmram = .;
     *(.ccmram)
     *(.ccmram*)
+    *usbd_cdc_if*(.bss .bss*)   /* USB CDC buffers, see .bss above */
     . = ALIGN(4);
     _eccmram = .;
+  } >CCMRAM
+
+  /* FreeRTOS heap (ucHeap) — CPU-only, so CCM is safe (task stacks and
+     kernel objects are never DMA targets).  Deliberately OUTSIDE the
+     _sccmram.._eccmram range: System_Init() zeroes that range from the
+     default task, AFTER the scheduler has already allocated TCBs/stacks
+     from this heap.  heap_4 needs no zero-init. */
+  .ccmheap (NOLOAD) :
+  {
+    . = ALIGN(8);
+    *(.ccmheap)
+    . = ALIGN(8);
   } >CCMRAM
 
   /* Remove information from the compiler libraries */

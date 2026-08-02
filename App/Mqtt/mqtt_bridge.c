@@ -48,8 +48,12 @@ static uint32_t          s_reconnectCount;
 #define TOPIC_MAX   80
 #define PAYLOAD_MAX 768
 
-static char s_topic[TOPIC_MAX];
-static char s_payload[PAYLOAD_MAX];
+/* CPU-only buffers → CCM RAM (never handed to DMA: mqtt_publish copies
+ * into the client's SRAM output ring, lwIP copies that into SRAM pbufs) */
+#define CCMRAM_BSS __attribute__((section(".ccmram")))
+
+static char s_topic[TOPIC_MAX] CCMRAM_BSS;
+static char s_payload[PAYLOAD_MAX] CCMRAM_BSS;
 
 /* --------------------------------------------------------------------------
  * Deferred work state
@@ -62,21 +66,21 @@ static char s_payload[PAYLOAD_MAX];
 static volatile int s_monitorEnabled;
 
 /* Last incoming topic (written in publish_cb, consumed in data_cb) */
-static char s_inTopic[TOPIC_MAX];
+static char s_inTopic[TOPIC_MAX] CCMRAM_BSS;
 
 /* Deferred "MQTT sub: topic = payload" monitor log */
 static struct {
     char         topic[TOPIC_MAX];
     char         payload[64];
     volatile int ready;
-} s_subLog;
+} s_subLog CCMRAM_BSS;
 
 /* Deferred inbound ".../set" message awaiting config lookup in mqttTask */
 static struct {
     char         topic[TOPIC_MAX];
     char         payload[32];
     volatile int ready;
-} s_pendingSet;
+} s_pendingSet CCMRAM_BSS;
 
 /* Injected message; processed via tcpip_callback so the real incoming
  * callbacks run in their native tcpip_thread context */
@@ -90,7 +94,7 @@ static struct {
     char         payload[192];
     uint16_t     len;
     volatile int state;
-} s_inject;
+} s_inject CCMRAM_BSS;
 
 /* --------------------------------------------------------------------------
  * MQTT callbacks (run in tcpip_thread — no Trice, no flash!)
