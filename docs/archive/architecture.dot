@@ -1,3 +1,6 @@
+/* ARCHIVED 2026-08-03 — last updated 2026-03-19, predates both the encrypted
+ * FWU redesign and the Modbus config subsystem. This is a firmware-state
+ * diagram only; nothing regenerates it. Kept for history. */
 digraph PeriphNet {
     rankdir=TB
     node [shape=record fontname="Helvetica" fontsize=10]

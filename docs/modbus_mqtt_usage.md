@@ -423,12 +423,17 @@ mosquitto_pub -t 'periphnet/overdischarge_soc/set' -m '10'
 
 ## Resource Usage
 
+Measure with `arm-none-eabi-size -A build/application.elf` — plain `size`
+sums `.bss` + `.ccmram` + `.ccmheap` into one column and makes main SRAM look
+nearly full when it is not.
+
 | Resource | Usage |
 |----------|-------|
-| Flash | ~269 KB of 480 KB (incl. JSON compiler + built-in config) |
-| RAM | ~125 KB of 128 KB main SRAM + 3.4 KB CCM (walker/compiler state) |
+| Flash | ~263 KB of 480 KB (incl. JSON compiler + built-in config) |
+| Main SRAM | ~67 KB of 128 KB (`.data` + `.bss` + newlib heap/stack) |
+| CCM | ~58 KB of 64 KB — **~91 %**: 48 KB FreeRTOS heap (`.ccmheap`) + ~11 KB `.ccmram` (walker/compiler state, MQTT/HTTP/upload buffers) |
 | Ext flash | 2×16 KB LUT regions + 4 KB selector at 0xF9000-0x101FFF |
-| FreeRTOS heap | ~4 KB (2 task stacks at 512 words each) |
+| FreeRTOS heap | 48 KB total, in CCM; the walker + bridge take ~4 KB of it (2 task stacks at 512 words each) |
 | USART2 | Exclusive use by the walker when running |
 | PD5, PD6, PD7 | RS485 TX, RX, DE — cannot be shared |
 | TCP connections | 1 (MQTT client to broker) |

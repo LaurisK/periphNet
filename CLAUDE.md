@@ -4,7 +4,9 @@
 
 **PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet/MQTT bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader.
 
-**Current phase:** Encrypted FWU pipeline (Zhaga pattern, extended). Firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs).
+**Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: the uploadable multi-device Modbus register config (`Shared/Modbus/` + walker + generic MQTT/HA discovery).
+
+**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
 
@@ -32,7 +34,8 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — ~229 KB flash, ~105 KB RAM (480 KB limit);
+- `build/application.elf` / `.bin` — ~263 KB flash (480 KB limit), ~67 KB main
+  SRAM of 128 KB and ~58 KB CCM of 64 KB (**CCM is the tight one — ~91 %**);
   the `.bin` is signed in-place (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
@@ -44,6 +47,14 @@ the defaults in `tools/dfu_image_tool.py`). For production: create gitignored
 `DFU_AES_KEY`/`DFU_HMAC_KEY` for the build tool. Keys are known ONLY to the
 build process and the bootloader — never stored in ext flash, never linked
 into the application.
+
+**Always size with `-A`** — plain `arm-none-eabi-size` reports one `bss`
+column that silently sums `.bss` + `.ccmram` + `.ccmheap` + `._user_heap_stack`
+(127996 B), which reads as "main SRAM nearly full" when main SRAM is actually
+about half free and CCM is the constrained region:
+```bash
+arm-none-eabi-size -A build/application.elf
+```
 
 **Clean rebuild:**
 ```bash
@@ -92,6 +103,18 @@ decode/format vectors — all over a NOR-faithful flash mock):
 cmake -B tests/build -S tests && cmake --build tests/build -j8
 ctest --test-dir tests/build --output-on-failure
 ```
+
+**Integration test harness** (`tests/integration/`, see its README) — host-side
+C++ tool that drives a live board over USB/UART/UDP, sends CLI commands and
+asserts against decoded Trice output. Needs the `trice` binary plus `til.json`
+/ `li.json` in the project root:
+```bash
+cmake -B build_integration -S tests/integration -DBUILD_GUI=OFF   # CLI only
+cmake --build build_integration -j8                               # → periphnet_cli
+```
+Drop `-DBUILD_GUI=OFF` (and install `libsdl2-dev libgl-dev`) to also build the
+Dear ImGui GUI, `build_integration/periphnet_gui`. Modbus/MQTT test contracts
+live in `docs/impl_modbus_mqtt_integration_tests.md`.
 
 ## Hardware
 
@@ -163,8 +186,10 @@ PeriphNet/
     application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
     Can/                          # Pylontech BMS reader + simulator (CAN)
     Cmd/cmd_parser.c/h            # CLI command parser (composition root)
-    Data/telemetry.c/h            # Neutral telemetry model: producers (Modbus,
-                                  #   CAN) publish, consumers (MQTT) snapshot
+    Data/telemetry.c/h            # Neutral telemetry model — RESERVED, no
+                                  #   producers or consumers today (mqtt_bridge
+                                  #   stopped consuming it in the config
+                                  #   redesign); intended for the BMS→CAN path
     Fwu/fwu_control.c/h           # FWU process: install/confirm/verify/golden
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
@@ -197,7 +222,11 @@ PeriphNet/
     bootloader.ld                 # Linker: 0x08000000, 32KB + BL_API region
   tests/                          # Host-native unit tests (no ARM toolchain):
                                   #   crypto NIST/RFC vectors, version gate,
-                                  #   boot_status over NOR-faithful flash mock
+                                  #   boot_status + Modbus config machinery
+                                  #   over a NOR-faithful flash mock
+    integration/                  # Host-side C++ harness (CLI + ImGui GUI)
+                                  #   driving a LIVE board over USB/UART/UDP;
+                                  #   builds to build_integration/
   Drivers/                        # STM32 HAL + CMSIS (vendor)
   LWIP/                           # lwIP integration (CubeMX)
   USB_DEVICE/                     # USB CDC (CubeMX)
@@ -415,6 +444,8 @@ Shared code compiled into both bootloader and application.
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
+| modbus | 512 words | osPriorityNormal (24) | Config walker: one lap per 100ms tick, reads due transactions from the flash config, decodes + publishes, drains the write queue, commits config swaps at lap boundaries. Started/stopped at runtime (`modbus start`) |
+| mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`) |
 | tcpip_thread | 4096 bytes | 24 | lwIP TCP/IP processing |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
 
@@ -494,5 +525,7 @@ TRice("Message: %d\n", value);
 - **Confirm or roll back** — non-local builds must be confirmed via `POST /api/fwu/confirm` within 3 boots of an install, otherwise the BL restores the golden image
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)
 - **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
-- **`.ccmram` section is CPU-only memory** — 64KB CCM at 0x10000000, NOLOAD (zeroed by `System_Init`), used for the Modbus walker/compiler state; never put DMA or peripheral-accessed buffers there
+- **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. It holds **two** NOLOAD sections with different lifecycles:
+  - `.ccmram` (~11KB) — Modbus walker/compiler state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
+  - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
 - **MQTT publishes go through `MqttBridge_Publish`** — it wraps `mqtt_publish` in `LOCK_TCPIP_CORE()` because the Modbus walker task publishes concurrently with mqttTask; never call the raw lwIP MQTT API from app tasks without the core lock

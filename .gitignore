@@ -165,6 +165,10 @@ $RECYCLE.BIN/
 # CppUTest
 /tests/build/
 /build_tests/
+# Integration harness build tree (tests/integration → build_integration/)
+/build_integration/
+# Dear ImGui window-layout state, written next to the GUI binary's cwd
+imgui.ini
 *.gcov
 *.gcda
 *.gcno

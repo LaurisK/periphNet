@@ -1,5 +1,22 @@
 # RS485/Modbus-RTU to Ethernet/MQTT Bridge Design
 
+> **SUPERSEDED — historical record.** This is the original design for the
+> hardcoded single-device bridge (`solis_poller.c` + a compiled-in register
+> table). That architecture was replaced on 2026-07-07 by the uploadable
+> multi-device JSON config: see
+> [modbus_multi_device_config_design.md](modbus_multi_device_config_design.md)
+> and [impl_modbus_multi_device_config.md](impl_modbus_multi_device_config.md).
+> `solis_poller.c` and `solis_registers.h` no longer exist — the Solis
+> register selection below survives as the built-in default JSON in
+> `App/Modbus/modbus_default_config.c`.
+>
+> **The "What Already Exists" table below is a 2026-03 snapshot and is now
+> wrong in every row that matters**: a Modbus RTU master exists
+> (`App/Modbus/modbus_rtu.c`), USART2 is owned by the walker at 9600 baud (not
+> unused at 115200), and the firmware runs 9 tasks, not 4. Read this doc for
+> the register-selection and HA-discovery rationale only; for current
+> behaviour see [modbus_mqtt_usage.md](modbus_mqtt_usage.md).
+
 ## Goal
 
 Read a Solis hybrid inverter over RS485 Modbus RTU and publish its telemetry
