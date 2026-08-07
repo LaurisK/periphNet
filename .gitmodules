@@ -1,3 +1,6 @@
 [submodule "Middlewares/Third_Party/trice"]
 	path = Middlewares/Third_Party/trice
 	url = https://github.com/LaurisK/trice
+[submodule "Middlewares/Third_Party/wireguard-lwip"]
+	path = Middlewares/Third_Party/wireguard-lwip
+	url = https://github.com/smartalock/wireguard-lwip.git

@@ -1,10 +1,16 @@
 #include "bl_app_contract.h"
 
 #define APP_FW_DEVICE_TYPE  fwDev_periphnet
-#define APP_FW_TARGET       fwTarget_local
+/* 'd' (not 'l'): local-target builds are exempt from boot-attempt counting,
+ * which disables the 3-boot rollback to the golden image.  That is fine on the
+ * bench with a J-Link attached, but for a board reached only over the network
+ * it removes the only recovery path a bad image has.  Dev target restores it.
+ * Consequence: every OTA now needs a version bump (the gate requires strictly
+ * newer) and MUST be confirmed via POST /api/fwu/confirm within 3 boots. */
+#define APP_FW_TARGET       fwTarget_dev
 #define APP_FW_MAJOR        1
 #define APP_FW_MINOR        0
-#define APP_FW_PATCH        8
+#define APP_FW_PATCH        9
 #define APP_FW_HW_ID        0
 
 __attribute__((section(".app_header")))

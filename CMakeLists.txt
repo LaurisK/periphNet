@@ -256,6 +256,23 @@ set(BACKTRACE_SOURCES
     Middlewares/Third_Party/backtrace/backtrace.c
 )
 
+# --- WireGuard-lwIP (application only) ---
+# Bundles its own Curve25519 / ChaCha20-Poly1305 / BLAKE2s.  Must NEVER reach
+# the 32 KB bootloader — same rule as SHARED_MODBUS_SOURCES.  The Cortex-M0
+# assembly x25519 under src/crypto/cortex/ is deliberately unused; crypto.h
+# selects the portable refc implementation.
+
+set(WIREGUARD_SOURCES
+    Middlewares/Third_Party/wireguard-lwip/src/crypto.c
+    Middlewares/Third_Party/wireguard-lwip/src/wireguard.c
+    Middlewares/Third_Party/wireguard-lwip/src/wireguardif.c
+    Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/blake2s.c
+    Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/chacha20.c
+    Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/chacha20poly1305.c
+    Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/poly1305-donna.c
+    Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/x25519.c
+)
+
 # --- BSP / PHY driver ---
 
 file(GLOB_RECURSE BSP_SOURCES
@@ -319,6 +336,8 @@ set(APP_INCLUDES
     Middlewares/ST/STM32_USB_Device_Library/Core/Inc
     Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
     Middlewares/Third_Party/backtrace
+    Middlewares/Third_Party/wireguard-lwip/src
+    App/Net
     Drivers/BSP/Components/dp83848
     LWIP/App
     LWIP/Target
@@ -362,6 +381,7 @@ add_executable(application.elf
     ${APP_MODULE_SOURCES}
     ${SHARED_MODBUS_SOURCES}
     ${BACKTRACE_SOURCES}
+    ${WIREGUARD_SOURCES}
     ${HAL_SOURCES}
     ${BSP_SOURCES}
     ${LWIP_SOURCES}

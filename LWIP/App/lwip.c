@@ -31,6 +31,7 @@
 /* USER CODE BEGIN 0 */
 #include "lwip/apps/mdns.h"
 #include "lwip/igmp.h"
+#include "wg_link.h"
 /* USER CODE END 0 */
 /* Private function prototypes -----------------------------------------------*/
 static void ethernet_link_status_updated(struct netif *netif);
@@ -93,6 +94,12 @@ void MX_LWIP_Init(void)
   dhcp_start(&gnetif);
 
 /* USER CODE BEGIN 3 */
+  /* WireGuard tunnel to the hub.  Started here, after dhcp_start(), so the
+   * handshake begins as soon as a route exists; it retries harmlessly until
+   * then.  The Ethernet netif remains the default route.
+   */
+  (void)WgLink_Start(WgLink_DefaultCfg());
+
   mdns_resp_init();
   mdns_resp_add_netif(&gnetif, "periphnet", 300);
   mdns_resp_add_service(&gnetif, "PeriphNet Web", "_http",

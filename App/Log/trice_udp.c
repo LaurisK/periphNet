@@ -8,7 +8,7 @@
 #include <string.h>
 
 static struct udp_pcb *s_trice_pcb;
-static ip_addr_t       s_broadcast_addr;
+static ip_addr_t       s_dest_addr;
 
 static void Trice_UdpConsumerTask(void *arg);
 
@@ -25,10 +25,21 @@ void Trice_UdpWrite(const uint8_t *data, size_t len)
     memcpy(p->payload, data, len);
 
     LOCK_TCPIP_CORE();
-    udp_sendto(s_trice_pcb, p, &s_broadcast_addr, TRICE_UDP_PORT);
+    /* Return value ignored on purpose: with a tunnel destination this fails
+     * with ERR_RTE whenever the WireGuard netif is down.  Logging must never
+     * be able to disturb anything, so a dropped log line is the correct
+     * outcome — not a retry, and not an error path. */
+    (void)udp_sendto(s_trice_pcb, p, &s_dest_addr, TRICE_UDP_PORT);
     UNLOCK_TCPIP_CORE();
 
     pbuf_free(p);
+}
+
+void Trice_UdpSetDest(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    LOCK_TCPIP_CORE();
+    IP4_ADDR(&s_dest_addr, a, b, c, d);
+    UNLOCK_TCPIP_CORE();
 }
 
 static void Trice_AuxWrite(const uint8_t *data, size_t len)
@@ -62,7 +73,9 @@ void Trice_UdpInit(void)
         return;
     }
 
-    IP4_ADDR(&s_broadcast_addr, 255, 255, 255, 255);
+    IP4_ADDR(&s_dest_addr,
+             TRICE_UDP_DEFAULT_DEST_0, TRICE_UDP_DEFAULT_DEST_1,
+             TRICE_UDP_DEFAULT_DEST_2, TRICE_UDP_DEFAULT_DEST_3);
 
     extern Write8AuxiliaryFn_t UserNonBlockingDeferredWrite8AuxiliaryFn;
     UserNonBlockingDeferredWrite8AuxiliaryFn = Trice_AuxWrite;

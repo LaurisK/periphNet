@@ -138,6 +138,21 @@
 #define LWIP_SO_RCVTIMEO          1
 #define LWIP_SO_SNDTIMEO          1
 
+/* WireGuard runs its handshake and packet crypto on lwIP timers/input, i.e.
+ * in tcpip_thread.  Measured worst-case added depth is ~1.5 KB
+ * (wireguardif_process_data_message 224 -> chacha20poly1305_decrypt 360 ->
+ * poly1305_blocks 960), which leaves too little margin in the CubeMX default
+ * of 4096.  Buy the headroom rather than repeat the EthIf stack-overflow
+ * crash-loop (docs/issue_idle_iwdg_crashloop.md).
+ *
+ * NOTE the +2 KB comes out of the 48 KB FreeRTOS heap in CCM (this stack is
+ * pvPortMalloc'd), NOT main SRAM.  Task stacks total ~25.6 KB of that 48 KB,
+ * so there is room — verify against the "Heap=" value TRice'd at boot.
+ * Separately, wireguardif_init() mem_calloc's a 968-byte device struct per
+ * netif from the lwIP heap (MEM_SIZE below). */
+#undef  TCPIP_THREAD_STACKSIZE
+#define TCPIP_THREAD_STACKSIZE    6144
+
 /* More heap + pool slots for concurrent HTTP connections (fits within
  * 128 KB SRAM — 20 KB heap with ~7 KB headroom). */
 #undef  MEM_SIZE
