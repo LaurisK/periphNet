@@ -24,6 +24,7 @@
 #include "i2c.h"
 #include "iwdg.h"
 #include "lwip.h"
+#include "rng.h"
 #include "rtc.h"
 #include "spi.h"
 #include "usart.h"
@@ -116,6 +117,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
   MX_IWDG_Init();
+  MX_RNG_Init();
   /* USER CODE BEGIN 2 */
   /* USER CODE END 2 */
 

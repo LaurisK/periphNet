@@ -61,6 +61,23 @@ arm-none-eabi-size -A build/application.elf
 rm -rf build && cmake -B build -S . && cmake --build build -j8
 ```
 
+**STM32CubeIDE managed build** — CMake stays canonical, but the Eclipse
+`Debug`/`Release` configurations build the *application* target with the same
+sources, includes, defines (`APPLICATION_BUILD`), linker script
+(`App/application.ld`), Trice insert/clean pre/post steps and post-build
+`dfu_image_tool.py sign`, so `Debug/application.bin` is a signed, flashable
+image. It cannot build the bootloader or the `.pnfw` blob — use CMake for
+those. Headless check:
+```bash
+/opt/st/stm32cubeide_1.17.0/headless-build.sh \
+    -data /tmp/ws -import . -cleanBuild PeriphNet/Debug
+```
+`.cproject` / `.project` are **gitignored**, so this configuration is
+machine-local; a fresh clone gets a CubeMX-default project again. Whenever
+CubeMX adds a peripheral it also adds `Core/Src/<periph>.c` — that file must be
+added to `APP_CORE_SOURCES` in `CMakeLists.txt` by hand (the app's Core list is
+explicit, not globbed).
+
 ## Testing
 
 **Device IP:** 10.42.0.203 (DHCP on 10.42.0.x subnet)

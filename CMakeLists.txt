@@ -51,7 +51,7 @@ add_compile_definitions(
 # STM32F4 HAL driver sources (shared)
 # ==============================================================================
 
-file(GLOB HAL_SOURCES
+file(GLOB HAL_SOURCES CONFIGURE_DEPENDS
     "Drivers/STM32F4xx_HAL_Driver/Src/*.c"
 )
 list(FILTER HAL_SOURCES EXCLUDE REGEX ".*template.*")
@@ -223,6 +223,7 @@ set(APP_CORE_SOURCES
     Core/Src/gpio.c
     Core/Src/i2c.c
     Core/Src/iwdg.c
+    Core/Src/rng.c
     Core/Src/rtc.c
     Core/Src/sdio.c
     Core/Src/spi.c

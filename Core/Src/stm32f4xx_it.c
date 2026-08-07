@@ -61,6 +61,7 @@ extern ETH_HandleTypeDef heth;
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern CAN_HandleTypeDef hcan1;
 extern CAN_HandleTypeDef hcan2;
+extern RNG_HandleTypeDef hrng;
 extern DMA_HandleTypeDef hdma_usart3_tx;
 extern UART_HandleTypeDef huart3;
 extern TIM_HandleTypeDef htim6;
@@ -348,6 +349,20 @@ void OTG_FS_IRQHandler(void)
   /* USER CODE BEGIN OTG_FS_IRQn 1 */
 
   /* USER CODE END OTG_FS_IRQn 1 */
+}
+
+/**
+  * @brief This function handles HASH and RNG global interrupts.
+  */
+void HASH_RNG_IRQHandler(void)
+{
+  /* USER CODE BEGIN HASH_RNG_IRQn 0 */
+
+  /* USER CODE END HASH_RNG_IRQn 0 */
+  HAL_RNG_IRQHandler(&hrng);
+  /* USER CODE BEGIN HASH_RNG_IRQn 1 */
+
+  /* USER CODE END HASH_RNG_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */

@@ -65,6 +65,7 @@ void CAN2_RX0_IRQHandler(void);
 void CAN2_RX1_IRQHandler(void);
 void CAN2_SCE_IRQHandler(void);
 void OTG_FS_IRQHandler(void);
+void HASH_RNG_IRQHandler(void);
 /* USER CODE BEGIN EFP */
 
 /* USER CODE END EFP */
