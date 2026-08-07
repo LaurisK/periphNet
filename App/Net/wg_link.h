@@ -16,6 +16,9 @@
 
 #include <stdint.h>
 
+/* Base64 of a 32-byte key: 44 characters + NUL. */
+#define WG_KEY_B64_SIZE   45u
+
 /* --------------------------------------------------------------------------
  * Configuration
  * -------------------------------------------------------------------------- */
@@ -36,8 +39,12 @@ typedef struct {
 
 /**
  * @brief  Create the WireGuard netif and start connecting to the hub.
- *         Call after lwIP is initialised.  Safe to call before DHCP has
- *         bound — the handshake simply retries until a route exists.
+ *         Call after lwIP is initialised and after WgTime_Init(), so the
+ *         first handshake carries a timestamp that survived the last reboot.
+ *         Safe to call before DHCP has bound — the handshake simply retries
+ *         until a route exists.
+ * @param  cfg  Configuration to use, or NULL to keep/reuse the current one.
+ *              The contents are copied; the caller's buffer need not persist.
  * @return 0 on success, negative on error.
  */
 int WgLink_Start(const sWgLinkCfg *cfg);
@@ -57,6 +64,19 @@ int WgLink_IsRunning(void);
  *         is actually carrying traffic.
  */
 int WgLink_IsUp(void);
+
+/**
+ * @brief  The configuration the link is running with (or would start with).
+ *         Never NULL.
+ */
+const sWgLinkCfg *WgLink_ActiveCfg(void);
+
+/**
+ * @brief  Override the hub endpoint. Takes effect on the next WgLink_Start();
+ *         if the link is already running it is applied to the live peer.
+ * @return 0 on success, negative on error.
+ */
+int WgLink_SetEndpoint(const uint8_t ip[4], uint16_t port);
 
 /**
  * @brief  Built-in defaults for the Zaliakalnis hub (see

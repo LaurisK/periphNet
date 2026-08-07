@@ -3,7 +3,7 @@
  * @brief   WireGuard tunnel netif — see wg_link.h.
  */
 
-#include "wg_link.h"
+#include "App/Net/wg_link.h"
 
 #include <string.h>
 
@@ -25,6 +25,15 @@ static uint8_t      s_running;
  * must not live on the caller's stack.
  */
 static struct wireguardif_init_data s_initData;
+
+/* Working copy of the configuration.  The key strings live in these buffers
+ * rather than in the caller's, so a CLI-supplied config can be a stack
+ * temporary and the netif still has valid keys for its whole life.
+ */
+static char       s_privKey[WG_KEY_B64_SIZE];
+static char       s_pubKey[WG_KEY_B64_SIZE];
+static sWgLinkCfg s_cfg;
+static uint8_t    s_cfgLoaded;
 
 /* --------------------------------------------------------------------------
  * Defaults
@@ -53,6 +62,31 @@ const sWgLinkCfg *WgLink_DefaultCfg(void)
     return &s_defaultCfg;
 }
 
+/* Copy a configuration into the module's own storage. */
+static void cfg_load(const sWgLinkCfg *src)
+{
+    s_cfg = *src;
+
+    strncpy(s_privKey, (src->privateKey != NULL) ? src->privateKey : "",
+            sizeof(s_privKey) - 1u);
+    s_privKey[sizeof(s_privKey) - 1u] = '\0';
+    strncpy(s_pubKey, (src->peerPublicKey != NULL) ? src->peerPublicKey : "",
+            sizeof(s_pubKey) - 1u);
+    s_pubKey[sizeof(s_pubKey) - 1u] = '\0';
+
+    s_cfg.privateKey    = s_privKey;
+    s_cfg.peerPublicKey = s_pubKey;
+    s_cfgLoaded         = 1u;
+}
+
+const sWgLinkCfg *WgLink_ActiveCfg(void)
+{
+    if (!s_cfgLoaded) {
+        cfg_load(&s_defaultCfg);
+    }
+    return &s_cfg;
+}
+
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
@@ -68,9 +102,12 @@ int WgLink_Start(const sWgLinkCfg *cfg)
     if (s_running) {
         return -1;
     }
-    if (cfg == NULL) {
-        cfg = &s_defaultCfg;
+    if (cfg != NULL) {
+        cfg_load(cfg);
+    } else if (!s_cfgLoaded) {
+        cfg_load(&s_defaultCfg);
     }
+    cfg = &s_cfg;
 
     IP4_ADDR(&tunnelIp, cfg->tunnelIp[0], cfg->tunnelIp[1],
                         cfg->tunnelIp[2], cfg->tunnelIp[3]);
@@ -173,4 +210,30 @@ int WgLink_IsUp(void)
     UNLOCK_TCPIP_CORE();
 
     return (err == ERR_OK) ? 1 : 0;
+}
+
+int WgLink_SetEndpoint(const uint8_t ip[4], uint16_t port)
+{
+    ip_addr_t addr;
+    err_t     err;
+
+    if (ip == NULL || port == 0u) {
+        return -1;
+    }
+
+    (void)WgLink_ActiveCfg();          /* ensure s_cfg is populated */
+    memcpy(s_cfg.endpointIp, ip, 4u);
+    s_cfg.endpointPort = port;
+
+    if (!s_running || s_peerIndex == WIREGUARDIF_INVALID_INDEX) {
+        return 0;
+    }
+
+    IP_ADDR4(&addr, ip[0], ip[1], ip[2], ip[3]);
+
+    LOCK_TCPIP_CORE();
+    err = wireguardif_update_endpoint(&s_wgNetif, s_peerIndex, &addr, port);
+    UNLOCK_TCPIP_CORE();
+
+    return (err == ERR_OK) ? 0 : -2;
 }

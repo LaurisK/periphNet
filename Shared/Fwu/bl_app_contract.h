@@ -47,6 +47,13 @@ extern "C" {
 #define EXT_FLASH_MODBUS_SEL_ADDR    0x00101000u
 #define EXT_FLASH_MODBUS_SEL_SIZE    0x00001000u
 
+/* WireGuard monotonic time base: one 4 KB sector used as an append-only slot
+ * ring, so the TAI64N handshake timestamp never goes backwards across a
+ * reboot (the hub rejects replayed/older timestamps).  Application-owned,
+ * never touched by the bootloader.  See App/Net/wg_time.h. */
+#define EXT_FLASH_WG_TIME_ADDR       0x00102000u
+#define EXT_FLASH_WG_TIME_SIZE       0x00001000u
+
 /* ==========================================================================
  * Magic numbers
  * ========================================================================== */
@@ -56,6 +63,7 @@ extern "C" {
 #define BOOT_STATUS_MAGIC            0x424F4F54u   /* "BOOT" */
 #define MODBUS_LUT_MAGIC             0x4D424346u   /* "MBCF" */
 #define MODBUS_SEL_MAGIC             0x4D42534Cu   /* "MBSL" */
+#define WG_TIME_MAGIC                0x5747544Du   /* "WGTM" */
 
 /* ==========================================================================
  * Feature flags  (sAppInfo.features)

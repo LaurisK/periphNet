@@ -274,6 +274,17 @@ set(WIREGUARD_SOURCES
     Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/x25519.c
 )
 
+# wireguardif.c carries two leftover printf() calls (upstream marks the stdio
+# include "TODO: Remove").  Newlib's printf mallocs a ~1 KB stdio buffer out of
+# the 1.5 KB ._user_heap_stack via a non-thread-safe allocator, and these run
+# from a task holding the lwIP core lock — so redirect them to a no-op sink
+# instead of patching the submodule.  Object-like macro on purpose: a
+# function-like -Dprintf(...) would also mangle the declaration in <stdio.h>.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/wireguard-lwip/src/wireguardif.c
+    PROPERTIES COMPILE_DEFINITIONS "printf=WgPlatform_NullPrintf"
+)
+
 # --- BSP / PHY driver ---
 
 file(GLOB_RECURSE BSP_SOURCES
@@ -397,8 +408,14 @@ target_include_directories(application.elf PRIVATE ${APP_INCLUDES})
 target_link_libraries(application.elf PRIVATE trice)
 
 # APPLICATION_BUILD enables VTOR relocation to 0x08008000
+# Build time as a UNIX epoch — the floor for the WireGuard monotonic clock
+# (App/Net/wg_time.h). Evaluated at configure time, so it is stable across
+# incremental builds and only moves when CMake re-runs.
+string(TIMESTAMP WG_TIME_BUILD_EPOCH "%s" UTC)
+
 target_compile_definitions(application.elf PRIVATE
     APPLICATION_BUILD
+    WG_TIME_BUILD_EPOCH=${WG_TIME_BUILD_EPOCH}u
 )
 
 set_target_properties(application.elf PROPERTIES

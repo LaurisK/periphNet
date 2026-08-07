@@ -13,6 +13,9 @@
 #include "App/Modbus/modbus_rtu.h"
 #include "App/Modbus/modbus_walker.h"
 #include "App/Mqtt/mqtt_bridge.h"
+#include "App/Net/wg_link.h"
+#include "App/Net/wg_platform.h"
+#include "App/Net/wg_time.h"
 #include "cmsis_os.h"
 #include "trice.h"
 #include "usart.h"
@@ -63,12 +66,14 @@ static void cmd_dfu(const char *args);
 static void cmd_bms(const char *args);
 static void cmd_modbus(const char *args);
 static void cmd_mqtt(const char *args);
+static void cmd_wg(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "modbus",      cmd_modbus,      "Modbus RTU (start|stop|read|set|port|monitor|inject|status)" },
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
+    { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
     { "help",        cmd_help,        "List available commands"  },
@@ -380,6 +385,68 @@ static void cmd_mqtt(const char *args)
         MqttBridge_LogStatus();
     } else {
         TRice("Usage: mqtt start|stop|status|set|monitor|inject|publish\n");
+    }
+}
+
+/**
+ * WG command: control the WireGuard tunnel netif.
+ *
+ * Usage:
+ *   wg start                  — Bring the tunnel up with the active config
+ *   wg stop                   — Remove the netif (tunnel down)
+ *   wg status                 — Config, session state, RNG health, time base
+ *   wg endpoint <a.b.c.d> [port] — Point at a different hub (live if running)
+ */
+static void cmd_wg(const char *args)
+{
+    if (strncmp(args, "start", 5) == 0) {
+        int rc = WgLink_Start(NULL);
+        if (rc == 0) {
+            TRice("WG started\n");
+        } else if (rc == -1) {
+            TRice("WG already running\n");
+        } else {
+            TRice("WG start failed (%d)\n", rc);
+        }
+    } else if (strncmp(args, "stop", 4) == 0) {
+        WgLink_Stop();
+    } else if (strncmp(args, "endpoint ", 9) == 0) {
+        unsigned a, b, c, d, port = 51820u;
+        if (sscanf(args + 9, "%u.%u.%u.%u %u", &a, &b, &c, &d, &port) >= 4) {
+            uint8_t ip[4] = { (uint8_t)a, (uint8_t)b, (uint8_t)c, (uint8_t)d };
+            if (WgLink_SetEndpoint(ip, (uint16_t)port) == 0) {
+                TRice("WG endpoint set to %u.%u.%u.%u:%u\n", a, b, c, d, port);
+            } else {
+                TRice("WG endpoint update failed\n");
+            }
+        } else {
+            TRice("Usage: wg endpoint <a.b.c.d> [port]\n");
+        }
+    } else if (strncmp(args, "status", 6) == 0) {
+        const sWgLinkCfg *cfg = WgLink_ActiveCfg();
+        uint32_t now = 0, persisted = 0, rngFailures = 0;
+        int flashOk = 0, hwSeeded = 0;
+
+        WgTime_GetStatus(&now, &persisted, &flashOk);
+        WgPlatform_GetRngStatus(&hwSeeded, &rngFailures);
+
+        TRice("WG: running=%u session=%u\n",
+              (unsigned)WgLink_IsRunning(), (unsigned)WgLink_IsUp());
+        TRice("WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\n",
+              cfg->tunnelIp[0], cfg->tunnelIp[1],
+              cfg->tunnelIp[2], cfg->tunnelIp[3],
+              cfg->tunnelMask[0], cfg->tunnelMask[1],
+              cfg->tunnelMask[2], cfg->tunnelMask[3]);
+        TRice("WG: endpoint %d.%d.%d.%d:%d keepalive=%us\n",
+              cfg->endpointIp[0], cfg->endpointIp[1],
+              cfg->endpointIp[2], cfg->endpointIp[3],
+              cfg->endpointPort, cfg->keepAlive);
+        TRice("WG: rng hw_seeded=%u failures=%u\n",
+              (unsigned)hwSeeded, rngFailures);
+        TRice("WG: time now=%us persisted=%us flash=%u\n",
+              now, persisted, (unsigned)flashOk);
+    } else {
+        TRice("Usage: wg start|stop|status|endpoint\n");
     }
 }
 

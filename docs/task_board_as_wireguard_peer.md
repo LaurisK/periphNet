@@ -249,31 +249,118 @@ arm-none-eabi-size -A build/application.elf   # NOT plain size (see CLAUDE.md)
 - **Decision:** fits → continue to step 2. Does not fit → stop, switch to the
   site-gateway fallback (design doc §3), and record the measured overflow here.
 
-## Step 2 — Integrate the netif (device side)
+## Step 2 — Integrate the netif (device side) ✅ CODE COMPLETE (2026-08-08)
 
-- Add the WG port under `Middlewares/Third_Party/` (git submodule, matching the
-  trice/backtrace pattern); wire into CMake as an application-only source set
-  (never bootloader).
-- Bring up a `wireguard_netif` in the lwIP init path alongside the existing
-  Ethernet netif. Keep the Ethernet netif the default route for on-LAN traffic;
-  route only the tunnel subnet (and the broker/HA host if off-tunnel) via WG.
-- Own key material like the FWU keys are owned: **device private key must not
-  be a build-time constant checked into the app in plaintext long-term.** For
-  the first bring-up a provisioned key is fine; note the productionization
-  (per-device key, stored where? EEPROM/ext-flash, not in the image) as
-  follow-up — do **not** reuse the FWU key mechanism.
-- `PersistentKeepalive = 25`. Config surface: reuse the existing config/upload
-  or CLI pattern rather than hard-coding endpoint/keys in a header.
+Built and linked; **not yet exercised against the hub on hardware** — that is
+step 4.
 
-## Step 3 — Autonomy / failure behaviour
+- Submodule `Middlewares/Third_Party/wireguard-lwip` (smartalock), wired in as
+  the application-only `WIREGUARD_SOURCES` set, never the bootloader.
+- `App/Net/wg_link.c/h` creates the netif and the single hub peer. The
+  Ethernet netif deliberately stays `netif_set_default()`, so only the tunnel
+  subnet (covered by the WG netif's address/netmask) routes through WG and the
+  encapsulated UDP still leaves via Ethernet.
+- **Bring-up moved out of `MX_LWIP_Init()` into `App_DefaultTaskEntry()`**,
+  after `W25Q128_Init()` and the DHCP wait. The reason is step 3's timestamp
+  store: the first handshake must not fire before the flash-backed monotonic
+  clock exists. `LWIP/App/lwip.c` now only carries a note saying so.
+- Config lives in RAM (`s_cfg` + key buffers inside `wg_link.c`), seeded from
+  the built-in default, so a caller may pass a stack temporary. CLI surface:
+  `wg start|stop|status|endpoint <a.b.c.d> [port]` — `endpoint` retargets a
+  live peer via `wireguardif_update_endpoint()`, which is what a bench WG
+  server test needs.
+- Keepalive is **21 s**, matching the value the hub issues (the plan said 25;
+  the dashboard-generated configs in step 0 use 21 — kept consistent with the
+  hub rather than with the plan text).
+- **Device private key is still a build constant** (`s_defaultCfg` in
+  `wg_link.c`, board #1, dashboard-issued). Bring-up only, loudly commented.
+  Per-device on-device generation stays in Deferred.
 
-- WG handshake + rekey must run in a task context that **cannot stall RS485 or
-  CAN**. Verify: pull the hub, confirm the walker/BMS/CAN cadence is unaffected
-  and IWDG is still kicked.
-- Reconnect/backoff when the hub is unreachable (mirror the mqtt task's
-  existing backoff). No busy-wait, no blocking the tcpip_thread.
-- Trice cannot be used in lwIP callback context — keep WG logging in task/ISR
-  contexts only (same rule as the MQTT client).
+**One integration fix worth remembering:** `wireguardif.c` carries two
+leftover `printf()` calls (upstream's own `#include <stdio.h> // TODO:
+Remove`). Newlib's `printf` mallocs a ~1 KB stdio buffer out of the **1.5 KB**
+`._user_heap_stack` through a non-thread-safe allocator, and both calls run
+from a task holding the lwIP core lock. Rather than patch the submodule, that
+one file is compiled with `-Dprintf=WgPlatform_NullPrintf` (object-like on
+purpose — a function-like `-Dprintf(...)` would also mangle the declaration in
+`<stdio.h>`), and the sink lives in `wg_platform.c`.
+
+## Step 3 — Autonomy / failure behaviour ✅ CODE COMPLETE (2026-08-08)
+
+Design verified by reading the port; **bench verification with the hub pulled
+is still pending** (step 4).
+
+- **Nothing blocks.** `WgLink_Start()` returns immediately whether or not the
+  hub answers; handshake and rekey run on lwIP timers in tcpip_thread. The
+  only app-side periodic work is a 5 s housekeeping block in defaultTask
+  (flash persist + up/down transition logging), which cannot stall RS485/CAN
+  and sits inside the existing 100 ms IWDG-kick loop.
+- **Retry is unbounded and free.** `should_send_initiation()` fires whenever
+  `!curr_keypair.valid && peer->active`, rate-limited to one initiation per
+  `REKEY_TIMEOUT` (5 s). `peer->active` is set by `wireguardif_connect()` and
+  never cleared by failure, so no app-side backoff loop is needed — a hub that
+  is down for a week costs one packet per 5 s and reconnects by itself.
+- **Trice stays out of lwIP context.** `wg_platform.c` has no Trice calls at
+  all; RNG failures are *counted* and surfaced through
+  `WgPlatform_GetRngStatus()` for `wg status` / defaultTask instead.
+
+### The two security items from step 1 — both now closed
+
+**1. Entropy — hardware RNG.** `HAL_RNG_MODULE_ENABLED` is on and
+`MX_RNG_Init()` runs from `main()`. `wireguard_random_bytes()` now seeds the
+SHA-256 DRBG from 8 hardware words (plus DWT/tick/stack jitter) and mixes a
+**fresh** hardware word into every 32-byte output block, so the DRBG is
+whitening real noise rather than substituting for it. A seed/clock error
+latches the F4 RNG, so `hw_rng_word()` clears CEIS/SEIS, re-inits the
+peripheral and retries once; a hard failure increments a counter, leaves
+`hw_seeded=0`, and falls back to the DRBG rather than returning zeros.
+`wg status` reports both.
+
+**2. TAI64N — reboot-surviving monotonic clock.** New `App/Net/wg_time.c`:
+
+- one 4 KB ext-flash sector (`EXT_FLASH_WG_TIME_ADDR` = `0x0010_2000`) used as
+  an **append-only ring of 16 B slots** (magic + seconds + seq + CRC32), so a
+  write costs a page program, not a sector erase — 256 slots, erased and
+  restarted when full or when a torn slot is found;
+- every boot reads the newest valid slot, adds `WG_TIME_BOOT_BUMP_S` (1 h) and
+  writes the new base back;
+- while running, `WgTime_Tick()` re-persists every `WG_TIME_PERSIST_S`
+  (15 min) — called from the defaultTask housekeeping block, never from lwIP
+  context, because it touches SPI;
+- the bump being **4× the persist interval** is the monotonicity argument: the
+  worst case (power cut right before a scheduled write) still puts the next
+  boot's base above every stamp the previous boot could have emitted;
+- floored at `WG_TIME_BUILD_EPOCH`, which CMake defines from
+  `string(TIMESTAMP … "%s")` at configure time — a virgin board therefore
+  emits a plausible timestamp instead of one near 1970, and reflashing always
+  moves the sequence forward even if the flash store was wiped. The CubeIDE
+  managed build does not define it and falls back to 0.
+- `WgTime_SetIfNewer()` is the hook for SNTP later: a real UNIX time is far
+  larger than this free-running counter, so adopting it keeps the sequence
+  monotonic across the switch.
+
+At ~96 writes/day the ring erases roughly every 2.6 days — ~140 sector erases
+a year against the W25Q64's 100 k endurance.
+
+**If the tunnel refuses to handshake on first contact**, suspect hub-side
+peer state left over from the step-1 experiment (which used the old
+`sys_now()` clock and may have recorded a stamp our counter has not reached).
+Removing and re-adding the peer in WGDashboard clears it.
+
+### Footprint after steps 2–3
+
+`arm-none-eabi-size -A build/application.elf`, measured 2026-08-08:
+
+| Region | Step 1 | Now | Delta |
+|---|---|---|---|
+| `.text` | 259,916 | 264,604 | +4,688 |
+| `.rodata` | 43,036 | 43,396 | +360 |
+| **Flash total** | 303,928 | 308,000 | **182,880 B of 480 KB free (38 %)** |
+| `.bss` | — | 67,384 | main SRAM ~61 KB free |
+| `.ccmram` | 11,428 | 11,428 | **0 — still untouched** |
+| `.ccmheap` | 48,000 | 48,000 | 0 |
+
+Host unit tests (`ctest --test-dir tests/build`) still 7/7 green.
 
 ## Step 4 — End-to-end over the tunnel
 

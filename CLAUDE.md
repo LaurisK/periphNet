@@ -187,6 +187,8 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 0x0010_1000  ├───────────────────┤ uploads compile into the inactive one
              │ Modbus Sel (4KB)  │ active-region selector (NOR bit-clear
 0x0010_2000  ├───────────────────┤ pattern like sBootStatus)
+             │ WG Time (4KB)     │ monotonic seconds for the WireGuard TAI64N
+0x0010_3000  ├───────────────────┤ handshake stamp; append-only 16B slot ring
              │ Free              │ ~7.35MB
              └───────────────────┘
 ```
@@ -211,6 +213,10 @@ PeriphNet/
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
     Log/                          # crash handler + backtrace, trice transports
+    Net/                          # WireGuard peer: wg_link (tunnel netif +
+                                  #   hub peer), wg_platform (port hooks: HW
+                                  #   RNG-backed DRBG, TAI64N), wg_time
+                                  #   (reboot-surviving monotonic seconds)
     Modbus/                       # modbus_rtu (RTU master), modbus_walker
                                   #   (config-driven poll task), default
                                   #   Solis JSON config + provisioning
@@ -252,6 +258,9 @@ PeriphNet/
     LwIP/                         # TCP/IP stack
     trice/                        # Trice library (git submodule, uartDma branch)
     backtrace/                    # Cortex-M4 FP unwinder
+    wireguard-lwip/               # smartalock WireGuard-lwIP (git submodule):
+                                  #   netif + Curve25519/ChaCha20-Poly1305/
+                                  #   BLAKE2s. APPLICATION ONLY, never the BL
   cmake/gcc-arm-none-eabi.cmake   # ARM toolchain file
   CMakeLists.txt                  # Dual-target build (bootloader.elf + application.elf)
   flash_nokill.sh                 # J-Link clone flash wrapper
@@ -463,7 +472,7 @@ Shared code compiled into both bootloader and application.
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | modbus | 512 words | osPriorityNormal (24) | Config walker: one lap per 100ms tick, reads due transactions from the flash config, decodes + publishes, drains the write queue, commits config swaps at lap boundaries. Started/stopped at runtime (`modbus start`) |
 | mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`) |
-| tcpip_thread | 4096 bytes | 24 | lwIP TCP/IP processing |
+| tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
 
 Stack overflow checking is ON (`configCHECK_FOR_STACK_OVERFLOW=2`):
@@ -509,6 +518,47 @@ transfers (MQTT keepalives unaffected). Golden promotion runs in defaultTask
 under an image-store read hold; the W25Q128 driver serializes SPI access
 with a mutex (skipped in BL and fault-handler context).
 
+## Remote Access — WireGuard peer (`App/Net/`)
+
+The board carries its own WireGuard tunnel rather than relying on a VPN box at
+the site, so it is reachable identically on the HA LAN or on a foreign LAN it
+does not own. `wireguardif` is a second lwIP netif; the Ethernet netif stays
+the **default route**, so on-LAN traffic and the encapsulated WG UDP itself
+take the short path and only the tunnel subnet routes through WG.
+
+| Piece | Role |
+|-------|------|
+| `wg_link.c/h` | netif + hub peer bring-up, endpoint override, up/running state |
+| `wg_platform.c/h` | the port's four required hooks + the printf sink |
+| `wg_time.c/h` | reboot-surviving monotonic seconds for the TAI64N stamp |
+
+Bring-up runs in **defaultTask** (`App_DefaultTaskEntry`), not `MX_LWIP_Init()`
+— `WgTime_Init()` needs `W25Q128_Init()` first. CLI: `wg start|stop|status|
+endpoint <ip> [port]`.
+
+- **Soft dependency, always.** A dead hub costs one handshake packet every
+  5 s (`REKEY_TIMEOUT`) and nothing else; `peer->active` stays set so the port
+  retries forever without app intervention. No WG path blocks a task, the
+  RS485 bus, or the IWDG kick.
+- **Entropy:** hardware RNG (`hrng`) whitened through a SHA-256 DRBG, with a
+  fresh HW word mixed into every output block. WireGuard draws ephemeral
+  session keys from this, so RNG failures are counted and reported by
+  `wg status` (`hw_seeded=0` means the DRBG fell back to jitter).
+- **TAI64N must never go backwards.** The hub keeps the greatest stamp seen
+  per peer, so a `sys_now()`-based clock breaks the tunnel after every reset.
+  `wg_time.c` persists a seconds counter to a 4 KB ext-flash slot ring
+  (append-only, one write per 15 min), jumps it forward 1 h every boot, and
+  floors it at the CMake-supplied `WG_TIME_BUILD_EPOCH`.
+- **Device private key is still a build constant** (bring-up only, board #1).
+  Production needs a per-device key generated on-device and stored outside the
+  image — and NOT through the FWU key mechanism, which is bootloader-only.
+- **Control stays outbound-only.** Metrics and actuation both ride MQTT over a
+  board-initiated socket; inbound (HTTP OTA UI, Trice) is debug-only. Do not
+  add an HA→board request/response path that needs inbound routing per site.
+
+Hub facts, address plan and the WGDashboard gotchas:
+`docs/task_board_as_wireguard_peer.md`.
+
 ## Coding Standards
 
 ### Naming Conventions
@@ -534,7 +584,11 @@ TRice("Message: %d\n", value);
 - **Bootloader must fit in 32KB** — no FreeRTOS, no lwIP, no Trice. Currently ~23KB. Monitor size.
 - **Application starts at 0x08008000** — VTOR relocation via `APPLICATION_BUILD` define in `system_stm32f4xx.c`
 - **BL API at 0x08007F00** — fixed address, function pointers must not use BL globals
-- **tcpip_thread stack is 4096 bytes** — still heap-allocate large structs
+- **tcpip_thread stack is 6144 bytes** (raised from the CubeMX 4096 in
+  `LWIP/Target/lwipopts.h`; WireGuard's `chacha20poly1305_decrypt` →
+  `poly1305_blocks` chain alone adds ~1.5 KB) — still heap-allocate large
+  structs. The stack is `pvPortMalloc`'d, so the extra 2 KB comes out of the
+  48 KB CCM FreeRTOS heap, not main SRAM
 - **IWDG must be kicked every 16.4s** — `KickIwdg()` in default task + upload/scan/promotion paths
 - **NOR flash bit-clearing** — boot flags can be modified without sector erase (1→0 only)
 - **FWU keys are build+BL only** — never store keys in ext flash, never link `secrets.c` into the application, never expose key material through the BL API

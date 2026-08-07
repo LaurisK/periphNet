@@ -21,6 +21,9 @@
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
+#include "App/Net/wg_link.h"
+#include "App/Net/wg_platform.h"
+#include "App/Net/wg_time.h"
 #include "boot_status.h"
 #include "cmsis_os.h"
 #include "main.h"
@@ -110,6 +113,17 @@ void App_DefaultTaskEntry(void)
         TRice("Flash INIT FAILED\n");
     }
 
+    /* Monotonic time base for the WireGuard handshake timestamp.  Must run
+     * after flash init and before the tunnel starts — the hub rejects a
+     * timestamp that is not newer than the last one it saw from us, so this
+     * is what makes the tunnel survive a reboot. */
+    if (WgTime_Init() == 0) {
+        TRice("WG time base: %u s (flash-backed)\n", WgTime_Now());
+    } else {
+        TRice("WG time base: %u s, NO FLASH BACKING (tunnel may need the "
+              "hub's peer state cleared after a reset)\n", WgTime_Now());
+    }
+
     /* Wait for DHCP lease (poll gnetif, up to 30 s) */
     extern struct netif gnetif;
     TRice("Waiting for link + DHCP...\n");
@@ -148,9 +162,29 @@ void App_DefaultTaskEntry(void)
     Trice_UdpInit();
     TRice("Trice UDP started on port %u\n", TRICE_UDP_PORT);
 
+    /* WireGuard tunnel to the hub.  Started here rather than in MX_LWIP_Init()
+     * so WgTime_Init() has already run.  A missing link or an unreachable hub
+     * is not an error: the handshake retries on lwIP timers and nothing else
+     * on the board depends on it. */
+    {
+        int wgRc = WgLink_Start(NULL);
+        int hwSeeded = 0;
+        WgPlatform_GetRngStatus(&hwSeeded, NULL);
+        if (wgRc != 0) {
+            TRice("WG: start failed (%d)\n", wgRc);
+        }
+        if (!hwSeeded) {
+            /* Only meaningful once something has drawn randomness; the
+             * handshake above does. */
+            TRice("WG: WARNING entropy not fully from hardware RNG\n");
+        }
+    }
+
     uint32_t btnDebounce[3]  = {0U, 0U, 0U};
     uint32_t heartbeatTick   = 0U;
     uint32_t ledPulseCounter = 0U;
+    uint32_t wgTick          = 0U;
+    int      wgWasUp         = -1;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100U));
@@ -186,6 +220,28 @@ void App_DefaultTaskEntry(void)
             TRice("Promoting stored blob to golden...\n");
             FwuCtl_RunPromotion();
             TRice("Golden promotion done\n");
+        }
+
+        /* ---- WireGuard housekeeping (every 5 s) ----
+         * Persisting the time base touches SPI flash, so it runs here in a
+         * task, never in lwIP context.  WgTime_Tick() itself rate-limits to
+         * one write per WG_TIME_PERSIST_S. */
+        wgTick++;
+        if (wgTick >= 50U) {
+            wgTick = 0U;
+            WgTime_Tick();
+
+            if (WgLink_IsRunning()) {
+                int up = WgLink_IsUp();
+                if (up != wgWasUp) {
+                    wgWasUp = up;
+                    if (up) {
+                        TRice("WG: tunnel UP (session established)\n");
+                    } else {
+                        TRice("WG: tunnel DOWN (handshaking)\n");
+                    }
+                }
+            }
         }
 
         /* Heartbeat every 1 s (10 × 100 ms) */
