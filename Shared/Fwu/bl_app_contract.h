@@ -54,6 +54,16 @@ extern "C" {
 #define EXT_FLASH_WG_TIME_ADDR       0x00102000u
 #define EXT_FLASH_WG_TIME_SIZE       0x00001000u
 
+/* WireGuard network configuration (tunnel address/mask, hub endpoint,
+ * keepalive).  One 4 KB sector holding a single CRC-checked record, rewritten
+ * whole on every change — config edits are rare, so no wear-levelling ring is
+ * needed here (unlike the time base above, which writes every 15 min).
+ * Absent/corrupt record means "use the built-in defaults", so an erased
+ * device still comes up on the built-in hub.  Application-owned, never
+ * touched by the bootloader.  See App/Net/wg_cfg.h. */
+#define EXT_FLASH_WG_CFG_ADDR        0x00103000u
+#define EXT_FLASH_WG_CFG_SIZE        0x00001000u
+
 /* ==========================================================================
  * Magic numbers
  * ========================================================================== */

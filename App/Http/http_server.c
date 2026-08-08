@@ -18,6 +18,9 @@
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/crash.h"
 #include "App/Modbus/modbus_default_config.h"
+#include "App/Net/wg_link.h"
+#include "App/Net/wg_platform.h"
+#include "App/Net/wg_time.h"
 #include "App/system.h"
 #include "bl_app_contract.h"
 #include "version.h"
@@ -31,6 +34,7 @@
 #include "trice.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define HTTP_IO_TIMEOUT_MS   10000
 #define REQ_BUF_SIZE         1024
@@ -971,6 +975,247 @@ static bool route_is(const char *method_path)
     return strncmp(req_buf, method_path, strlen(method_path)) == 0;
 }
 
+/* --------------------------------------------------------------------------
+ * WireGuard configuration
+ *
+ * These exist because the `wg` CLI is reachable only over USB CDC / UART1,
+ * i.e. only with physical access to the board — which is exactly what the
+ * tunnel is supposed to remove the need for.  HTTP is the one remote channel
+ * that keeps working when the tunnel itself is misconfigured, so it is the
+ * only place a tunnel misconfiguration can actually be repaired from.
+ * -------------------------------------------------------------------------- */
+
+/* Minimal field lookup: finds "key" and returns the first non-space character
+ * after the following colon.  Adequate for the small flat objects accepted
+ * here — no nesting, no escapes, no duplicate keys. */
+static const char *json_value(const char *body, const char *key)
+{
+    char pattern[32];
+    const char *p;
+
+    (void)snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    p = strstr(body, pattern);
+    if (p == NULL) {
+        return NULL;
+    }
+    p = strchr(p, ':');
+    if (p == NULL) {
+        return NULL;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    return p;
+}
+
+static int json_uint(const char *body, const char *key, uint32_t *out)
+{
+    const char *p = json_value(body, key);
+
+    if (p == NULL || *p < '0' || *p > '9') {
+        return 0;
+    }
+    *out = (uint32_t)strtoul(p, NULL, 10);
+    return 1;
+}
+
+static int json_bool(const char *body, const char *key, int dflt)
+{
+    const char *p = json_value(body, key);
+
+    if (p == NULL) {
+        return dflt;
+    }
+    if (strncmp(p, "true", 4) == 0) {
+        return 1;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        return 0;
+    }
+    return dflt;
+}
+
+/* Accepts a quoted dotted-quad and rejects anything else, including octets
+ * above 255 — a silently truncated address would be worse than a 422. */
+static int json_ipv4(const char *body, const char *key, uint8_t ip[4])
+{
+    const char *p = json_value(body, key);
+    unsigned    o[4];
+    int         n;
+
+    if (p == NULL || *p != '"') {
+        return 0;
+    }
+    n = sscanf(p + 1, "%u.%u.%u.%u", &o[0], &o[1], &o[2], &o[3]);
+    if (n != 4) {
+        return 0;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (o[i] > 255u) {
+            return 0;
+        }
+        ip[i] = (uint8_t)o[i];
+    }
+    return 1;
+}
+
+static void wg_status_json(char *buf, size_t sz)
+{
+    const sWgLinkCfg *cfg         = WgLink_ActiveCfg();
+    uint32_t          now         = 0u;
+    uint32_t          persisted   = 0u;
+    uint32_t          rngFailures = 0u;
+    int               flashOk     = 0;
+    int               hwSeeded    = 0;
+
+    WgTime_GetStatus(&now, &persisted, &flashOk);
+    WgPlatform_GetRngStatus(&hwSeeded, &rngFailures);
+
+    (void)snprintf(buf, sz,
+        "{\"running\":%s,\"session_up\":%s,\"config_source\":\"%s\","
+        "\"tunnel_ip\":\"%u.%u.%u.%u\",\"tunnel_mask\":\"%u.%u.%u.%u\","
+        "\"endpoint_ip\":\"%u.%u.%u.%u\",\"endpoint_port\":%u,"
+        "\"keepalive\":%u,\"rng_hw_seeded\":%s,\"rng_failures\":%u,"
+        "\"time_now\":%u,\"time_persisted\":%u,\"time_flash_backed\":%s}",
+        WgLink_IsRunning() ? "true" : "false",
+        WgLink_IsUp()      ? "true" : "false",
+        WgLink_CfgIsStored() ? "stored" : "built-in",
+        cfg->tunnelIp[0], cfg->tunnelIp[1], cfg->tunnelIp[2], cfg->tunnelIp[3],
+        cfg->tunnelMask[0], cfg->tunnelMask[1],
+        cfg->tunnelMask[2], cfg->tunnelMask[3],
+        cfg->endpointIp[0], cfg->endpointIp[1],
+        cfg->endpointIp[2], cfg->endpointIp[3],
+        (unsigned)cfg->endpointPort, (unsigned)cfg->keepAlive,
+        hwSeeded ? "true" : "false", (unsigned)rngFailures,
+        (unsigned)now, (unsigned)persisted, flashOk ? "true" : "false");
+}
+
+static void handle_wg_status(struct netconn *conn)
+{
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_wg_config(struct netconn *conn, sConnStream *s)
+{
+    uint32_t content_length = parse_content_length(req_buf);
+    char     body[256];
+    uint32_t got = 0u;
+    uint8_t  ip[4];
+    uint8_t  mask[4];
+    uint8_t  ipEp[4];
+    int      haveIp;
+    int      haveMask;
+    int      haveEp;
+    uint32_t port = 0u;
+    int      save;
+
+    if (content_length == 0u || content_length >= sizeof(body)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"JSON body required (max 255 bytes)\"}");
+        return;
+    }
+
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    while (got < content_length) {
+        int ch = cs_read_byte(s);
+        if (ch < 0) {
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"incomplete body\"}");
+            return;
+        }
+        body[got++] = (char)ch;
+    }
+    body[got] = '\0';
+
+    haveIp   = json_ipv4(body, "tunnel_ip",   ip);
+    haveMask = json_ipv4(body, "tunnel_mask", mask);
+    haveEp   = json_ipv4(body, "endpoint_ip", ipEp);
+    /* Unconditional: short-circuiting this into the check below would drop a
+     * port supplied alongside a tunnel address. */
+    (void)json_uint(body, "endpoint_port", &port);
+
+    if (!haveIp && !haveMask && !haveEp && port == 0u) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"nothing to change; expected tunnel_ip, "
+                  "tunnel_mask, endpoint_ip or endpoint_port\"}");
+        return;
+    }
+
+    /* A mask alone is meaningless — WgLink_SetTunnelIp takes the pair. */
+    if (haveMask && !haveIp) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"tunnel_mask requires tunnel_ip\"}");
+        return;
+    }
+
+    save = json_bool(body, "save", 1);
+
+    if (haveIp) {
+        if (WgLink_SetTunnelIp(ip, haveMask ? mask : NULL) != 0) {
+            send_json(conn, "422 Unprocessable Entity",
+                      "{\"error\":\"invalid tunnel address\"}");
+            return;
+        }
+    }
+
+    if (haveEp || port != 0u) {
+        const sWgLinkCfg *cur = WgLink_ActiveCfg();
+        if (!haveEp) {
+            memcpy(ipEp, cur->endpointIp, sizeof(ipEp));
+        }
+        if (port == 0u) {
+            port = cur->endpointPort;
+        }
+        if (WgLink_SetEndpoint(ipEp, (uint16_t)port) != 0) {
+            send_json(conn, "422 Unprocessable Entity",
+                      "{\"error\":\"invalid endpoint\"}");
+            return;
+        }
+    }
+
+    if (save && WgLink_SaveCfg() != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"config applied but could not be saved\"}");
+        return;
+    }
+
+    TRice("WG: config updated over HTTP (saved=%u)\n", (unsigned)save);
+
+    /* Report the resulting state rather than an ack — the caller needs to see
+     * what actually took effect, especially after a restart. */
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_wg_config_reset(struct netconn *conn)
+{
+    if (WgLink_ResetCfg() != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not clear stored config\"}");
+        return;
+    }
+    TRice("WG: config reset to built-in defaults\n");
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_wg_restart(struct netconn *conn)
+{
+    WgLink_Stop();
+    if (WgLink_Start(NULL) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"tunnel restart failed\"}");
+        return;
+    }
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
 static void handle_connection(struct netconn *conn)
 {
     sConnStream stream;
@@ -1011,6 +1256,14 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_cfg_download(conn);
     } else if (route_is("DELETE /api/modbus/config ")) {
         handle_modbus_cfg_reset(conn);
+    } else if (route_is("GET /api/wg/status")) {
+        handle_wg_status(conn);
+    } else if (route_is("POST /api/wg/config")) {
+        handle_wg_config(conn, &stream);
+    } else if (route_is("DELETE /api/wg/config")) {
+        handle_wg_config_reset(conn);
+    } else if (route_is("POST /api/wg/restart")) {
+        handle_wg_restart(conn);
     } else if (route_is("GET / ")) {
         char hdr[96];
         int hlen = snprintf(hdr, sizeof(hdr),

@@ -79,6 +79,42 @@ const sWgLinkCfg *WgLink_ActiveCfg(void);
 int WgLink_SetEndpoint(const uint8_t ip[4], uint16_t port);
 
 /**
+ * @brief  Set this device's address inside the tunnel.
+ *
+ * Must match the AllowedIPs the hub has for this peer — the hub drops packets
+ * whose inner source address it has not authorised for the peer's key, and has
+ * no route back for any other address.  A handshake still succeeds when they
+ * disagree (it does not involve inner addresses), so the symptom is a peer that
+ * looks connected while carrying no traffic.
+ *
+ * @param  ip    tunnel address, must not be 0.0.0.0.
+ * @param  mask  tunnel subnet mask, or NULL to keep the current one.
+ * @return 0 on success, negative on error.  Applied immediately: if the link
+ *         is running it is restarted, which forces a fresh handshake.
+ */
+int WgLink_SetTunnelIp(const uint8_t ip[4], const uint8_t mask[4]);
+
+/**
+ * @brief  Persist the active configuration so it survives reboot and OTA.
+ *         Without this, changes last only until the next reset.
+ * @return 0 on success, negative on flash error.
+ */
+int WgLink_SaveCfg(void);
+
+/**
+ * @brief  Drop the persisted configuration and revert to the built-in
+ *         defaults.  Applied immediately (restarts a running link).
+ * @return 0 on success, negative on error.
+ */
+int WgLink_ResetCfg(void);
+
+/**
+ * @brief  1 if the active configuration came from flash rather than the
+ *         built-in defaults.
+ */
+int WgLink_CfgIsStored(void);
+
+/**
  * @brief  Built-in defaults for the Zaliakalnis hub (see
  *         docs/task_board_as_wireguard_peer.md step 0 for provenance).
  */

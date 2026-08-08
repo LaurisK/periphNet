@@ -4,6 +4,7 @@
  */
 
 #include "App/Net/wg_link.h"
+#include "App/Net/wg_cfg.h"
 
 #include <string.h>
 
@@ -34,6 +35,7 @@ static char       s_privKey[WG_KEY_B64_SIZE];
 static char       s_pubKey[WG_KEY_B64_SIZE];
 static sWgLinkCfg s_cfg;
 static uint8_t    s_cfgLoaded;
+static uint8_t    s_cfgStored;   /* active cfg came from flash, not defaults */
 
 /* --------------------------------------------------------------------------
  * Defaults
@@ -79,11 +81,28 @@ static void cfg_load(const sWgLinkCfg *src)
     s_cfgLoaded         = 1u;
 }
 
+/* Built-in defaults first (they carry the keys), then overlay whatever the
+ * persisted record holds.  A missing or corrupt record is not an error: the
+ * board simply comes up on the built-in hub. */
+static void cfg_ensure_loaded(void)
+{
+    if (s_cfgLoaded) {
+        return;
+    }
+    cfg_load(&s_defaultCfg);
+    if (WgCfg_Load(&s_cfg) == 0) {
+        s_cfgStored = 1u;
+        TRice("WG: using stored config %d.%d.%d.%d\n",
+              s_cfg.tunnelIp[0], s_cfg.tunnelIp[1],
+              s_cfg.tunnelIp[2], s_cfg.tunnelIp[3]);
+    } else {
+        s_cfgStored = 0u;
+    }
+}
+
 const sWgLinkCfg *WgLink_ActiveCfg(void)
 {
-    if (!s_cfgLoaded) {
-        cfg_load(&s_defaultCfg);
-    }
+    cfg_ensure_loaded();
     return &s_cfg;
 }
 
@@ -104,8 +123,8 @@ int WgLink_Start(const sWgLinkCfg *cfg)
     }
     if (cfg != NULL) {
         cfg_load(cfg);
-    } else if (!s_cfgLoaded) {
-        cfg_load(&s_defaultCfg);
+    } else {
+        cfg_ensure_loaded();
     }
     cfg = &s_cfg;
 
@@ -210,6 +229,70 @@ int WgLink_IsUp(void)
     UNLOCK_TCPIP_CORE();
 
     return (err == ERR_OK) ? 1 : 0;
+}
+
+/* Re-create the netif so a new address takes effect.  Changing a running
+ * netif's address in place would leave the peer's allowed_ip (derived from it)
+ * stale, so a stop/start is both simpler and less error-prone. */
+static int cfg_reapply(void)
+{
+    if (!s_running) {
+        return 0;
+    }
+    WgLink_Stop();
+    return WgLink_Start(NULL);
+}
+
+int WgLink_SetTunnelIp(const uint8_t ip[4], const uint8_t mask[4])
+{
+    if (ip == NULL) {
+        return -1;
+    }
+    /* 0.0.0.0 would make netif_add succeed but route nothing. */
+    if ((ip[0] | ip[1] | ip[2] | ip[3]) == 0u) {
+        return -1;
+    }
+    if (mask != NULL && (mask[0] | mask[1] | mask[2] | mask[3]) == 0u) {
+        return -1;
+    }
+
+    cfg_ensure_loaded();
+    memcpy(s_cfg.tunnelIp, ip, 4u);
+    if (mask != NULL) {
+        memcpy(s_cfg.tunnelMask, mask, 4u);
+    }
+
+    return cfg_reapply();
+}
+
+int WgLink_SaveCfg(void)
+{
+    int rc;
+
+    cfg_ensure_loaded();
+    rc = WgCfg_Save(&s_cfg);
+    if (rc == 0) {
+        s_cfgStored = 1u;
+    }
+    return rc;
+}
+
+int WgLink_ResetCfg(void)
+{
+    if (WgCfg_Clear() != 0) {
+        return -1;
+    }
+
+    cfg_load(&s_defaultCfg);
+    s_cfgStored = 0u;
+
+    return cfg_reapply();
+}
+
+int WgLink_CfgIsStored(void)
+{
+    cfg_ensure_loaded();
+    return (int)s_cfgStored;
 }
 
 int WgLink_SetEndpoint(const uint8_t ip[4], uint16_t port)

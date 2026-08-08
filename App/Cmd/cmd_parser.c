@@ -396,6 +396,12 @@ static void cmd_mqtt(const char *args)
  *   wg stop                   — Remove the netif (tunnel down)
  *   wg status                 — Config, session state, RNG health, time base
  *   wg endpoint <a.b.c.d> [port] — Point at a different hub (live if running)
+ *   wg ip <a.b.c.d> [mask]    — Set our address inside the tunnel (restarts it)
+ *   wg save                   — Persist the active config across reboot/OTA
+ *   wg reset                  — Drop the persisted config, back to defaults
+ *
+ * "ip" and "endpoint" change the running config only; follow with "wg save"
+ * to make them survive a reset.
  */
 static void cmd_wg(const char *args)
 {
@@ -422,6 +428,35 @@ static void cmd_wg(const char *args)
         } else {
             TRice("Usage: wg endpoint <a.b.c.d> [port]\n");
         }
+    } else if (strncmp(args, "ip ", 3) == 0) {
+        unsigned a, b, c, d;
+        unsigned m0 = 0, m1 = 0, m2 = 0, m3 = 0;
+        int      n = sscanf(args + 3, "%u.%u.%u.%u %u.%u.%u.%u",
+                            &a, &b, &c, &d, &m0, &m1, &m2, &m3);
+        if (n == 4 || n == 8) {
+            uint8_t ip[4]   = { (uint8_t)a,  (uint8_t)b,  (uint8_t)c,  (uint8_t)d  };
+            uint8_t mask[4] = { (uint8_t)m0, (uint8_t)m1, (uint8_t)m2, (uint8_t)m3 };
+            if (WgLink_SetTunnelIp(ip, (n == 8) ? mask : NULL) == 0) {
+                TRice("WG tunnel ip set to %u.%u.%u.%u (use 'wg save' to keep)\n",
+                      a, b, c, d);
+            } else {
+                TRice("WG tunnel ip update failed\n");
+            }
+        } else {
+            TRice("Usage: wg ip <a.b.c.d> [mask]\n");
+        }
+    } else if (strncmp(args, "save", 4) == 0) {
+        if (WgLink_SaveCfg() == 0) {
+            TRice("WG config saved\n");
+        } else {
+            TRice("WG config save failed\n");
+        }
+    } else if (strncmp(args, "reset", 5) == 0) {
+        if (WgLink_ResetCfg() == 0) {
+            TRice("WG config reset to defaults\n");
+        } else {
+            TRice("WG config reset failed\n");
+        }
     } else if (strncmp(args, "status", 6) == 0) {
         const sWgLinkCfg *cfg = WgLink_ActiveCfg();
         uint32_t now = 0, persisted = 0, rngFailures = 0;
@@ -430,8 +465,9 @@ static void cmd_wg(const char *args)
         WgTime_GetStatus(&now, &persisted, &flashOk);
         WgPlatform_GetRngStatus(&hwSeeded, &rngFailures);
 
-        TRice("WG: running=%u session=%u\n",
-              (unsigned)WgLink_IsRunning(), (unsigned)WgLink_IsUp());
+        TRice("WG: running=%u session=%u cfg=%s\n",
+              (unsigned)WgLink_IsRunning(), (unsigned)WgLink_IsUp(),
+              WgLink_CfgIsStored() ? "stored" : "built-in");
         TRice("WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\n",
               cfg->tunnelIp[0], cfg->tunnelIp[1],
               cfg->tunnelIp[2], cfg->tunnelIp[3],
@@ -446,7 +482,7 @@ static void cmd_wg(const char *args)
         TRice("WG: time now=%us persisted=%us flash=%u\n",
               now, persisted, (unsigned)flashOk);
     } else {
-        TRice("Usage: wg start|stop|status|endpoint\n");
+        TRice("Usage: wg start|stop|status|endpoint|ip|save|reset\n");
     }
 }
 

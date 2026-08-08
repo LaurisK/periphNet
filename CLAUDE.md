@@ -189,7 +189,9 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 0x0010_2000  ├───────────────────┤ pattern like sBootStatus)
              │ WG Time (4KB)     │ monotonic seconds for the WireGuard TAI64N
 0x0010_3000  ├───────────────────┤ handshake stamp; append-only 16B slot ring
-             │ Free              │ ~7.35MB
+             │ WG Config (4KB)   │ tunnel addr/mask + hub endpoint, one CRC'd
+0x0010_4000  ├───────────────────┤ record; absent = use built-in defaults
+             │ Free              │ ~7.34MB
              └───────────────────┘
 ```
 
@@ -216,7 +218,8 @@ PeriphNet/
     Net/                          # WireGuard peer: wg_link (tunnel netif +
                                   #   hub peer), wg_platform (port hooks: HW
                                   #   RNG-backed DRBG, TAI64N), wg_time
-                                  #   (reboot-surviving monotonic seconds)
+                                  #   (reboot-surviving monotonic seconds),
+                                  #   wg_cfg (per-device net config in flash)
     Modbus/                       # modbus_rtu (RTU master), modbus_walker
                                   #   (config-driven poll task), default
                                   #   Solis JSON config + provisioning
@@ -503,6 +506,10 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
 | `/api/modbus/config` | DELETE | Stage the built-in Solis default + arm swap (hot factory reset) |
+| `/api/wg/status` | GET | JSON: running/session_up, config_source, tunnel addr/mask, endpoint, keepalive, RNG health, time base |
+| `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
+| `/api/wg/config` | DELETE | Drop the persisted config, revert to built-in defaults |
+| `/api/wg/restart` | POST | Stop + start the tunnel (forces a fresh handshake) |
 
 **Server architecture:** dedicated `http` task using the lwIP **netconn API**
 (one connection at a time; 10s recv/send timeouts so dead clients can't stall
@@ -531,10 +538,22 @@ take the short path and only the tunnel subnet routes through WG.
 | `wg_link.c/h` | netif + hub peer bring-up, endpoint override, up/running state |
 | `wg_platform.c/h` | the port's four required hooks + the printf sink |
 | `wg_time.c/h` | reboot-surviving monotonic seconds for the TAI64N stamp |
+| `wg_cfg.c/h` | persisted network config (tunnel addr/mask, hub endpoint) |
 
 Bring-up runs in **defaultTask** (`App_DefaultTaskEntry`), not `MX_LWIP_Init()`
 — `WgTime_Init()` needs `W25Q128_Init()` first. CLI: `wg start|stop|status|
-endpoint <ip> [port]`.
+endpoint <ip> [port]|ip <addr> [mask]|save|reset`.
+
+- **The tunnel address is device config, not network-assigned.** WireGuard has
+  no address-assignment protocol: the hub's `AllowedIPs` is simultaneously the
+  route *and* the rule for which inner source addresses a peer's key may claim,
+  so both ends must be configured to agree. It is deliberately independent of
+  whatever LAN the board lands on (that address comes from DHCP), which is what
+  makes the board portable across foreign LANs. Mismatch fails in a confusing
+  way: **the handshake still succeeds** (it carries no inner addresses), so the
+  peer looks connected while every packet is dropped. `wg_cfg.c` moves the
+  address out of the image into per-device flash — `POST /api/wg/config` is the
+  only remote way to fix it, since the CLI needs physical access.
 
 - **Soft dependency, always.** A dead hub costs one handshake packet every
   5 s (`REKEY_TIMEOUT`) and nothing else; `peer->active` stays set so the port
