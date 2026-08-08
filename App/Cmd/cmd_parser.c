@@ -10,6 +10,7 @@
 #include "App/Cmd/cmd_parser.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
+#include "App/Modbus/jk_bms.h"
 #include "App/Modbus/modbus_rtu.h"
 #include "App/Modbus/modbus_walker.h"
 #include "App/Mqtt/mqtt_bridge.h"
@@ -65,6 +66,7 @@ static void cmd_reboot(const char *args);
 static void cmd_dfu(const char *args);
 static void cmd_bms(const char *args);
 static void cmd_modbus(const char *args);
+static void cmd_jk(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
 
@@ -72,6 +74,7 @@ static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "modbus",      cmd_modbus,      "Modbus RTU (start|stop|read|set|port|monitor|inject|status)" },
+    { "jk",          cmd_jk,          "JK BMS (probe [slave] [baud])" },
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
@@ -295,6 +298,44 @@ static void cmd_modbus(const char *args)
         ModbusWalker_LogStatus();
     } else {
         TRice("Usage: modbus start|stop|read|set|write|port|monitor|inject|status\n");
+    }
+}
+
+/**
+ * JK BMS command.
+ *
+ * Usage:
+ *   jk probe [slave] [baud]   — one-shot DeviceInfo read; proves the board
+ *                               sees a JK BMS on the bus.  Defaults slave 1,
+ *                               115200.  Requires the walker to be stopped
+ *                               (it owns USART2 and runs at its own baud).
+ */
+static void cmd_jk(const char *args)
+{
+    if (strncmp(args, "probe", 5) == 0) {
+        unsigned slave = JK_DEFAULT_SLAVE;
+        unsigned baud  = JK_DEFAULT_BAUD;
+        unsigned a = 0, b = 0;
+        int      n = sscanf(args + 5, " %u %u", &a, &b);
+
+        if (n >= 1) {
+            if (a < 1u || a > 247u) {
+                TRice("Usage: jk probe [slave 1-247] [baud]\n");
+                return;
+            }
+            slave = a;
+        }
+        if (n >= 2) {
+            if (b == 0u) {
+                TRice("Usage: jk probe [slave 1-247] [baud]\n");
+                return;
+            }
+            baud = b;
+        }
+
+        JkBms_LogProbe((uint8_t)slave, baud);
+    } else {
+        TRice("Usage: jk probe [slave] [baud]\n");
     }
 }
 

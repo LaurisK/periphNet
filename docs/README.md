@@ -18,6 +18,9 @@ memory map, HTTP API, task table, coding standards.
 | [pylontech_can_protocol.md](pylontech_can_protocol.md) | current | Pylontech CAN frame layout used by `App/Can/` |
 | [issue_idle_iwdg_crashloop.md](issue_idle_iwdg_crashloop.md) | current | Post-mortem: EthIf stack overflow → IWDG crash loop; includes the halt-during-hang debug recipe |
 | [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md) | direction | Bridge → edge controller (BMS + CAN), WAN access across NAT, RS485 bus budget, open questions |
+| [task_jk_bms_integration.md](task_jk_bms_integration.md) | direction | JK PB-series BMS read/write over RS485: what `~/Projects/JK_BMS` gives us, the six blockers in the current Modbus layer, staged roadmap starting at "board sees the BMS" |
+| [design_common_modbus_driver.md](design_common_modbus_driver.md) | direction | Generalizing the Modbus layer past Solis-only assumptions: bus / profile / map layering, schema v2, write-path redesign, phasing |
+| [task_modbus_driver_refactor.md](task_modbus_driver_refactor.md) | plan | **Kickoff/handoff for the above** — tree state, what is and isn't verified, phase 1 scope + acceptance, decisions to make early, constraints to not trip over |
 | [issue_doc_code_inconsistencies.md](issue_doc_code_inconsistencies.md) | current | Doc/code audit of 2026-08-03 and what was corrected |
 | [mqtt_modbus_bridge_design.md](mqtt_modbus_bridge_design.md) | historical | Original hardcoded single-device bridge design (superseded by the config redesign) |
 | [archive/](archive/) | historical | Early project/milestone plans, the pre-encryption FWU architecture, and the 2026-03 `architecture.dot` state diagram |

@@ -48,6 +48,21 @@ int Modbus_SetPort(eModbusPort port);
 eModbusPort Modbus_GetPort(void);
 
 /**
+ * @brief  Modbus exception code carried by the most recent response that
+ *         returned MODBUS_ERR_EXCEPTION (0 = none seen yet).
+ *
+ *         Standard codes: 1 = Illegal Function, 2 = Illegal Data Address,
+ *         3 = Illegal Data Value, 4 = Slave Device Failure.  Telling these
+ *         apart is the whole diagnosis when bringing up an unfamiliar slave
+ *         ("wrong function code" vs "wrong address" vs "wrong value"), so the
+ *         code is kept here rather than folded into the flat eModbusErr.
+ *
+ *         Valid only immediately after a MODBUS_ERR_EXCEPTION return; it is
+ *         reset at the start of every transaction.
+ */
+uint8_t Modbus_LastException(void);
+
+/**
  * @brief  Enable/disable raw TX/RX frame monitoring — logs
  *         "Modbus TX[N]: .." / "Modbus RX[N]: ..".  Off by default.
  */

@@ -16,9 +16,10 @@
 
 #define MODBUS_RX_BUF_SIZE  260  /* max response: 1+1+1+250+2 = 255 */
 
-static volatile int s_initialised;
-static eModbusPort  s_port = MODBUS_PORT_UART2;
-static volatile int s_monitorEnabled;
+static volatile int     s_initialised;
+static eModbusPort      s_port = MODBUS_PORT_UART2;
+static volatile int     s_monitorEnabled;
+static volatile uint8_t s_lastException;   /* see Modbus_LastException() */
 
 /* --------------------------------------------------------------------------
  * Frame monitoring — chunked hex dump; each record stays small and records
@@ -100,6 +101,8 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
                                   uint8_t *rxBuf, uint16_t rxMaxLen,
                                   uint16_t *rxLen, uint32_t timeoutMs)
 {
+    s_lastException = 0;
+
     if (!s_initialised) {
         return MODBUS_ERR_BUSY;
     }
@@ -202,8 +205,9 @@ static eModbusErr read_registers(uint8_t fc, uint8_t slave, uint16_t startReg,
         return MODBUS_ERR_SHORT;
     }
 
-    /* Check for exception response */
+    /* Check for exception response: [slave][fc|0x80][excCode][crcLo][crcHi] */
     if (rxBuf[1] & 0x80) {
+        s_lastException = rxBuf[2];
         return MODBUS_ERR_EXCEPTION;
     }
 
@@ -303,6 +307,11 @@ eModbusPort Modbus_GetPort(void)
     return s_port;
 }
 
+uint8_t Modbus_LastException(void)
+{
+    return s_lastException;
+}
+
 void Modbus_SetMonitor(int enable)
 {
     s_monitorEnabled = enable ? 1 : 0;
@@ -337,6 +346,7 @@ eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
     }
 
     if (frame[1] & 0x80) {
+        s_lastException = frame[2];
         TRice("Modbus inject: ERR_EXCEPTION\n");
         return MODBUS_ERR_EXCEPTION;
     }
@@ -408,6 +418,7 @@ eModbusErr Modbus_WriteSingleRegister(uint8_t slave, uint16_t reg,
 
     /* Exception check */
     if (rxBuf[1] & 0x80) {
+        s_lastException = rxBuf[2];
         return MODBUS_ERR_EXCEPTION;
     }
 
