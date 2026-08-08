@@ -173,6 +173,35 @@ modbus monitor <on|off>
 ```
 Stream raw TX/RX frames via Trice: `Modbus TX[8]: 01 04 0c 3c ...`
 
+### JK BMS
+
+```
+jk probe [slave] [baud]
+```
+One-shot read of the JK PB-series DeviceInfo block (`0x1400`) — answers
+"does the board see a JK BMS on this bus?".  Defaults to slave 1 at 115200
+(the JK PB factory settings).  Independent of the walker and of the active
+config, but **refused while the walker is running** (it owns USART2 and
+re-inits it at its own baud) — `modbus stop` first.
+
+```
+jk probe
+JK: probing slave 1 at 115200 baud..
+JK: FOUND model=JK_PB2A16S30P hw=11.XW sw=19.21
+JK: runtime=4816293s powerons=37 uart1proto=0 canproto=4 (pylontech)
+```
+
+On failure it prints the error plus a diagnosis hint, including the Modbus
+**exception code** when the slave answered but rejected the request (1 =
+Illegal Function, 2 = Illegal Data Address, 3 = Illegal Data Value) — the
+distinction that matters when bringing up an unfamiliar slave.
+
+Pair it with `modbus monitor on` to see the raw frames.  Note the JK's
+byte-addressed registers: its wire address is `blockBase + byteOffset`, so a
+hand-authored JK config's point `offset` is `byteOffset / 2` relative to the
+block base in `startAddr`.  See
+[task_jk_bms_integration.md](task_jk_bms_integration.md).
+
 ```
 modbus inject <startAddr> <hexbytes>
 ```
