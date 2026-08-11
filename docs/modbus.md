@@ -2105,3 +2105,77 @@ not the system. Their still-binding decisions are stated where they apply
 sections designed a bus/profile layer, a schema v2 record layout, a write-path
 rework and a six-phase roadmap while the API those all sit behind was still
 undecided. What survives of it is §7 — the limits, as facts.
+
+  Blockers — a decision is needed before the step it lands in
+ 
+  1. The v2 compiler cannot resolve plan point names in one streaming pass, and ConfigVerify makes it worse (§3.2 vs §2.10 — steps 6, 7).
+  To emit a sModbusPlanEntry{period, ptOrd} the compiler must map a point name to an ordinal in a capability that was already streamed out. §3.2 says "each point name against the capability
+  it just emitted", but a plan may name any of the 8 capabilities, and plans come after all of them. Three consequences the doc doesn't reconcile:
+  - Reading the names back from the region breaks Modbus_ConfigVerify outright — the counting sink writes nothing to read back (fw_write at modbus_config_compiler.c:350 is the only path).
+  - Derived read blocks (grouping by fc + ascending address, the 125 ceiling, the declared-gap rule) need addr/fc/width for every selected point, i.e. the same random access.
+  - §4's "name unique within the capability" has no implementation today — the compiler never compares point names (only strcmp on keys/enums), so this is a new all-names check with the
+  same requirement.
+
+  Concrete resolution to write down: build an in-RAM point index while emitting capabilities — {nameHash u32, addr u16, fc u8, width u8} × 192 ≈ 1.5 KB, plus plan entries retained as
+  {period, ptOrd} ≈ 0.8 KB — and derive/validate blocks at plan close with an O(n²) min-scan (≤192 entries, upload-time only). That resolves name resolution, uniqueness and block derivation
+  identically in compile and verify mode. But it roughly triples the compiler's ~1.3 KB static footprint, which currently sits in .ccmram with ~6 KB free — so the decision includes moving
+  s_c/the index to main SRAM (~60 KB free). Nothing about it is latency-critical, same argument §2.15 Q3 used for the subscription table.
+
+  2. The address model contradicts itself (§2.6 vs §3.2 vs §2.16 step 11 — step 6).
+  §2.6 says stride is "one field on the capability and one multiply in the engine"; step 11 says "addrStride enters the address computation"; but §3.2's v2 point record stores an absolute 
+  wire address and says "the stride multiply applies when the compiler computes a point's wire address from the capability's own base convention" — and there is no base field on
+  sModbusCapabilityRecord for it to be relative to. Both cannot hold. It matters in three places:
+  - If addr is already absolute-with-stride-baked-in, step 11 has nothing to multiply and addrStride is dead data.
+  - Block derivation must run in the register-index domain, not the address domain: on the JK a 16-register block spans an address delta of 32, so contiguity, the 125 ceiling and the gap
+  rule all mis-compute if they subtract raw addresses.
+  - Decode indexing breaks. Today MbDecode_Scaled(pt, &regs[pt->offset]) (modbus_walker.c:152) uses offset as a buffer index; in v2 the index is (addr − blockBase) / addrStride and nothing
+  says who computes it.
+
+  Pick one: either points author {base, index} (capability carries the base) or addr stays absolute and the stride divide is what the engine does. Then say explicitly which domain
+  derivation works in.
+
+  3. The JK needs a second dialect field, and it has to land at step 6 — not step 12.
+  jk_bms.c:27 records the BMS's real ceilings: quantity < 124 and quantity + wordOffset < 147. §7 lists "read caps" as deliberately undesigned, and step 12 lands the JK config — but §3.2
+  promises the format moves only once. A derived block obeying only the 125-register ceiling is already one register over JK's limit, and a block starting deep in the DeviceInfo block
+  violates the second rule. So the capability record needs the read cap now (its single reserved byte won't hold 147 — that's two uint16_t fields, or the format moves twice). This is the
+  sequencing catch I'd fix first, since it's cheap now and expensive later.
+
+  4. The test port has no transport, and step 9 rebuilds the entire integration suite on it.
+  §2.5 defines the test port by what it replaces, §8 entry 8 notes its transport is "compile-time fixed", and §7 still lists mbPort_uart6 as pins not confirmed in the schematic
+  (modbus_rtu.h:36 agrees). Undecided: which channel (spare USART + host adapter, USB CDC shared with the CLI, UDP), and if it shares a channel — the framing that separates test frames from
+  CLI and Trice traffic, plus who arbitrates. Also unwritten is the port contract as C: §2.5 lists the record in prose, but doesn't assign ownership of the response timeout (port or
+  engine), the shape of the per-transaction parameter block handed down with each frame, or what the rx callback reports for a short/CRC-bad frame vs. silence.
+
+  5. No concurrency model for the API surface (steps 2, 4).
+  Subscribe/Unsubscribe/RequestCatalogue/Request/ConfigApply are called from mqtt, http and cmd tasks while the modbus task dispatches synchronously. Contract 8 in modbus.h:519 admits the
+  race ("the table is fixed and not lock-free; late subscription works but is not hot-plug-safe under load") rather than deciding it. Q4 closing on synchronous dispatch makes this sharper,
+  not softer. Also unstated: catalogue replay "delivered after Modbus_Subscribe" must happen on the modbus task — dispatching inline in the caller's task would violate contract 1 and read
+  flash from mqttTask. The clean answer is single-writer: every mutating call posts to the modbus task and returns; say so once and contract 8 disappears.
+
+  6. Step 6's "behaviour unchanged" is harder than it reads.
+  The old walker keys due-state by transaction ordinal (s_lastPollTick[MB_MAX_TXNS_TOTAL], modbus_walker.c:53) and transactions cease to exist at step 6. Derived blocks need a deterministic
+  ordinal for that array, and the walker would have to derive blocks per 100 ms lap from flash, with a sort buffer §3.7 doesn't budget. Either state the keying rule and the buffer, or move
+  block derivation to step 10 where sequences are built once per device.
+
+  Cheap decisions still open
+
+  - Modbus_Probe has no port (§2.9, confirmed in sModbusProbeReq). A device names its port, but a probe has no device — so on a two-bus board the second bus is unprobeable. Either add a
+  port field (the one justified exception) or state "port 0 only".
+  - Does a request-driven read emit mbEvt_sample? §2.2 says the module emits everything it reads; §2.9a routes outcomes to the requester only. Unresolved, and it decides whether HA state
+  updates immediately on a set (via the rw read-back) and whether an unmonitored point publishes to a topic that has no discovery message.
+  - Line format beyond baud. Everything runs 8N1 (Core/Src/usart.c:74-78), yet the gap derivation assumes an 11-bit character (8E1). Fine as a conservative floor, but say it — and if parity
+  ever needs to be per-device it is a record field, so it's a step-6 question.
+  - Bounds v2 doesn't state: points per capability, entries per plan period (both size the buffers in item 1), and a cap on Modbus_Request's count and timeout_ms (a 192-item batch is ~5 s
+  of wire at 9600, at the head of a FIFO).
+  - Offline throttle vs. requests: does an offline device's request still reach the wire, and is the retry window per device or per timer?
+  - Requester-side memory: §2.13's MQTT set path needs per-pending-request storage for the borrowed arrays once the FIFO allows more than one — worth one line where the bridge is described.
+
+  Doc consistency (mechanical)
+
+  - v1 vocabulary survives in operator-visible places that step 6 necessarily changes: sModbusConfigStatus.transactions (modbus.h:445), the "transactions" status key and "transaction" in
+  the 422 body (http_server.c:815, 822, 886, 897), the §5.1 example, §3.3's "transaction count = max(offset + width)", and the Modbus config: staged … %u txns … line (http_server.c:854,
+  listed as a §5.4 landmark). §2.15 Q2 says the error location must grow but never defines the v2 shape — it needs a section discriminator plus {capIdx|planIdx|devIdx, ptIdx}.
+  - Steps 1–7 acceptance says every Trice string in §6 is unchanged, but step 6 must change the staged-counts line — that exemption should be explicit.
+  - The §2 staleness table (9 rows) misses two: sModbusConfigStatus.transactions, and contract 4's safe/unsafe list, which still names Modbus_SubmitWrite, SubmitRawWrite and ForceRefresh —
+  all deleted.
+  - Numbering: §2.16 has a "10a" between 10 and 11, and §2.15 lists Q1/Q5 ahead of the closed items despite claiming §2.16-step order.
