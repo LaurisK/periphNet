@@ -21,7 +21,7 @@
  * CRC32 over the record stream that follows). The header is written last by
  * the compiler, so a torn upload never yields a valid region.
  *
- * Design: docs/modbus_multi_device_config_design.md §3, §6.
+ * Design: docs/modbus.md §3.2.
  */
 #ifndef MODBUS_RECORDS_H_
 #define MODBUS_RECORDS_H_

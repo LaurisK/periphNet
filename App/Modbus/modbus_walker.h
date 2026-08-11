@@ -4,7 +4,7 @@
  *          flash-resident register config (Shared/Modbus) one full lap per
  *          100 ms tick, reads due transactions, decodes points and publishes
  *          them through the MQTT bridge. Replaces the hardcoded Solis
- *          poller (design docs/modbus_multi_device_config_design.md §8).
+ *          poller (design docs/modbus.md §3.5).
  *
  * No RAM-resident config: records are read from external flash on demand.
  * Fixed RAM state is sized to the §6 bounds (~2 KB) regardless of the

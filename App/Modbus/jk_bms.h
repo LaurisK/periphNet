@@ -5,7 +5,11 @@
  * Scope is deliberately narrow: a one-shot DeviceInfo read that answers
  * "is a JK BMS actually on this bus, at this address, at this baud?".
  * Realtime data is not read here — that belongs in the uploadable register
- * config the walker already drives (docs/task_jk_bms_integration.md §3 step 2).
+ * config the walker already drives (docs/modbus.md §4).
+ *
+ * @note This file is slated for deletion: everything it does is expressible as
+ *       a device type in the config, and the generic Modbus_Probe replaces the
+ *       bring-up read.  docs/modbus.md §1.3, §2.16 step 12.
  *
  * Protocol source: ~/Projects/JK_BMS — `src/core/JkRegisters.h` for the map,
  * `FW/decompiled/protocol-rs485-modbus.md` for the addressing model, which was

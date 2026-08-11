@@ -9,7 +9,7 @@
  * Modbus/MQTT bridge — software-only integration tests
  *
  * The whole CI sequence lives in this file so registration order preserves
- * setup → tests → teardown (see docs/impl_modbus_mqtt_integration_tests.md).
+ * setup → tests → teardown (contract: docs/modbus.md §6).
  *
  * No physical RS485 bus and no MQTT broker are required:
  *   - modbus port disabled          → transactions time out instantly

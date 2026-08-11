@@ -2,8 +2,10 @@
  * Helpers for hand-assembling Modbus config record streams into the NOR
  * flash mock — shared by test_modbus_store.c and test_modbus_compiler.c.
  *
- * The worked-example builder mirrors the JSON in
- * docs/modbus_multi_device_config_design.md §2 exactly.
+ * The worked-example builder mirrors the SHIPPED config schema, including the
+ * publish threshold/heartbeat fields.  docs/modbus.md §4 documents the target
+ * schema, which drops them (§2.4) and adds a per-device baud (§2.6); this
+ * builder and the record layout change together at §2.16 step 6/8.
  */
 #ifndef MODBUS_TEST_STREAM_H
 #define MODBUS_TEST_STREAM_H

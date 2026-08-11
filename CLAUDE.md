@@ -6,6 +6,8 @@
 
 **Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: the uploadable multi-device Modbus register config (`Shared/Modbus/` + walker + generic MQTT/HA discovery).
 
+**Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
+
 **Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
@@ -131,7 +133,7 @@ cmake --build build_integration -j8                               # → periphne
 ```
 Drop `-DBUILD_GUI=OFF` (and install `libsdl2-dev libgl-dev`) to also build the
 Dear ImGui GUI, `build_integration/periphnet_gui`. Modbus/MQTT test contracts
-live in `docs/impl_modbus_mqtt_integration_tests.md`.
+live in `docs/modbus.md` §6.
 
 ## Hardware
 
@@ -473,7 +475,7 @@ Shared code compiled into both bootloader and application.
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
-| modbus | 512 words | osPriorityNormal (24) | Config walker: one lap per 100ms tick, reads due transactions from the flash config, decodes + publishes, drains the write queue, commits config swaps at lap boundaries. Started/stopped at runtime (`modbus start`) |
+| modbus | 512 words | osPriorityNormal (24) | Config walker: one traversal per 100ms tick, reads due transactions from the flash config, decodes + publishes, drains the write queue, commits config swaps at traversal boundaries. Started/stopped at runtime (`modbus start`). **This is the shipped engine; docs/modbus.md §2.5-§2.7 replaces it with ports + per-device timers and no poll loop** |
 | mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`) |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |

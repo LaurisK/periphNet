@@ -2,6 +2,7 @@
 
 Status legend: **current** = describes shipped behaviour, keep updated ·
 **plan** = approved implementation plan, updated when implementation deviates ·
+**design** = decided but not implemented; the contract an implementation must meet ·
 **direction** = observations/proposal, nothing frozen yet ·
 **historical** = superseded, kept for rationale.
 
@@ -10,20 +11,20 @@ memory map, HTTP API, task table, coding standards.
 
 | Doc | Status | Covers |
 |-----|--------|--------|
-| [modbus_mqtt_usage.md](modbus_mqtt_usage.md) | current | Config JSON format, HTTP endpoints, CLI commands, poll/publish/availability behaviour, HA discovery, resource usage |
-| [modbus_multi_device_config_design.md](modbus_multi_device_config_design.md) | current | Design spec for the uploadable multi-device register config (records, compiler, A/B regions) |
-| [impl_modbus_multi_device_config.md](impl_modbus_multi_device_config.md) | plan | Phased implementation of the above + deviations recorded during implementation |
-| [impl_modbus_mqtt_integration_tests.md](impl_modbus_mqtt_integration_tests.md) | plan | Integration harness design and Trice/CLI test contracts (banner at top records the 2026-07-07 inject-contract change) |
-| [task_modbus_mqtt_integration_tests.md](task_modbus_mqtt_integration_tests.md) | current | Task spec the integration-test plan answers |
+| [modbus.md](modbus.md) | current + design | **Everything Modbus, in one document.** §2 is the design being built toward — subscription API, frame-level port contract with a test port, devices/types/parameters, event-driven per-device scheduling — and none of it is implemented yet. §3 is what ships today (records, compiler, store, walker). Plus config JSON, operator reference, test contract and §7 limits |
 | [pylontech_can_protocol.md](pylontech_can_protocol.md) | current | Pylontech CAN frame layout used by `App/Can/` |
 | [issue_idle_iwdg_crashloop.md](issue_idle_iwdg_crashloop.md) | current | Post-mortem: EthIf stack overflow → IWDG crash loop; includes the halt-during-hang debug recipe |
 | [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md) | direction | Bridge → edge controller (BMS + CAN), WAN access across NAT, RS485 bus budget, open questions |
-| [task_jk_bms_integration.md](task_jk_bms_integration.md) | direction | JK PB-series BMS read/write over RS485: what `~/Projects/JK_BMS` gives us, the six blockers in the current Modbus layer, staged roadmap starting at "board sees the BMS" |
-| [design_common_modbus_driver.md](design_common_modbus_driver.md) | direction | Generalizing the Modbus layer past Solis-only assumptions: bus / profile / map layering, schema v2, write-path redesign, phasing |
-| [task_modbus_driver_refactor.md](task_modbus_driver_refactor.md) | plan | **Kickoff/handoff for the above** — tree state, what is and isn't verified, phase 1 scope + acceptance, decisions to make early, constraints to not trip over |
-| [issue_doc_code_inconsistencies.md](issue_doc_code_inconsistencies.md) | current | Doc/code audit of 2026-08-03 and what was corrected |
-| [mqtt_modbus_bridge_design.md](mqtt_modbus_bridge_design.md) | historical | Original hardcoded single-device bridge design (superseded by the config redesign) |
+| [issue_doc_code_inconsistencies.md](issue_doc_code_inconsistencies.md) | current | Doc/code audit of 2026-08-03 and what was corrected (references several docs since merged into `modbus.md`) |
 | [archive/](archive/) | historical | Early project/milestone plans, the pre-encryption FWU architecture, and the 2026-03 `architecture.dot` state diagram |
+
+> **2026-08-08:** ten Modbus documents were consolidated into
+> [modbus.md](modbus.md) and deleted — the two bridge/config design specs, their
+> two implementation plans, the usage reference, the common-driver direction
+> doc, the refactor kickoff, the full-implementation plan, the JK BMS task, and
+> both integration-test docs. Completed implementation plans were purged rather
+> than merged; only their still-binding decisions survive, stated where they
+> belong in `modbus.md` rather than as history.
 
 Diagrams: `upload_500k_sequence.{dot,png,svg}` — HTTP upload path sequence,
 generated from the `.dot` with Graphviz.

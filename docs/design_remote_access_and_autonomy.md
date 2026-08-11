@@ -187,6 +187,14 @@ Options, in the order I would reach for them:
    `modbus_rtu.h` as "not wired up yet — deferred until schematic review".
    This deletes the arbitration problem instead of managing it, and lets
    each bus run at its own baud.
+
+   *Since 2026-08-10 this is what the Modbus module is being built for:*
+   `docs/modbus.md` §2.5 makes ports a serviced set with an engine agnostic to
+   them, so moving a device to a second bus is one config field. §2.6 goes
+   further — baud is a **per-device** parameter, so a JK at 115200 and a Solis
+   at 9600 can share one wire by time-multiplexing, which may defer the split
+   rather than force it. §2.7's missed-sequence counter is the instrument that
+   says when the budget has actually run out, instead of estimating.
 2. **Raise baud.** JK PB-series does well above 9600; Solis is typically
    9600 and therefore the limiter — another argument for splitting.
 3. **Do not ingest a full generated Solis map wholesale.** Generate, then
