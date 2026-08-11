@@ -49,7 +49,7 @@ void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out)
     memset(out, 0, sizeof(*out));
 
     sFwuManifest man;
-    if (W25Q128_Read(base, (uint8_t *)&man, sizeof(man)) != W25Q128_OK) {
+    if (W25Q128_Read(base, (uint8_t *)&man, sizeof(man)) != w25q_ok) {
         return;
     }
 
@@ -74,7 +74,7 @@ void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out)
         if ((off & 0xFFFFU) == 0U) {
             KickIwdg();
         }
-        if (W25Q128_Read(base + off, buf, n) != W25Q128_OK) {
+        if (W25Q128_Read(base + off, buf, n) != w25q_ok) {
             return;
         }
         crc = ImgMgmt_Crc32Update(crc, buf, n);
@@ -82,7 +82,7 @@ void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out)
 
     uint32_t stored;
     if (W25Q128_Read(base + body_len, (uint8_t *)&stored,
-                     sizeof(stored)) != W25Q128_OK) {
+                     sizeof(stored)) != w25q_ok) {
         return;
     }
     if (ImgMgmt_Crc32Final(crc) != stored) {
@@ -112,7 +112,7 @@ static void meta_load(void)
 
     sImageMeta meta;
     if (W25Q128_Read(EXT_FLASH_IMG_META_ADDR, (uint8_t *)&meta,
-                     sizeof(meta)) != W25Q128_OK) {
+                     sizeof(meta)) != w25q_ok) {
         return;
     }
     if (meta.magic != IMG_META_MAGIC ||
@@ -136,7 +136,7 @@ static void meta_store(const char *name)
     meta.crc = ImgMgmt_Crc32((const uint8_t *)&meta,
                              offsetof(sImageMeta, crc));
 
-    if (W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != W25Q128_OK) {
+    if (W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != w25q_ok) {
         return;                     /* name is best-effort, blob is intact */
     }
     (void)W25Q128_WritePage(EXT_FLASH_IMG_META_ADDR,
@@ -157,8 +157,8 @@ void ImgStore_Init(void)
                       &store_state.blob);
     meta_load();
 
-    store_state.status = store_state.blob.valid ? IMG_STORE_READY
-                                                : IMG_STORE_EMPTY;
+    store_state.status = store_state.blob.valid ? imgStore_ready
+                                                : imgStore_empty;
 }
 
 const sImageStoreState *ImgStore_GetState(void)
@@ -198,13 +198,13 @@ static bool flush_upload_page(void)
     /* Lazy sector erase before first write to each 4KB sector */
     if (sector != upload.current_sector) {
         KickIwdg();
-        if (W25Q128_EraseSector(sector) != W25Q128_OK) {
+        if (W25Q128_EraseSector(sector) != w25q_ok) {
             return false;
         }
         upload.current_sector = sector;
     }
 
-    if (W25Q128_WritePage(addr, upload.buffer, upload.buffer_pos) != W25Q128_OK) {
+    if (W25Q128_WritePage(addr, upload.buffer, upload.buffer_pos) != w25q_ok) {
         return false;
     }
 
@@ -239,7 +239,7 @@ bool ImgStore_UploadBegin(uint32_t content_length, const char *name,
 
     /* Incoming upload invalidates whatever was stored */
     store_state.blob.valid         = false;
-    store_state.status             = IMG_STORE_UPLOADING;
+    store_state.status             = imgStore_uploading;
     store_state.bytes_transferred  = 0;
     store_state.total_bytes        = content_length;
     memset(store_state.name, 0, sizeof(store_state.name));
@@ -287,7 +287,7 @@ bool ImgStore_UploadFinish(void)
     upload.active = false;
 
     if (!flushed) {
-        store_state.status = IMG_STORE_ERROR;
+        store_state.status = imgStore_error;
         strcpy(store_state.error_message, "Final flash write failed");
         return false;
     }
@@ -299,11 +299,11 @@ bool ImgStore_UploadFinish(void)
     if (store_state.blob.valid) {
         meta_store(upload.name);
         strcpy(store_state.name, upload.name);
-        store_state.status = IMG_STORE_READY;
+        store_state.status = imgStore_ready;
         return true;
     }
 
-    store_state.status = IMG_STORE_ERROR;
+    store_state.status = imgStore_error;
     strcpy(store_state.error_message, "Invalid blob (manifest/CRC)");
     return false;
 }
@@ -312,7 +312,7 @@ void ImgStore_UploadAbort(const char *reason)
 {
     if (upload.active) {
         upload.active = false;
-        store_state.status = IMG_STORE_ERROR;
+        store_state.status = imgStore_error;
         snprintf(store_state.error_message, sizeof(store_state.error_message),
                  "%s", reason ? reason : "Upload aborted");
     }
@@ -324,7 +324,7 @@ void ImgStore_UploadAbort(const char *reason)
 
 void ImgStore_DownloadBegin(void)
 {
-    store_state.status            = IMG_STORE_DOWNLOADING;
+    store_state.status            = imgStore_downloading;
     store_state.bytes_transferred = 0;
     store_state.total_bytes       = store_state.blob.blob_size;
 }
@@ -332,9 +332,9 @@ void ImgStore_DownloadBegin(void)
 void ImgStore_DownloadEnd(bool ok, const char *err)
 {
     if (ok) {
-        store_state.status = IMG_STORE_READY;
+        store_state.status = imgStore_ready;
     } else {
-        store_state.status = IMG_STORE_ERROR;
+        store_state.status = imgStore_error;
         snprintf(store_state.error_message, sizeof(store_state.error_message),
                  "%s", err ? err : "Download failed");
     }
@@ -342,10 +342,10 @@ void ImgStore_DownloadEnd(bool ok, const char *err)
 
 bool ImgStore_Read(uint32_t offset, uint8_t *buf, uint32_t len)
 {
-    if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + offset, buf, len) != W25Q128_OK) {
+    if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + offset, buf, len) != w25q_ok) {
         return false;
     }
-    if (store_state.status == IMG_STORE_DOWNLOADING) {
+    if (store_state.status == imgStore_downloading) {
         store_state.bytes_transferred = offset + len;
     }
     return true;
@@ -353,25 +353,25 @@ bool ImgStore_Read(uint32_t offset, uint8_t *buf, uint32_t len)
 
 eImgStoreRes ImgStore_Delete(void)
 {
-    if (store_state.status == IMG_STORE_UPLOADING ||
-        store_state.status == IMG_STORE_DOWNLOADING || read_held) {
-        return IMG_STORE_BUSY;
+    if (store_state.status == imgStore_uploading ||
+        store_state.status == imgStore_downloading || read_held) {
+        return imgRes_busy;
     }
 
     /* Erase first sector of the blob area — kills the manifest */
-    if (W25Q128_EraseSector(EXT_FLASH_FWU_IMG_ADDR) != W25Q128_OK ||
-        W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != W25Q128_OK) {
-        return IMG_STORE_FLASH_ERR;
+    if (W25Q128_EraseSector(EXT_FLASH_FWU_IMG_ADDR) != w25q_ok ||
+        W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != w25q_ok) {
+        return imgRes_flashErr;
     }
 
     memset(&store_state.blob, 0, sizeof(store_state.blob));
     memset(store_state.name, 0, sizeof(store_state.name));
-    store_state.status            = IMG_STORE_EMPTY;
+    store_state.status            = imgStore_empty;
     store_state.bytes_transferred = 0;
     store_state.total_bytes       = 0;
     memset(store_state.error_message, 0, sizeof(store_state.error_message));
 
-    return IMG_STORE_OK;
+    return imgRes_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -380,7 +380,7 @@ eImgStoreRes ImgStore_Delete(void)
 
 bool ImgStore_AcquireRead(void)
 {
-    if (!store_state.blob.valid || store_state.status != IMG_STORE_READY) {
+    if (!store_state.blob.valid || store_state.status != imgStore_ready) {
         return false;
     }
     read_held = true;

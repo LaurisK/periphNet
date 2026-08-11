@@ -25,14 +25,15 @@
  * @brief Crash / fault type identifiers
  */
 typedef enum {
-    CRASH_HARDFAULT,
-    CRASH_NMI,
-    CRASH_BUS_FAULT,
-    CRASH_USAGE_FAULT,
-    CRASH_MEM_MANAGE,
-    CRASH_SW_WATCHDOG,
-    CRASH_STACK_OVERFLOW,
-    CRASH_ASSERT
+    crashType_hardFault,
+    crashType_nmi,
+    crashType_busFault,
+    crashType_usageFault,
+    crashType_memManage,
+    crashType_swWatchdog,
+    crashType_stackOverflow,
+    crashType_assert,
+    crashType_last          /* sentinel */
 } eCrashType;
 
 /**

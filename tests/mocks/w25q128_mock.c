@@ -15,32 +15,32 @@ void mock_flash_reset(void)
     memset(mock_flash, 0xFF, sizeof(mock_flash));
 }
 
-W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
+eW25qStatus W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
 {
     if (addr + len > MOCK_FLASH_SIZE) {
-        return W25Q128_ERROR;
+        return w25q_error;
     }
     memcpy(buffer, &mock_flash[addr], len);
-    return W25Q128_OK;
+    return w25q_ok;
 }
 
-W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
+eW25qStatus W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
 {
     if (addr + len > MOCK_FLASH_SIZE) {
-        return W25Q128_ERROR;
+        return w25q_error;
     }
     for (uint32_t i = 0; i < len; i++) {
         mock_flash[addr + i] &= buffer[i];
     }
-    return W25Q128_OK;
+    return w25q_ok;
 }
 
-W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
+eW25qStatus W25Q128_EraseSector(uint32_t addr)
 {
     uint32_t base = addr & ~((uint32_t)W25Q128_SECTOR_SIZE - 1u);
     if (base + W25Q128_SECTOR_SIZE > MOCK_FLASH_SIZE) {
-        return W25Q128_ERROR;
+        return w25q_error;
     }
     memset(&mock_flash[base], 0xFF, W25Q128_SECTOR_SIZE);
-    return W25Q128_OK;
+    return w25q_ok;
 }

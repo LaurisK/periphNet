@@ -45,18 +45,18 @@ eFwuCtlRes FwuCtl_RequestInstall(void)
 {
     const sImageStoreState *st = ImgStore_GetState();
 
-    if (!st->blob.valid || st->status != IMG_STORE_READY) {
-        return FWU_CTL_NO_IMAGE;
+    if (!st->blob.valid || st->status != imgStore_ready) {
+        return fwuCtlRes_noImage;
     }
     if (promote_pending || promoting) {
-        return FWU_CTL_BUSY;
+        return fwuCtlRes_busy;
     }
     if (BootStatus_RequestFwu() != 0) {
-        return FWU_CTL_FLASH_ERR;
+        return fwuCtlRes_flashErr;
     }
 
     reboot_pending = true;
-    return FWU_CTL_OK;
+    return fwuCtlRes_ok;
 }
 
 eFwuCtlRes FwuCtl_Confirm(bool *promote)
@@ -64,10 +64,10 @@ eFwuCtlRes FwuCtl_Confirm(bool *promote)
     *promote = false;
 
     if (!BootStatus_IsUnconfirmed()) {
-        return FWU_CTL_ALREADY;
+        return fwuCtlRes_already;
     }
     if (BootStatus_ConfirmApp() != 0) {
-        return FWU_CTL_FLASH_ERR;
+        return fwuCtlRes_flashErr;
     }
 
     /* Promote stored → golden only if the stored blob is what is actually
@@ -86,7 +86,7 @@ eFwuCtlRes FwuCtl_Confirm(bool *promote)
         promote_pending = true;
     }
 
-    return FWU_CTL_OK;
+    return fwuCtlRes_ok;
 }
 
 eFwuRes FwuCtl_VerifyRunning(void)
@@ -95,14 +95,14 @@ eFwuRes FwuCtl_VerifyRunning(void)
     const sBootloaderApi *bl = (const sBootloaderApi *)BL_API_TABLE_ADDR;
 
     if (app->magic != APP_INFO_MAGIC) {
-        return FWU_ERR_WRONG_MAGIC;
+        return fwuRes_errWrongMagic;
     }
     if (app->image_size == 0xFFFFFFFFu) {
-        return FWU_ERR_IMAGE_SIZE;      /* unsigned dev image */
+        return fwuRes_errImageSize;      /* unsigned dev image */
     }
     if (bl->magic != BL_API_MAGIC || bl->version < 3 ||
         bl->verify_image_hmac == NULL) {
-        return FWU_ERR_NO_IMAGE;        /* BL API unavailable */
+        return fwuRes_errNoImage;        /* BL API unavailable */
     }
 
     return bl->verify_image_hmac(APPLICATION_START_ADDR, false,
@@ -149,7 +149,7 @@ void FwuCtl_RunPromotion(void)
         uint32_t n = total - off;
         if (n > PROMOTE_CHUNK_SIZE) n = PROMOTE_CHUNK_SIZE;
 
-        if (W25Q128_EraseSector(EXT_FLASH_GOLDEN_IMG_ADDR + off) != W25Q128_OK) {
+        if (W25Q128_EraseSector(EXT_FLASH_GOLDEN_IMG_ADDR + off) != w25q_ok) {
             ok = false;
             break;
         }
@@ -159,7 +159,7 @@ void FwuCtl_RunPromotion(void)
             if (plen > sizeof(buf)) plen = sizeof(buf);
             if (!ImgStore_Read(off + page, buf, plen) ||
                 W25Q128_WritePage(EXT_FLASH_GOLDEN_IMG_ADDR + off + page,
-                                  buf, plen) != W25Q128_OK) {
+                                  buf, plen) != w25q_ok) {
                 ok = false;
                 break;
             }

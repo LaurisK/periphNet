@@ -19,11 +19,12 @@ extern "C" {
  */
 
 typedef enum {
-    FWU_CTL_OK = 0,
-    FWU_CTL_NO_IMAGE,       /* no valid stored image                */
-    FWU_CTL_BUSY,           /* transfer / promotion in progress     */
-    FWU_CTL_FLASH_ERR,      /* boot status / ext flash write error  */
-    FWU_CTL_ALREADY,        /* confirm: nothing pending             */
+    fwuCtlRes_ok = 0,
+    fwuCtlRes_noImage,       /* no valid stored image                */
+    fwuCtlRes_busy,           /* transfer / promotion in progress     */
+    fwuCtlRes_flashErr,      /* boot status / ext flash write error  */
+    fwuCtlRes_already,
+    fwuCtlRes_last          /* sentinel */        /* confirm: nothing pending             */
 } eFwuCtlRes;
 
 /** Scan the golden area.  Call once at startup, after ImgStore_Init(). */
@@ -41,7 +42,7 @@ eFwuCtlRes FwuCtl_RequestInstall(void);
 eFwuCtlRes FwuCtl_Confirm(bool *promote);
 
 /** Authenticate the RUNNING internal image via the BL API (HMAC-SHA256).
- *  @return FWU_OK if authentic; FWU_ERR_* otherwise (incl. unsigned/no
+ *  @return fwuRes_ok if authentic; FWU_ERR_* otherwise (incl. unsigned/no
  *  header/BL API unavailable mapped to eFwuRes codes). */
 eFwuRes FwuCtl_VerifyRunning(void);
 

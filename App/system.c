@@ -129,7 +129,7 @@ void System_SetWatchdogTestMode(void)
 void TIM14_PeriodElapsed_Callback(void)
 {
     /* Software watchdog fired – 12 s without a KickIwdg call */
-    Crash_GenerateReport(CRASH_SW_WATCHDOG);
+    Crash_GenerateReport(crashType_swWatchdog);
     /* IWDG will reset the MCU in ~4 more seconds */
     while (1) {}
 }
@@ -156,7 +156,7 @@ void App_AssertFailed(void)
     __disable_irq();
     if (s_inAssert == 0U) {
         s_inAssert = 1U;
-        Crash_GenerateReport(CRASH_ASSERT);
+        Crash_GenerateReport(crashType_assert);
     }
     NVIC_SystemReset();
 }
@@ -173,6 +173,6 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     (void)pcTaskName;
 
     __disable_irq();
-    Crash_GenerateReport(CRASH_STACK_OVERFLOW);
+    Crash_GenerateReport(crashType_stackOverflow);
     NVIC_SystemReset();
 }

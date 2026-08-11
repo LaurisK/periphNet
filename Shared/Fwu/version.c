@@ -28,28 +28,28 @@ int ver_compare(const sFwVer *a, const sFwVer *b)
 eFwuRes ver_checkCompatibility(const sFwVer *current, const sFwVer *incoming)
 {
     if (!current || !incoming) {
-        return FWU_ERR_NO_IMAGE;
+        return fwuRes_errNoImage;
     }
 
     /* Device type must match */
     if (current->deviceType != incoming->deviceType) {
-        return FWU_ERR_VER_DEVICE_TYPE;
+        return fwuRes_errVerDeviceType;
     }
 
     /* Hardware ID must match */
     if (current->hwId != incoming->hwId) {
-        return FWU_ERR_VER_HW_ID;
+        return fwuRes_errVerHwId;
     }
 
     /* Local builds skip version ordering — allow any update */
     if (current->target == (uint8_t)fwTarget_local) {
-        return FWU_OK;
+        return fwuRes_ok;
     }
 
     /* Incoming must be strictly newer */
     if (ver_compare(incoming, current) <= 0) {
-        return FWU_ERR_VER_NOT_NEWER;
+        return fwuRes_errVerNotNewer;
     }
 
-    return FWU_OK;
+    return fwuRes_ok;
 }

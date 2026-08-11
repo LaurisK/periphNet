@@ -17,9 +17,10 @@
 #define SCALE_POW_MAX   6      /* |scalePow10| ceiling               */
 
 typedef enum {
-    TOK_LBRACE, TOK_RBRACE, TOK_LBRACKET, TOK_RBRACKET,
-    TOK_COLON, TOK_COMMA, TOK_STRING, TOK_NUMBER,
-    TOK_TRUE, TOK_FALSE, TOK_EOF, TOK_ERR,
+    tok_lBrace, tok_rBrace, tok_lBracket, tok_rBracket,
+    tok_colon, tok_comma, tok_string, tok_number,
+    tok_true, tok_false, tok_eof, tok_err,
+    tok_last                       /* sentinel */
 } eTok;
 
 typedef struct {
@@ -135,18 +136,18 @@ static eTok next_token(char *text, uint32_t textSize)
     if (ch < 0) {
         if (s_c.ioErr) {
             fail("json", "read error");
-            return TOK_ERR;
+            return tok_err;
         }
-        return TOK_EOF;
+        return tok_eof;
     }
 
     switch (ch) {
-    case '{': return TOK_LBRACE;
-    case '}': return TOK_RBRACE;
-    case '[': return TOK_LBRACKET;
-    case ']': return TOK_RBRACKET;
-    case ':': return TOK_COLON;
-    case ',': return TOK_COMMA;
+    case '{': return tok_lBrace;
+    case '}': return tok_rBrace;
+    case '[': return tok_lBracket;
+    case ']': return tok_rBracket;
+    case ':': return tok_colon;
+    case ',': return tok_comma;
     default: break;
     }
 
@@ -156,23 +157,23 @@ static eTok next_token(char *text, uint32_t textSize)
             ch = lex_get();
             if (ch < 0) {
                 fail("json", "unterminated string");
-                return TOK_ERR;
+                return tok_err;
             }
             if (ch == '"') {
                 break;
             }
             if (ch == '\\') {
                 fail("json", "string escapes not supported");
-                return TOK_ERR;
+                return tok_err;
             }
             if (n + 1 >= textSize) {
                 fail("json", "string too long");
-                return TOK_ERR;
+                return tok_err;
             }
             text[n++] = (char)ch;
         }
         text[n] = '\0';
-        return TOK_STRING;
+        return tok_string;
     }
 
     if (ch == '-' || (ch >= '0' && ch <= '9')) {
@@ -183,18 +184,18 @@ static eTok next_token(char *text, uint32_t textSize)
             if (ch == '.' || (ch >= '0' && ch <= '9')) {
                 if (n + 1 >= textSize) {
                     fail("json", "number too long");
-                    return TOK_ERR;
+                    return tok_err;
                 }
                 text[n++] = (char)lex_get();
             } else if (ch == 'e' || ch == 'E') {
                 fail("json", "exponent notation not supported");
-                return TOK_ERR;
+                return tok_err;
             } else {
                 break;
             }
         }
         text[n] = '\0';
-        return TOK_NUMBER;
+        return tok_number;
     }
 
     if (ch == 't' || ch == 'f') {
@@ -202,21 +203,21 @@ static eTok next_token(char *text, uint32_t textSize)
         while (*rest) {
             if (lex_get() != *rest++) {
                 fail("json", "bad literal");
-                return TOK_ERR;
+                return tok_err;
             }
         }
-        return (ch == 't') ? TOK_TRUE : TOK_FALSE;
+        return (ch == 't') ? tok_true : tok_false;
     }
 
     fail("json", "unexpected character");
-    return TOK_ERR;
+    return tok_err;
 }
 
 static int expect(eTok want, const char *what)
 {
     char text[TOK_MAX];
     eTok t = next_token(text, sizeof(text));
-    if (t == TOK_ERR) {
+    if (t == tok_err) {
         return -1;
     }
     if (t != want) {
@@ -317,7 +318,7 @@ static int fw_erase_up_to(uint32_t regionOff)
         if (s_c.kick) {
             s_c.kick();
         }
-        if (W25Q128_EraseSector(s_c.base + s_c.nextEraseOff) != W25Q128_OK) {
+        if (W25Q128_EraseSector(s_c.base + s_c.nextEraseOff) != w25q_ok) {
             s_c.flashErr = 1;
             return fail("flash", "sector erase failed");
         }
@@ -338,7 +339,7 @@ static int fw_flush_page(void)
         return -1;
     }
     if (W25Q128_WritePage(s_c.base + regionOff, s_c.page,
-                          s_c.pageLen) != W25Q128_OK) {
+                          s_c.pageLen) != w25q_ok) {
         s_c.flashErr = 1;
         return fail("flash", "page write failed");
     }
@@ -387,7 +388,7 @@ static int fw_finish(void)
     hdr.crc32     = ImgMgmt_Crc32Final(s_c.crc);
 
     if (W25Q128_WritePage(s_c.base, (const uint8_t *)&hdr,
-                          sizeof(hdr)) != W25Q128_OK) {
+                          sizeof(hdr)) != w25q_ok) {
         s_c.flashErr = 1;
         return fail("flash", "header write failed");
     }
@@ -412,16 +413,16 @@ static int name_chars_ok(const char *s)
 static int decode_type_from_string(const char *s, uint8_t *out)
 {
     static const struct { const char *str; uint8_t type; } map[] = {
-        { "u16",        MB_DECODE_U16 },
-        { "s16",        MB_DECODE_S16 },
-        { "u32_be",     MB_DECODE_U32_BE },
-        { "u32_le",     MB_DECODE_U32_LE },
-        { "s32_be",     MB_DECODE_S32_BE },
-        { "s32_le",     MB_DECODE_S32_LE },
-        { "float32_be", MB_DECODE_FLOAT32_BE },
-        { "float32_le", MB_DECODE_FLOAT32_LE },
-        { "bitfield",   MB_DECODE_BITFIELD },
-        { "ascii",      MB_DECODE_ASCII },
+        { "u16",        mbDecode_u16 },
+        { "s16",        mbDecode_s16 },
+        { "u32_be",     mbDecode_u32Be },
+        { "u32_le",     mbDecode_u32Le },
+        { "s32_be",     mbDecode_s32Be },
+        { "s32_le",     mbDecode_s32Le },
+        { "float32_be", mbDecode_float32Be },
+        { "float32_le", mbDecode_float32Le },
+        { "bitfield",   mbDecode_bitfield },
+        { "ascii",      mbDecode_ascii },
     };
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcmp(map[i].str, s) == 0) {
@@ -446,25 +447,25 @@ static int parse_publish_object(sPointCtx *pc)
 {
     char key[TOK_MAX], val[TOK_MAX];
 
-    if (expect(TOK_LBRACE, "expected '{' for publish") != 0) {
+    if (expect(tok_lBrace, "expected '{' for publish") != 0) {
         return -1;
     }
 
     for (;;) {
         eTok t = next_token(key, sizeof(key));
-        if (t == TOK_RBRACE) {
+        if (t == tok_rBrace) {
             return 0;
         }
-        if (t == TOK_COMMA) {
+        if (t == tok_comma) {
             continue;
         }
-        if (t != TOK_STRING) {
+        if (t != tok_string) {
             return fail("publish", "expected key string");
         }
-        if (expect(TOK_COLON, "expected ':'") != 0) {
+        if (expect(tok_colon, "expected ':'") != 0) {
             return -1;
         }
-        if (next_token(val, sizeof(val)) != TOK_NUMBER) {
+        if (next_token(val, sizeof(val)) != tok_number) {
             return fail("publish", "expected number");
         }
 
@@ -497,40 +498,40 @@ static int parse_point(sModbusPointRecord *out)
 
     for (;;) {
         eTok t = next_token(key, sizeof(key));
-        if (t == TOK_RBRACE) {
+        if (t == tok_rBrace) {
             break;
         }
-        if (t == TOK_COMMA) {
+        if (t == tok_comma) {
             continue;
         }
-        if (t != TOK_STRING) {
+        if (t != tok_string) {
             return fail("json", "expected key string in point");
         }
-        if (expect(TOK_COLON, "expected ':'") != 0) {
+        if (expect(tok_colon, "expected ':'") != 0) {
             return -1;
         }
 
         if (strcmp(key, "offset") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, 0, MB_MAX_REGS_PER_TXN - 1, &v) != 0) {
                 return fail("offset", "must be 0..124");
             }
             pc.rec.offset = (uint16_t)v;
             pc.hasOffset = 1;
         } else if (strcmp(key, "decodeType") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_STRING ||
+            if (next_token(val, sizeof(val)) != tok_string ||
                 decode_type_from_string(val, &pc.rec.decodeType) != 0) {
                 return fail("decodeType", "unknown decode type");
             }
             pc.hasDecode = 1;
         } else if (strcmp(key, "scale") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_scale_pow10(val, &pc.rec.scalePow10) != 0) {
                 return fail("scale", "must be an exact power of ten");
             }
             pc.hasScale = 1;
         } else if (strcmp(key, "unit") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_STRING) {
+            if (next_token(val, sizeof(val)) != tok_string) {
                 return fail("unit", "expected string");
             }
             const sMbUnitInfo *u = MbUnits_FromString(val);
@@ -540,7 +541,7 @@ static int parse_point(sModbusPointRecord *out)
             pc.rec.unit = u->code;
             pc.hasUnit = 1;
         } else if (strcmp(key, "name") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_STRING ||
+            if (next_token(val, sizeof(val)) != tok_string ||
                 val[0] == '\0' || strlen(val) >= MB_POINT_NAME_LEN ||
                 !name_chars_ok(val)) {
                 return fail("name", "1..23 chars of [A-Za-z0-9_-]");
@@ -548,7 +549,7 @@ static int parse_point(sModbusPointRecord *out)
             strncpy(pc.rec.name, val, MB_POINT_NAME_LEN - 1);
             pc.hasName = 1;
         } else if (strcmp(key, "length") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, 1, MB_MAX_POINTS_PER_TXN, &v) != 0) {
                 return fail("length", "must be 1..24 registers");
             }
@@ -556,19 +557,19 @@ static int parse_point(sModbusPointRecord *out)
             pc.hasLength = 1;
         } else if (strcmp(key, "writable") == 0) {
             eTok bt = next_token(val, sizeof(val));
-            if (bt != TOK_TRUE && bt != TOK_FALSE) {
+            if (bt != tok_true && bt != tok_false) {
                 return fail("writable", "expected true/false");
             }
-            pc.writable = (bt == TOK_TRUE);
+            pc.writable = (bt == tok_true);
         } else if (strcmp(key, "writeMin") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, INT16_MIN, INT16_MAX, &v) != 0) {
                 return fail("writeMin", "must fit int16 (scaled-int domain)");
             }
             pc.rec.writeMin = (int16_t)v;
             pc.hasWriteMin = 1;
         } else if (strcmp(key, "writeMax") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, INT16_MIN, INT16_MAX, &v) != 0) {
                 return fail("writeMax", "must fit int16 (scaled-int domain)");
             }
@@ -588,7 +589,7 @@ static int parse_point(sModbusPointRecord *out)
         !pc.hasUnit || !pc.hasName) {
         return fail("point", "offset/decodeType/scale/unit/name required");
     }
-    if (pc.rec.decodeType == MB_DECODE_ASCII) {
+    if (pc.rec.decodeType == mbDecode_ascii) {
         if (!pc.hasLength) {
             return fail("length", "required for ascii points");
         }
@@ -639,58 +640,58 @@ static int parse_transaction(void)
 
     for (;;) {
         eTok t = next_token(key, sizeof(key));
-        if (t == TOK_RBRACE) {
+        if (t == tok_rBrace) {
             break;
         }
-        if (t == TOK_COMMA) {
+        if (t == tok_comma) {
             continue;
         }
-        if (t != TOK_STRING) {
+        if (t != tok_string) {
             return fail("json", "expected key string in transaction");
         }
-        if (expect(TOK_COLON, "expected ':'") != 0) {
+        if (expect(tok_colon, "expected ':'") != 0) {
             return -1;
         }
 
         if (strcmp(key, "startAddr") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, 0, UINT16_MAX, &v) != 0) {
                 return fail("startAddr", "must be 0..65535");
             }
             txn.startAddr = (uint16_t)v;
             hasStart = 1;
         } else if (strcmp(key, "functionCode") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_STRING) {
+            if (next_token(val, sizeof(val)) != tok_string) {
                 return fail("functionCode", "expected string");
             }
             if (strcmp(val, "holding") == 0) {
-                txn.functionCode = MB_FC_HOLDING;
+                txn.functionCode = mbFc_holding;
             } else if (strcmp(val, "input") == 0) {
-                txn.functionCode = MB_FC_INPUT;
+                txn.functionCode = mbFc_input;
             } else {
                 return fail("functionCode", "must be \"holding\" or \"input\"");
             }
             hasFc = 1;
         } else if (strcmp(key, "readPeriodS") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, 1, UINT16_MAX, &v) != 0) {
                 return fail("readPeriodS", "must be 1..65535");
             }
             txn.readPeriodS = (uint16_t)v;
             hasPeriod = 1;
         } else if (strcmp(key, "points") == 0) {
-            if (expect(TOK_LBRACKET, "expected '[' for points") != 0) {
+            if (expect(tok_lBracket, "expected '[' for points") != 0) {
                 return -1;
             }
             for (;;) {
                 eTok pt = next_token(val, sizeof(val));
-                if (pt == TOK_RBRACKET) {
+                if (pt == tok_rBracket) {
                     break;
                 }
-                if (pt == TOK_COMMA) {
+                if (pt == tok_comma) {
                     continue;
                 }
-                if (pt != TOK_LBRACE) {
+                if (pt != tok_lBrace) {
                     return fail("points", "expected point object");
                 }
                 s_c.ptIdx = nPoints;
@@ -764,28 +765,28 @@ static int parse_device(void)
 
     for (;;) {
         eTok t = next_token(key, sizeof(key));
-        if (t == TOK_RBRACE) {
+        if (t == tok_rBrace) {
             break;
         }
-        if (t == TOK_COMMA) {
+        if (t == tok_comma) {
             continue;
         }
-        if (t != TOK_STRING) {
+        if (t != tok_string) {
             return fail("json", "expected key string in device");
         }
-        if (expect(TOK_COLON, "expected ':'") != 0) {
+        if (expect(tok_colon, "expected ':'") != 0) {
             return -1;
         }
 
         if (strcmp(key, "slaveAddr") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_NUMBER ||
+            if (next_token(val, sizeof(val)) != tok_number ||
                 parse_bounded(val, 1, 247, &v) != 0) {
                 return fail("slaveAddr", "must be 1..247");
             }
             dev.slaveAddr = (uint8_t)v;
             hasAddr = 1;
         } else if (strcmp(key, "topicPrefix") == 0) {
-            if (next_token(val, sizeof(val)) != TOK_STRING ||
+            if (next_token(val, sizeof(val)) != tok_string ||
                 val[0] == '\0' || strlen(val) >= MB_TOPIC_PREFIX_LEN ||
                 !name_chars_ok(val)) {
                 return fail("topicPrefix", "1..15 chars of [A-Za-z0-9_-]");
@@ -804,18 +805,18 @@ static int parse_device(void)
                 }
                 devWritten = 1;
             }
-            if (expect(TOK_LBRACKET, "expected '[' for transactions") != 0) {
+            if (expect(tok_lBracket, "expected '[' for transactions") != 0) {
                 return -1;
             }
             for (;;) {
                 eTok tt = next_token(val, sizeof(val));
-                if (tt == TOK_RBRACKET) {
+                if (tt == tok_rBracket) {
                     break;
                 }
-                if (tt == TOK_COMMA) {
+                if (tt == tok_comma) {
                     continue;
                 }
-                if (tt != TOK_LBRACE) {
+                if (tt != tok_lBrace) {
                     return fail("transactions", "expected transaction object");
                 }
                 s_c.txnIdx = nTxns;
@@ -861,27 +862,27 @@ static int parse_config(void)
     char key[TOK_MAX], val[TOK_MAX];
     int  nDevices = 0;
 
-    if (expect(TOK_LBRACE, "expected '{'") != 0) {
+    if (expect(tok_lBrace, "expected '{'") != 0) {
         return -1;
     }
-    if (next_token(key, sizeof(key)) != TOK_STRING ||
+    if (next_token(key, sizeof(key)) != tok_string ||
         strcmp(key, "devices") != 0) {
         return fail("json", "expected \"devices\" key");
     }
-    if (expect(TOK_COLON, "expected ':'") != 0 ||
-        expect(TOK_LBRACKET, "expected '[' for devices") != 0) {
+    if (expect(tok_colon, "expected ':'") != 0 ||
+        expect(tok_lBracket, "expected '[' for devices") != 0) {
         return -1;
     }
 
     for (;;) {
         eTok t = next_token(val, sizeof(val));
-        if (t == TOK_RBRACKET) {
+        if (t == tok_rBracket) {
             break;
         }
-        if (t == TOK_COMMA) {
+        if (t == tok_comma) {
             continue;
         }
-        if (t != TOK_LBRACE) {
+        if (t != tok_lBrace) {
             return fail("devices", "expected device object");
         }
         s_c.devIdx = nDevices;
@@ -901,7 +902,7 @@ static int parse_config(void)
         return fail("devices", "config has no devices");
     }
 
-    if (expect(TOK_RBRACE, "expected '}'") != 0) {
+    if (expect(tok_rBrace, "expected '}'") != 0) {
         return -1;
     }
     lex_skip_ws();
@@ -955,7 +956,7 @@ int MbCfgCompile(fMbByteSource src, void *srcCtx, uint32_t regionBase,
     if (kick) {
         kick();
     }
-    if (W25Q128_EraseSector(regionBase) != W25Q128_OK) {
+    if (W25Q128_EraseSector(regionBase) != w25q_ok) {
         fail("flash", "sector erase failed");
         return -1;
     }

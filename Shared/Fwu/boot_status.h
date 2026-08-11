@@ -58,7 +58,7 @@ bool BootStatus_IsUnconfirmed(void);
 
 /**
  * Determine the FWU action for the bootloader based on flag state.
- * @return fwu_install, fwu_rollback, or fwu_none.
+ * @return fwuAction_install, fwuAction_rollback, or fwuAction_none.
  */
 eFwuAction BootStatus_GetFwuAction(void);
 

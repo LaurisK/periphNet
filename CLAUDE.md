@@ -361,7 +361,7 @@ typedef union {
 ```
 
 `sBootStatus` v3 is minimal: magic (`"BOOT"`), version, `last_fwu_result`
-(eFwuRes of the last install/rollback, `FWU_NO_RESULT` if none — exposed via
+(eFwuRes of the last install/rollback, `fwuRes_noResult` if none — exposed via
 `/api/fwu/status` so BL-side failures are diagnosable), header CRC32
 (verified on read), and flags. Flags are **outside the CRC** so they can be
 bit-cleared independently. Staged/golden metadata lives in the blob
@@ -374,18 +374,18 @@ manifests, not here.
 2. Init external flash (W25Q64)
 3. Ensure boot status sector has valid header
 4. Read FWU action from flags:
-   ├─ fwu_install:  streaming blob install from staged area
+   ├─ fwuAction_install:  streaming blob install from staged area
    │     pass 0: manifest sanity + whole-blob CRC32
    │     pass 1: stream GCM decrypt (discarded) → verify tag + plaintext
    │             HMAC + capture decrypted sAppInfo; version gate (skipped
    │             if internal app header invalid — blank device accepts
    │             any authentic image)
    │     pass 2: erase sectors 2-7 → decrypt again → program → verify
-   │     success → FinishFwu(FWU_OK, unconfirmed) + consume 1st attempt
+   │     success → FinishFwu(fwuRes_ok, unconfirmed) + consume 1st attempt
    │     failure → FinishFwu(result, pre-confirmed) → boot old app
-   ├─ fwu_rollback: same install from GOLDEN area (no version gate),
-   │     erase staged manifest, FinishFwu(FWU_ROLLBACK, pre-confirmed)
-   └─ fwu_none:     if unconfirmed → consume boot attempt
+   ├─ fwuAction_rollback: same install from GOLDEN area (no version gate),
+   │     erase staged manifest, FinishFwu(fwuRes_rollback, pre-confirmed)
+   └─ fwuAction_none:     if unconfirmed → consume boot attempt
                     (local-target 'l' builds exempt)
 5. Validate internal application (magic + size + HMAC-SHA256)
 6. Jump to application at 0x08008000
@@ -481,8 +481,8 @@ Shared code compiled into both bootloader and application.
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
 
 Stack overflow checking is ON (`configCHECK_FOR_STACK_OVERFLOW=2`):
-overflow → crash report (`CRASH_STACK_OVERFLOW`) + reset. `configASSERT`
-also records a crash report (`CRASH_ASSERT`) + resets instead of silently
+overflow → crash report (`crashType_stackOverflow`) + reset. `configASSERT`
+also records a crash report (`crashType_assert`) + resets instead of silently
 spinning with interrupts masked.
 
 ## HTTP API
@@ -582,12 +582,32 @@ Hub facts, address plan and the WGDashboard gotchas:
 
 ## Coding Standards
 
+**[`C coding standard.md`](C%20coding%20standard.md) in the repo root is
+authoritative** — naming, formatting, Doxygen placement, the lot. Read it before
+naming anything new. What follows is only the part most often got wrong here.
+
 ### Naming Conventions
 
 - **Structures**: `s` + PascalCase (`sAppInfo`, `sBootStatus`)
 - **Unions**: `u` + PascalCase (`sBootFlags` uses union internally)
 - **Function pointers**: `f` + PascalCase (`fVerifyHmac`, `fDecryptBlob`)
-- **Enums**: `e` + PascalCase for type (`eFwuRes`, `eFwTarget`)
+- **Enum types**: `e` + PascalCase (`eFwuRes`, `eFwTarget`)
+- **Enum values**: `<modulePrefix><Category>_<value>` — lowercase prefix,
+  camelCase value, **never ALL_CAPS** (that spelling is for `#define` only):
+  `fwuRes_errImageHmac`, `mbDecode_u32Be`, `crashType_stackOverflow`,
+  `imgStore_uploading`, `sysRst_iwdg`. A `_last` sentinel closes the enum where
+  it is meaningful — dense, runtime-only enums have one; bit-flag enums
+  (`eResetCause`, `eModbusEventType`), sparse ones (`eFwuRes` ends at `0xFF`)
+  and negative-valued ones (`eModbusErr`) do not.
+- **Quantifiable values carry a unit suffix**: `timeout_ms`, `period_sec`,
+  `voltage_mV`. This is mandatory in the standard and is the rule most often
+  missed in existing code.
+
+**Enum values must never be renumbered.** `eFwuRes` is persisted in the boot
+status, `eModbusDecodeType` in the Modbus LUT records, and `eCrashType` in the
+crash log — so a `_undefined = 0` prepended to any of them would silently
+reinterpret flash written by an older image. That is why none of them has one,
+despite the standard recommending it: appending is safe, prepending is not.
 
 ### Trice Usage
 

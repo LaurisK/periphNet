@@ -85,7 +85,7 @@ static int ring_scan(uint32_t *outSeconds, uint32_t *outSeq,
 
     for (uint32_t i = 0u; i < WG_TIME_SLOT_COUNT; i += WG_TIME_SCAN_SLOTS) {
         if (W25Q128_Read(EXT_FLASH_WG_TIME_ADDR + (i * WG_TIME_SLOT_SIZE),
-                         (uint8_t *)batch, sizeof(batch)) != W25Q128_OK) {
+                         (uint8_t *)batch, sizeof(batch)) != w25q_ok) {
             return -1;
         }
 
@@ -121,7 +121,7 @@ static int ring_append(uint32_t seconds)
     if (s_slotIdx < WG_TIME_SLOT_COUNT) {
         addr = EXT_FLASH_WG_TIME_ADDR + (s_slotIdx * WG_TIME_SLOT_SIZE);
         if (W25Q128_Read(addr, (uint8_t *)&existing,
-                         WG_TIME_SLOT_SIZE) != W25Q128_OK) {
+                         WG_TIME_SLOT_SIZE) != w25q_ok) {
             return -1;
         }
         if (!slot_erased(&existing)) {
@@ -130,7 +130,7 @@ static int ring_append(uint32_t seconds)
     }
 
     if (s_slotIdx >= WG_TIME_SLOT_COUNT) {
-        if (W25Q128_EraseSector(EXT_FLASH_WG_TIME_ADDR) != W25Q128_OK) {
+        if (W25Q128_EraseSector(EXT_FLASH_WG_TIME_ADDR) != w25q_ok) {
             return -1;
         }
         s_slotIdx = 0u;
@@ -143,7 +143,7 @@ static int ring_append(uint32_t seconds)
 
     addr = EXT_FLASH_WG_TIME_ADDR + (s_slotIdx * WG_TIME_SLOT_SIZE);
     if (W25Q128_WritePage(addr, (const uint8_t *)&slot,
-                          WG_TIME_SLOT_SIZE) != W25Q128_OK) {
+                          WG_TIME_SLOT_SIZE) != w25q_ok) {
         return -1;
     }
 

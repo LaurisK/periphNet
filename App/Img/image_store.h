@@ -24,17 +24,19 @@ extern "C" {
 #define IMG_STORE_NAME_MAX  64
 
 typedef enum {
-    IMG_STORE_EMPTY = 0,        /* no valid blob stored                    */
-    IMG_STORE_UPLOADING,
-    IMG_STORE_READY,            /* valid blob stored (persistent)          */
-    IMG_STORE_DOWNLOADING,
-    IMG_STORE_ERROR
+    imgStore_empty = 0,        /* no valid blob stored                    */
+    imgStore_uploading,
+    imgStore_ready,            /* valid blob stored (persistent)          */
+    imgStore_downloading,
+    imgStore_error,
+    imgStore_last          /* sentinel */
 } eImgStoreStatus;
 
 typedef enum {
-    IMG_STORE_OK = 0,
-    IMG_STORE_BUSY,             /* transfer in progress / read hold active */
-    IMG_STORE_FLASH_ERR,
+    imgRes_ok = 0,
+    imgRes_busy,             /* transfer in progress / read hold active */
+    imgRes_flashErr,
+    imgRes_last          /* sentinel */
 } eImgStoreRes;
 
 /* Metadata of a blob area, read from its cleartext manifest and verified

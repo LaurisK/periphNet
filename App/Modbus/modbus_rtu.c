@@ -17,7 +17,7 @@
 #define MODBUS_RX_BUF_SIZE  260  /* max response: 1+1+1+250+2 = 255 */
 
 static volatile int     s_initialised;
-static eModbusPort      s_port = MODBUS_PORT_UART2;
+static eModbusPort      s_port = mbPort_uart2;
 static volatile int     s_monitorEnabled;
 static volatile uint8_t s_lastException;   /* see Modbus_LastException() */
 
@@ -95,7 +95,7 @@ uint16_t Modbus_CRC16(const uint8_t *data, size_t len)
  * @param  rxMaxLen  Max response length
  * @param  rxLen     Actual received length (output)
  * @param  timeoutMs Response timeout
- * @return MODBUS_OK or error
+ * @return mbErr_ok or error
  */
 static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
                                   uint8_t *rxBuf, uint16_t rxMaxLen,
@@ -104,18 +104,18 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
     s_lastException = 0;
 
     if (!s_initialised) {
-        return MODBUS_ERR_BUSY;
+        return mbErr_busy;
     }
 
     /* Disabled port: no physical bus.  Show the request if monitoring is on
      * and report an instant timeout (as if no slave answered). */
-    if (s_port == MODBUS_PORT_DISABLED) {
+    if (s_port == mbPort_disabled) {
         if (s_monitorEnabled) {
             TRice("Modbus TX[%u]: ", txLen);
             monitor_dump_bytes(txBuf, txLen);
         }
         *rxLen = 0;
-        return MODBUS_ERR_TIMEOUT;
+        return mbErr_timeout;
     }
 
     /* Inter-frame gap: 3.5 char times. At 9600 baud = ~4 ms */
@@ -133,7 +133,7 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
     rs485_rx_enable();
 
     if (st != HAL_OK) {
-        return MODBUS_ERR_BUSY;
+        return mbErr_busy;
     }
 
     if (s_monitorEnabled) {
@@ -160,7 +160,7 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
     }
 
     if (*rxLen == 0) {
-        return MODBUS_ERR_TIMEOUT;
+        return mbErr_timeout;
     }
 
     if (s_monitorEnabled) {
@@ -168,7 +168,7 @@ static eModbusErr modbus_transact(const uint8_t *txBuf, uint16_t txLen,
         monitor_dump_bytes(rxBuf, *rxLen);
     }
 
-    return MODBUS_OK;
+    return mbErr_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -195,37 +195,37 @@ static eModbusErr read_registers(uint8_t fc, uint8_t slave, uint16_t startReg,
     uint16_t rxLen = 0;
     eModbusErr err = modbus_transact(req, 8, rxBuf, sizeof(rxBuf),
                                      &rxLen, timeoutMs);
-    if (err != MODBUS_OK) {
+    if (err != mbErr_ok) {
         return err;
     }
 
     /* Minimum response: slave + fc + byteCount + 2*count + crc(2) */
     uint16_t expectedLen = 3 + count * 2 + 2;
     if (rxLen < 5) {
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     /* Check for exception response: [slave][fc|0x80][excCode][crcLo][crcHi] */
     if (rxBuf[1] & 0x80) {
         s_lastException = rxBuf[2];
-        return MODBUS_ERR_EXCEPTION;
+        return mbErr_exception;
     }
 
     if (rxLen < expectedLen) {
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     /* Verify CRC */
     uint16_t rxCrc = (uint16_t)(rxBuf[rxLen - 2]) |
                      ((uint16_t)(rxBuf[rxLen - 1]) << 8);
     if (rxCrc != Modbus_CRC16(rxBuf, rxLen - 2)) {
-        return MODBUS_ERR_CRC;
+        return mbErr_crc;
     }
 
     /* Extract register values (big-endian in response) */
     uint8_t byteCount = rxBuf[2];
     if (byteCount != count * 2) {
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     for (uint16_t i = 0; i < count; i++) {
@@ -233,7 +233,7 @@ static eModbusErr read_registers(uint8_t fc, uint8_t slave, uint16_t startReg,
                   (uint16_t)rxBuf[4 + i * 2];
     }
 
-    return MODBUS_OK;
+    return mbErr_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -243,7 +243,7 @@ static eModbusErr read_registers(uint8_t fc, uint8_t slave, uint16_t startReg,
 int Modbus_Init(uint32_t baud)
 {
     /* Disabled port: no UART to configure — transactions time out instantly */
-    if (s_port == MODBUS_PORT_DISABLED) {
+    if (s_port == mbPort_disabled) {
         s_initialised = 1;
         return 0;
     }
@@ -273,7 +273,7 @@ int Modbus_Init(uint32_t baud)
 void Modbus_DeInit(void)
 {
     s_initialised = 0;
-    if (s_port == MODBUS_PORT_DISABLED) {
+    if (s_port == mbPort_disabled) {
         return;
     }
     rs485_rx_enable();
@@ -286,11 +286,11 @@ void Modbus_DeInit(void)
 
 int Modbus_SetPort(eModbusPort port)
 {
-    if (port == MODBUS_PORT_UART6) {
+    if (port == mbPort_uart6) {
         TRice("Modbus port: UART6 not configured\n");
         return -1;
     }
-    if (port != MODBUS_PORT_UART2 && port != MODBUS_PORT_DISABLED) {
+    if (port != mbPort_uart2 && port != mbPort_disabled) {
         return -1;
     }
     /* No live switching: the poller owns the UART while initialised */
@@ -330,14 +330,14 @@ eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
 
     if (len < 4) {
         TRice("Modbus inject: ERR_SHORT\n");
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     uint16_t rxCrc = (uint16_t)frame[len - 2] |
                      ((uint16_t)frame[len - 1] << 8);
     if (rxCrc != Modbus_CRC16(frame, (size_t)len - 2)) {
         TRice("Modbus inject: ERR_CRC\n");
-        return MODBUS_ERR_CRC;
+        return mbErr_crc;
     }
 
     if (s_monitorEnabled) {
@@ -348,20 +348,20 @@ eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
     if (frame[1] & 0x80) {
         s_lastException = frame[2];
         TRice("Modbus inject: ERR_EXCEPTION\n");
-        return MODBUS_ERR_EXCEPTION;
+        return mbErr_exception;
     }
 
     /* Only register-read responses (FC 0x03/0x04) carry data to decode */
     if (frame[1] != 0x03 && frame[1] != 0x04) {
         TRice("Modbus inject: ERR_SHORT\n");
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     uint8_t byteCount = frame[2];
     if ((uint16_t)(byteCount + 5) != len || (byteCount & 1) ||
         (uint16_t)(byteCount / 2) > maxRegs) {
         TRice("Modbus inject: ERR_SHORT\n");
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     uint16_t count = byteCount / 2;
@@ -372,7 +372,7 @@ eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
     *regCount = count;
 
     TRice("Modbus inject: %u bytes\n", len);
-    return MODBUS_OK;
+    return mbErr_ok;
 }
 
 eModbusErr Modbus_ReadInputRegisters(uint8_t slave, uint16_t startReg,
@@ -408,30 +408,30 @@ eModbusErr Modbus_WriteSingleRegister(uint8_t slave, uint16_t reg,
     uint16_t rxLen = 0;
     eModbusErr err = modbus_transact(req, 8, rxBuf, sizeof(rxBuf),
                                      &rxLen, timeoutMs);
-    if (err != MODBUS_OK) {
+    if (err != mbErr_ok) {
         return err;
     }
 
     if (rxLen < 5) {
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     /* Exception check */
     if (rxBuf[1] & 0x80) {
         s_lastException = rxBuf[2];
-        return MODBUS_ERR_EXCEPTION;
+        return mbErr_exception;
     }
 
     /* Echo response should match request (slave + fc + reg + value + crc) */
     if (rxLen < 8) {
-        return MODBUS_ERR_SHORT;
+        return mbErr_short;
     }
 
     uint16_t rxCrc = (uint16_t)(rxBuf[rxLen - 2]) |
                      ((uint16_t)(rxBuf[rxLen - 1]) << 8);
     if (rxCrc != Modbus_CRC16(rxBuf, rxLen - 2)) {
-        return MODBUS_ERR_CRC;
+        return mbErr_crc;
     }
 
-    return MODBUS_OK;
+    return mbErr_ok;
 }

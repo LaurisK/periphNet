@@ -74,17 +74,17 @@ eModbusErr JkBms_Probe(uint8_t slave, uint32_t baud, uint32_t timeoutMs,
     eModbusErr err;
 
     if (out == NULL || slave < 1u || slave > 247u) {
-        return MODBUS_ERR_BUSY;
+        return mbErr_busy;
     }
 
     /* The walker owns USART2 while running and re-inits it at its own baud —
      * probing underneath it would corrupt an in-flight transaction. */
     if (ModbusWalker_IsRunning()) {
-        return MODBUS_ERR_BUSY;
+        return mbErr_busy;
     }
 
     if (Modbus_Init(baud) != 0) {
-        return MODBUS_ERR_BUSY;
+        return mbErr_busy;
     }
 
     err = Modbus_ReadHoldingRegisters(slave, (uint16_t)JK_BLOCK_DEVICE_INFO,
@@ -92,7 +92,7 @@ eModbusErr JkBms_Probe(uint8_t slave, uint32_t baud, uint32_t timeoutMs,
 
     Modbus_DeInit();
 
-    if (err != MODBUS_OK) {
+    if (err != mbErr_ok) {
         return err;
     }
 
@@ -104,7 +104,7 @@ eModbusErr JkBms_Probe(uint8_t slave, uint32_t baud, uint32_t timeoutMs,
     out->uart1Protocol = byte_at(regs, INFO_UART1_PROTO_OFF);
     out->canProtocol   = byte_at(regs, INFO_CAN_PROTO_OFF);
 
-    return MODBUS_OK;
+    return mbErr_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -114,14 +114,14 @@ eModbusErr JkBms_Probe(uint8_t slave, uint32_t baud, uint32_t timeoutMs,
 static void log_failure_hint(eModbusErr err)
 {
     switch (err) {
-    case MODBUS_ERR_TIMEOUT:
-        if (Modbus_GetPort() == MODBUS_PORT_DISABLED) {
+    case mbErr_timeout:
+        if (Modbus_GetPort() == mbPort_disabled) {
             TRice("JK: no reply - Modbus port is DISABLED ('modbus port uart2')\n");
         } else {
             TRice("JK: no reply - check A/B polarity, baud, slave addr, RS485 mode\n");
         }
         break;
-    case MODBUS_ERR_EXCEPTION: {
+    case mbErr_exception: {
         uint8_t exc = Modbus_LastException();
         TRice("JK: slave answered, rejected request (exception %u)\n", exc);
         if (exc == 2u) {
@@ -131,13 +131,13 @@ static void log_failure_hint(eModbusErr err)
         }
         break;
     }
-    case MODBUS_ERR_CRC:
+    case mbErr_crc:
         TRice("JK: CRC mismatch - baud mismatch or a noisy/unterminated bus\n");
         break;
-    case MODBUS_ERR_SHORT:
+    case mbErr_short:
         TRice("JK: truncated reply - RX overrun or a foreign device answered\n");
         break;
-    case MODBUS_ERR_BUSY:
+    case mbErr_busy:
         TRice("JK: bus busy - stop the walker first ('modbus stop')\n");
         break;
     default:
@@ -154,7 +154,7 @@ eModbusErr JkBms_LogProbe(uint8_t slave, uint32_t baud)
     TRice("JK: probing slave %u at %u baud..\n", slave, baud);
 
     err = JkBms_Probe((uint8_t)slave, baud, 1000u, &info);
-    if (err != MODBUS_OK) {
+    if (err != mbErr_ok) {
         TRice("JK: probe FAILED (%d)\n", (int)err);
         log_failure_hint(err);
         return err;
@@ -171,5 +171,5 @@ eModbusErr JkBms_LogProbe(uint8_t slave, uint32_t baud)
              (info.canProtocol == JK_CAN_PROTO_PYLONTECH) ? " (pylontech)" : "");
     TRiceS("JK: %s\n", buf);
 
-    return MODBUS_OK;
+    return mbErr_ok;
 }

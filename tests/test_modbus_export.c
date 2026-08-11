@@ -171,35 +171,35 @@ static void test_decode_integers(void)
     sModbusPointRecord p;
     uint16_t           regs[2];
 
-    p = mkpt(MB_DECODE_U16, -1, 0);
+    p = mkpt(mbDecode_u16, -1, 0);
     regs[0] = 512;
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 512);
 
-    p = mkpt(MB_DECODE_S16, -1, 0);
+    p = mkpt(mbDecode_s16, -1, 0);
     regs[0] = 0xFFF6;                        /* -10 */
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == -10);
 
-    p = mkpt(MB_DECODE_BITFIELD, 0, 0);
+    p = mkpt(mbDecode_bitfield, 0, 0);
     regs[0] = 0xABCD;
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 0xABCD);
 
-    p = mkpt(MB_DECODE_U32_BE, 0, 0);
+    p = mkpt(mbDecode_u32Be, 0, 0);
     regs[0] = 0x0001; regs[1] = 0x0002;      /* 0x00010002 */
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 0x10002);
 
-    p = mkpt(MB_DECODE_U32_LE, 0, 0);
+    p = mkpt(mbDecode_u32Le, 0, 0);
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 0x20001);
 
-    p = mkpt(MB_DECODE_S32_BE, 0, 0);
+    p = mkpt(mbDecode_s32Be, 0, 0);
     regs[0] = 0xFFFF; regs[1] = 0xFFFE;      /* -2 */
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == -2);
 
-    p = mkpt(MB_DECODE_S32_LE, 0, 0);
+    p = mkpt(mbDecode_s32Le, 0, 0);
     regs[0] = 0xFFFE; regs[1] = 0xFFFF;      /* -2, word-swapped */
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == -2);
 
     /* u32 above int32 clamps */
-    p = mkpt(MB_DECODE_U32_BE, 0, 0);
+    p = mkpt(mbDecode_u32Be, 0, 0);
     regs[0] = 0xFFFF; regs[1] = 0xFFFF;
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == INT32_MAX);
 }
@@ -216,13 +216,13 @@ static void test_decode_float_quantize(void)
     memcpy(&bits, &f, sizeof(bits));
     regs[0] = (uint16_t)(bits >> 16);
     regs[1] = (uint16_t)bits;
-    p = mkpt(MB_DECODE_FLOAT32_BE, -1, 0);
+    p = mkpt(mbDecode_float32Be, -1, 0);
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 513);
 
     /* same value little-word order */
     regs[1] = (uint16_t)(bits >> 16);
     regs[0] = (uint16_t)bits;
-    p = mkpt(MB_DECODE_FLOAT32_LE, -1, 0);
+    p = mkpt(mbDecode_float32Le, -1, 0);
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 513);
 
     /* negative with scale 1 */
@@ -230,7 +230,7 @@ static void test_decode_float_quantize(void)
     memcpy(&bits, &f, sizeof(bits));
     regs[0] = (uint16_t)(bits >> 16);
     regs[1] = (uint16_t)bits;
-    p = mkpt(MB_DECODE_FLOAT32_BE, 0, 0);
+    p = mkpt(mbDecode_float32Be, 0, 0);
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == -230);
 
     /* scale 10: 1500.0 -> scaled 150 */
@@ -238,13 +238,13 @@ static void test_decode_float_quantize(void)
     memcpy(&bits, &f, sizeof(bits));
     regs[0] = (uint16_t)(bits >> 16);
     regs[1] = (uint16_t)bits;
-    p = mkpt(MB_DECODE_FLOAT32_BE, 1, 0);
+    p = mkpt(mbDecode_float32Be, 1, 0);
     TEST_ASSERT(MbDecode_Scaled(&p, regs) == 150);
 }
 
 static void test_decode_ascii(void)
 {
-    sModbusPointRecord p = mkpt(MB_DECODE_ASCII, 0, 4);
+    sModbusPointRecord p = mkpt(mbDecode_ascii, 0, 4);
     uint16_t regs[4] = { ('S' << 8) | 'N', ('1' << 8) | '2',
                          ('3' << 8) | ' ', (' ' << 8) | ' ' };
     char out[16];

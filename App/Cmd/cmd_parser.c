@@ -43,7 +43,7 @@ typedef struct {
     bool     synced;     /* true after first newline seen (discards initial junk) */
 } sCmdLine;
 
-static sCmdLine s_lines[CMD_SRC_COUNT];
+static sCmdLine s_lines[cmdSrc_last];
 
 /* USART1 single-byte RX buffer */
 static uint8_t s_uart1_rx_byte;
@@ -240,13 +240,13 @@ static void cmd_modbus(const char *args)
     } else if (strncmp(args, "port ", 5) == 0) {
         const char *p = args + 5;
         if (strncmp(p, "uart2", 5) == 0) {
-            if (Modbus_SetPort(MODBUS_PORT_UART2) == 0) {
+            if (Modbus_SetPort(mbPort_uart2) == 0) {
                 TRice("Modbus port: uart2\n");
             }
         } else if (strncmp(p, "uart6", 5) == 0) {
-            Modbus_SetPort(MODBUS_PORT_UART6);  /* logs its own refusal */
+            Modbus_SetPort(mbPort_uart6);  /* logs its own refusal */
         } else if (strncmp(p, "disabled", 8) == 0) {
-            if (Modbus_SetPort(MODBUS_PORT_DISABLED) == 0) {
+            if (Modbus_SetPort(mbPort_disabled) == 0) {
                 TRice("Modbus port: disabled\n");
             }
         } else {
@@ -280,7 +280,7 @@ static void cmd_modbus(const char *args)
         uint16_t regs[64];
         uint16_t regCount = 0;
         if (Modbus_ProcessInjectedFrame(frame, (uint16_t)len, regs,
-                                        64, &regCount) == MODBUS_OK &&
+                                        64, &regCount) == mbErr_ok &&
             regCount > 0) {
             ModbusWalker_InjectResponse(frame[0], (uint16_t)startAddr,
                                         regs, regCount);
@@ -290,8 +290,8 @@ static void cmd_modbus(const char *args)
         char buf[100];
         snprintf(buf, sizeof(buf), "%s port=%s monitor=%s baud=%u",
                  ModbusWalker_IsRunning() ? "running" : "stopped",
-                 (port == MODBUS_PORT_UART2)    ? "uart2" :
-                 (port == MODBUS_PORT_UART6)    ? "uart6" : "disabled",
+                 (port == mbPort_uart2)    ? "uart2" :
+                 (port == mbPort_uart6)    ? "uart6" : "disabled",
                  Modbus_GetMonitor() ? "on" : "off",
                  (unsigned)ModbusWalker_GetBaud());
         TRiceS("Modbus %s\n", buf);
@@ -638,7 +638,7 @@ static void dispatch(const char *line)
 
 void Cmd_Feed(eCmdSrc src, const uint8_t *data, size_t len)
 {
-    if (src >= CMD_SRC_COUNT) {
+    if (src >= cmdSrc_last) {
         return;
     }
 
@@ -675,7 +675,7 @@ void Cmd_Feed(eCmdSrc src, const uint8_t *data, size_t len)
 
 void Cmd_Uart1RxCallback(void)
 {
-    Cmd_Feed(CMD_SRC_UART, &s_uart1_rx_byte, 1);
+    Cmd_Feed(cmdSrc_uart, &s_uart1_rx_byte, 1);
     /* Re-arm single-byte receive */
     HAL_UART_Receive_IT(&huart1, &s_uart1_rx_byte, 1);
 }
@@ -691,7 +691,7 @@ static void cmdTask(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(20));
 
-        for (int i = 0; i < CMD_SRC_COUNT; i++) {
+        for (int i = 0; i < cmdSrc_last; i++) {
             sCmdLine *line = &s_lines[i];
             if (line->ready) {
                 dispatch(line->buf);

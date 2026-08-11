@@ -287,8 +287,8 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
     }
 
     /* Task name (current task is the offender for these types) */
-    if (type == CRASH_SW_WATCHDOG || type == CRASH_STACK_OVERFLOW ||
-        type == CRASH_ASSERT) {
+    if (type == crashType_swWatchdog || type == crashType_stackOverflow ||
+        type == crashType_assert) {
         const char *name = pcTaskGetName(NULL);
         if (name) {
             strncpy(log.task_name, name, sizeof(log.task_name) - 1);
@@ -349,8 +349,8 @@ void Crash_GenerateReport(eCrashType type)
     captureRegs(&regs);
     flushTrice();
 
-    if (type == CRASH_SW_WATCHDOG || type == CRASH_STACK_OVERFLOW ||
-        type == CRASH_ASSERT) {
+    if (type == crashType_swWatchdog || type == crashType_stackOverflow ||
+        type == crashType_assert) {
         TRiceS("err:Fault in task: %s\n", pcTaskGetName(NULL));
     }
 
@@ -375,7 +375,7 @@ bool Crash_ReadFromFlash(sCrashLog *log)
     if (!log) return false;
 
     if (W25Q128_Read(EXT_FLASH_CRASH_LOG_ADDR,
-                     (uint8_t *)log, sizeof(sCrashLog)) != W25Q128_OK) {
+                     (uint8_t *)log, sizeof(sCrashLog)) != w25q_ok) {
         return false;
     }
 

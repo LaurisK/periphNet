@@ -19,12 +19,12 @@
  * -------------------------------------------------------------------------- */
 
 typedef enum {
-    MODBUS_OK            =  0,
-    MODBUS_ERR_TIMEOUT   = -1,   /* no response within deadline */
-    MODBUS_ERR_CRC       = -2,   /* CRC mismatch in response */
-    MODBUS_ERR_EXCEPTION = -3,   /* slave returned exception */
-    MODBUS_ERR_SHORT     = -4,   /* response too short */
-    MODBUS_ERR_BUSY      = -5,   /* UART busy / not initialised */
+    mbErr_ok            =  0,
+    mbErr_timeout   = -1,   /* no response within deadline */
+    mbErr_crc       = -2,   /* CRC mismatch in response */
+    mbErr_exception = -3,   /* slave returned exception */
+    mbErr_short     = -4,   /* response too short */
+    mbErr_busy      = -5,   /* UART busy / not initialised */
 } eModbusErr;
 
 /* --------------------------------------------------------------------------
@@ -32,14 +32,14 @@ typedef enum {
  * -------------------------------------------------------------------------- */
 
 typedef enum {
-    MODBUS_PORT_UART2    = 0,  /* production RS485 on PD5/PD6/PD7 */
-    MODBUS_PORT_UART6    = 1,  /* test port — deferred until schematic review */
-    MODBUS_PORT_DISABLED = 2,  /* no physical bus; inject-only mode */
+    mbPort_uart2    = 0,  /* production RS485 on PD5/PD6/PD7 */
+    mbPort_uart6    = 1,  /* test port — deferred until schematic review */
+    mbPort_disabled = 2,  /* no physical bus; inject-only mode */
 } eModbusPort;
 
 /**
  * @brief  Select the active Modbus port.  Refused while the poller has the
- *         UART initialised (stop the poller first).  MODBUS_PORT_UART6 is
+ *         UART initialised (stop the poller first).  mbPort_uart6 is
  *         not wired up yet and always returns -1.
  * @return 0 on success, -1 on failure (refusal is logged via Trice)
  */
@@ -49,7 +49,7 @@ eModbusPort Modbus_GetPort(void);
 
 /**
  * @brief  Modbus exception code carried by the most recent response that
- *         returned MODBUS_ERR_EXCEPTION (0 = none seen yet).
+ *         returned mbErr_exception (0 = none seen yet).
  *
  *         Standard codes: 1 = Illegal Function, 2 = Illegal Data Address,
  *         3 = Illegal Data Value, 4 = Slave Device Failure.  Telling these
@@ -57,7 +57,7 @@ eModbusPort Modbus_GetPort(void);
  *         ("wrong function code" vs "wrong address" vs "wrong value"), so the
  *         code is kept here rather than folded into the flat eModbusErr.
  *
- *         Valid only immediately after a MODBUS_ERR_EXCEPTION return; it is
+ *         Valid only immediately after a mbErr_exception return; it is
  *         reset at the start of every transaction.
  */
 uint8_t Modbus_LastException(void);
@@ -84,7 +84,7 @@ int  Modbus_GetMonitor(void);
  * @param  regs      Output buffer for decoded register values
  * @param  maxRegs   Capacity of regs
  * @param  regCount  Number of decoded registers (output)
- * @return MODBUS_OK or error code
+ * @return mbErr_ok or error code
  */
 eModbusErr Modbus_ProcessInjectedFrame(const uint8_t *frame, uint16_t len,
                                        uint16_t *regs, uint16_t maxRegs,
@@ -118,7 +118,7 @@ void Modbus_DeInit(void);
  * @param  count     Number of registers to read (1-125)
  * @param  out       Output buffer (count × uint16_t, big-endian decoded)
  * @param  timeoutMs Response timeout in ms
- * @return MODBUS_OK or error code
+ * @return mbErr_ok or error code
  */
 eModbusErr Modbus_ReadInputRegisters(uint8_t slave, uint16_t startReg,
                                      uint16_t count, uint16_t *out,
@@ -131,7 +131,7 @@ eModbusErr Modbus_ReadInputRegisters(uint8_t slave, uint16_t startReg,
  * @param  count     Number of registers to read (1-125)
  * @param  out       Output buffer (count × uint16_t, big-endian decoded)
  * @param  timeoutMs Response timeout in ms
- * @return MODBUS_OK or error code
+ * @return mbErr_ok or error code
  */
 eModbusErr Modbus_ReadHoldingRegisters(uint8_t slave, uint16_t startReg,
                                        uint16_t count, uint16_t *out,
@@ -143,7 +143,7 @@ eModbusErr Modbus_ReadHoldingRegisters(uint8_t slave, uint16_t startReg,
  * @param  reg       Register address (wire address, 0-based)
  * @param  value     Value to write
  * @param  timeoutMs Response timeout in ms
- * @return MODBUS_OK or error code
+ * @return mbErr_ok or error code
  */
 eModbusErr Modbus_WriteSingleRegister(uint8_t slave, uint16_t reg,
                                       uint16_t value, uint32_t timeoutMs);

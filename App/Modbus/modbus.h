@@ -74,16 +74,16 @@ extern "C" {
  * ========================================================================== */
 
 typedef enum {
-    MODBUS_OK             =  0,
-    MODBUS_ERR_TIMEOUT    = -1,  /* no response within the deadline          */
-    MODBUS_ERR_CRC        = -2,  /* CRC mismatch in the response             */
-    MODBUS_ERR_EXCEPTION  = -3,  /* slave returned an exception              */
-    MODBUS_ERR_SHORT      = -4,  /* response too short / truncated           */
-    MODBUS_ERR_BUSY       = -5,  /* port busy, not initialised, or refused   */
-    MODBUS_ERR_NOTFOUND   = -6,  /* no such device / point in the config     */
-    MODBUS_ERR_RANGE      = -7,  /* value outside writeMin..writeMax         */
-    MODBUS_ERR_FULL       = -8,  /* write slot or subscription table full    */
-    MODBUS_ERR_CONFIG     = -9,  /* no valid config / malformed record stream*/
+    mbErr_ok             =  0,
+    mbErr_timeout    = -1,  /* no response within the deadline          */
+    mbErr_crc        = -2,  /* CRC mismatch in the response             */
+    mbErr_exception  = -3,  /* slave returned an exception              */
+    mbErr_short      = -4,  /* response too short / truncated           */
+    mbErr_busy       = -5,  /* port busy, not initialised, or refused   */
+    mbErr_notFound   = -6,  /* no such device / point in the config     */
+    mbErr_range      = -7,  /* value outside writeMin..writeMax         */
+    mbErr_full       = -8,  /* write slot or subscription table full    */
+    mbErr_config     = -9,  /* no valid config / malformed record stream*/
 } eModbusErr;
 
 /* ==========================================================================
@@ -125,13 +125,13 @@ typedef struct {
  * ========================================================================== */
 
 typedef enum {
-    MB_EVT_SAMPLE       = 1u << 0,  /* a point was read and decoded         */
-    MB_EVT_POINT_DESC   = 1u << 1,  /* catalogue entry (see Modbus_Subscribe)*/
-    MB_EVT_DEVICE_STATE = 1u << 2,  /* device went online / offline         */
-    MB_EVT_WRITE_RESULT = 1u << 3,  /* a submitted write finished           */
-    MB_EVT_CONFIG       = 1u << 4,  /* config swapped / reset               */
-    MB_EVT_TXN          = 1u << 5,  /* transaction outcome — diagnostics    */
-    MB_EVT_ALL          = 0x3Fu,
+    mbEvt_sample       = 1u << 0,  /* a point was read and decoded         */
+    mbEvt_pointDesc   = 1u << 1,  /* catalogue entry (see Modbus_Subscribe)*/
+    mbEvt_deviceState = 1u << 2,  /* device went online / offline         */
+    mbEvt_writeResult = 1u << 3,  /* a submitted write finished           */
+    mbEvt_config       = 1u << 4,  /* config swapped / reset               */
+    mbEvt_txn          = 1u << 5,  /* transaction outcome — diagnostics    */
+    mbEvt_all          = 0x3Fu,
 } eModbusEventType;
 
 #define MB_WRITE_NO_POINT  0xFFFFu   /* .ptOrd for a raw (unresolved) write */
@@ -141,7 +141,7 @@ typedef struct {
     uint32_t         tick;          /* HAL_GetTick() when the event was made*/
 
     union {
-        /* ---- MB_EVT_SAMPLE ---------------------------------------------
+        /* ---- mbEvt_sample ---------------------------------------------
          * Raised once per point per SUCCESSFUL READ — not per change.  The
          * module has no memory of previous values and does not deduplicate;
          * a consumer that wants change detection does it itself, on its own
@@ -152,7 +152,7 @@ typedef struct {
          * second, raw data path would invite consumers to re-implement
          * decoding and get word order, scaling or ASCII subtly wrong).
          *
-         * For MB_DECODE_ASCII points, `text` is the decoded string and
+         * For mbDecode_ascii points, `text` is the decoded string and
          * `value` is UNSPECIFIED — nothing in the module computes one.  A
          * consumer that needs change detection hashes `text`.  For every
          * other type, `value` is the scaled integer and `text` is NULL. */
@@ -162,7 +162,7 @@ typedef struct {
             const char *text;
         } sample;
 
-        /* ---- MB_EVT_POINT_DESC -----------------------------------------
+        /* ---- mbEvt_pointDesc -----------------------------------------
          * One per point in the subscription's scope, delivered as a burst
          * ("the catalogue").  `last` marks the final entry, including when
          * the catalogue is empty (pt == NULL in that case). */
@@ -171,14 +171,14 @@ typedef struct {
             uint8_t     last;
         } desc;
 
-        /* ---- MB_EVT_DEVICE_STATE ---------------------------------------- */
+        /* ---- mbEvt_deviceState ---------------------------------------- */
         struct {
             uint8_t     devOrd;
             const char *deviceId;
             uint8_t     online;
         } device;
 
-        /* ---- MB_EVT_WRITE_RESULT ---------------------------------------- */
+        /* ---- mbEvt_writeResult ---------------------------------------- */
         struct {
             uint32_t    id;         /* as returned by Modbus_Submit*Write   */
             uint16_t    ptOrd;      /* MB_WRITE_NO_POINT for a raw write    */
@@ -186,7 +186,7 @@ typedef struct {
             uint8_t     exc;        /* Modbus exception code, 0 = none      */
         } write;
 
-        /* ---- MB_EVT_CONFIG ----------------------------------------------
+        /* ---- mbEvt_config ----------------------------------------------
          * A new config went live.  Every cached ptOrd/devOrd is now invalid;
          * a fresh catalogue follows for every subscription. */
         struct {
@@ -196,9 +196,9 @@ typedef struct {
             uint16_t    points;
         } config;
 
-        /* ---- MB_EVT_TXN -------------------------------------------------
+        /* ---- mbEvt_txn -------------------------------------------------
          * Transaction outcome, for health/diagnostics consumers.  Deliberately
-         * carries NO register payload; values arrive as MB_EVT_SAMPLE. */
+         * carries NO register payload; values arrive as mbEvt_sample. */
         struct {
             uint8_t     devOrd, slave;
             uint16_t    txnOrd, startAddr, count;
@@ -253,7 +253,7 @@ typedef void (*fModbusSubscriber)(const sModbusEvent *ev, void *ctx);
  * @param  cb         callback; see "Contracts" below — it runs in the poll
  *                    task and must not block
  * @param  ctx        opaque, passed back to cb
- * @return handle >= 0, or MODBUS_ERR_FULL
+ * @return handle >= 0, or mbErr_full
  *
  * Within that scope the subscription gets EVERY read — no thresholding, no
  * deduplication.  Device scope is routing, not filtering: it resolves to a
@@ -266,8 +266,8 @@ typedef void (*fModbusSubscriber)(const sModbusEvent *ev, void *ctx);
  * receives nothing until a config containing it goes live.  This is what makes
  * hot config swaps survivable — consumers never re-register.
  *
- * A catalogue (a burst of MB_EVT_POINT_DESC) is delivered for the new
- * subscription if MB_EVT_POINT_DESC is in the mask.  It arrives from the poll
+ * A catalogue (a burst of mbEvt_pointDesc) is delivered for the new
+ * subscription if mbEvt_pointDesc is in the mask.  It arrives from the poll
  * task, so it is NOT synchronous with this call.
  *
  * Safe to call from any task, and the module is always running by then
@@ -299,7 +299,7 @@ int  Modbus_RequestCatalogue(int handle);
  * other.  Modbus_Probe() blocks the caller while the engine keeps running.
  *
  * NOTE: only ONE write may be pending (the current single-slot queue).  A
- * second submission returns MODBUS_ERR_FULL until the first completes.
+ * second submission returns mbErr_full until the first completes.
  * ========================================================================== */
 
 typedef struct {
@@ -312,9 +312,9 @@ typedef struct {
  * @brief  Resolve a point by device + name, range-check against its
  *         writeMin/writeMax, and queue an FC06 write.
  *
- *         The outcome arrives later as MB_EVT_WRITE_RESULT carrying *outId.
+ *         The outcome arrives later as mbEvt_writeResult carrying *outId.
  *
- * @return 0, or MODBUS_ERR_NOTFOUND / _RANGE / _FULL
+ * @return 0, or mbErr_notFound / _RANGE / _FULL
  */
 int  Modbus_SubmitWrite(const sModbusWriteReq *req, uint32_t *outId);
 
@@ -345,7 +345,7 @@ typedef struct {
  *         the engine keeps servicing everything else meanwhile.  BLOCKS the
  *         calling task until it completes.  Backs `modbus probe`.
  *
- *         On MODBUS_ERR_EXCEPTION, *outExc carries the Modbus exception code
+ *         On mbErr_exception, *outExc carries the Modbus exception code
  *         (1 Illegal Function, 2 Illegal Data Address, 3 Illegal Data Value) —
  *         telling those apart is the whole diagnosis on an unfamiliar slave.
  */
@@ -415,7 +415,7 @@ int  Modbus_ConfigVerify(fModbusByteSource src, void *srcCtx,
  *         affected either way, but the inactive region is overwritten
  *         regardless of outcome — see Modbus_ConfigVerify().
  *
- *         Refused (MODBUS_ERR_BUSY) while a swap is pending: the inactive
+ *         Refused (mbErr_busy) while a swap is pending: the inactive
  *         region is about to go live.
  */
 int  Modbus_ConfigCompile(fModbusByteSource src, void *srcCtx,
@@ -508,7 +508,7 @@ int  Modbus_GetMonitor(void);
  *    checked.
  *
  * 6. ptOrd and devOrd are stable only WITHIN ONE CONFIG GENERATION.  A swap
- *    raises MB_EVT_CONFIG, invalidates every cached ordinal, and is followed
+ *    raises mbEvt_config, invalidates every cached ordinal, and is followed
  *    by a fresh catalogue.  deviceId and point name are the identities that
  *    survive a config change.
  *
@@ -543,7 +543,7 @@ int  Modbus_GetMonitor(void);
  *
  * Q5  Who owns device availability?  Kept here: the >=30 s throttle on an
  *     offline device is a bus decision only this module can make, and two
- *     consumers deriving "offline" from MB_EVT_TXN would disagree with each
+ *     consumers deriving "offline" from mbEvt_txn would disagree with each
  *     other.  The strict reading of THE RULE would push it out.
  *
  * Q6  How many built-in default configs?  Solis today; JK BMS now wants one

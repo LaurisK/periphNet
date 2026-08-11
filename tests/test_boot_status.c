@@ -41,10 +41,10 @@ static void test_ensure_valid_on_blank_flash(void)
     TEST_ASSERT(BootStatus_EnsureValid() == 0);
     TEST_ASSERT(BootStatus_Read(&st) == 0);
 
-    TEST_ASSERT(st.last_fwu_result == FWU_NO_RESULT);
+    TEST_ASSERT(st.last_fwu_result == fwuRes_noResult);
     TEST_ASSERT(st.flags.word == 0xFFFFFFFFu);      /* all flags erased */
     TEST_ASSERT(BootStatus_AttemptsRemaining() == BOOT_ATTEMPTS_MAX);
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_none);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_none);
 }
 
 static void test_request_fwu_arms_install(void)
@@ -53,7 +53,7 @@ static void test_request_fwu_arms_install(void)
     TEST_ASSERT(BootStatus_EnsureValid() == 0);
 
     TEST_ASSERT(BootStatus_RequestFwu() == 0);
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_install);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_install);
 
     /* Bit-clear must not have invalidated the CRC-protected header */
     sBootStatus st;
@@ -66,32 +66,32 @@ static void test_unconfirmed_attempts_to_rollback(void)
     mock_flash_reset();
 
     /* Successful install leaves the image unconfirmed */
-    TEST_ASSERT(BootStatus_FinishFwu(FWU_OK, false) == 0);
+    TEST_ASSERT(BootStatus_FinishFwu(fwuRes_ok, false) == 0);
     TEST_ASSERT(BootStatus_IsUnconfirmed());
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_none);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_none);
     TEST_ASSERT(BootStatus_AttemptsRemaining() == 3);
 
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
     TEST_ASSERT(BootStatus_AttemptsRemaining() == 2);
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_none);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_none);
 
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
     TEST_ASSERT(BootStatus_AttemptsRemaining() == 0);
 
     /* Unconfirmed with all attempts exhausted → rollback */
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_rollback);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_rollback);
 
     sBootStatus st;
     TEST_ASSERT(BootStatus_Read(&st) == 0);
-    TEST_ASSERT(st.last_fwu_result == FWU_OK);
+    TEST_ASSERT(st.last_fwu_result == fwuRes_ok);
 }
 
 static void test_confirm_stops_attempt_counting(void)
 {
     mock_flash_reset();
 
-    TEST_ASSERT(BootStatus_FinishFwu(FWU_OK, false) == 0);
+    TEST_ASSERT(BootStatus_FinishFwu(fwuRes_ok, false) == 0);
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
@@ -99,7 +99,7 @@ static void test_confirm_stops_attempt_counting(void)
     /* Confirm just in time — no rollback even with attempts gone */
     TEST_ASSERT(BootStatus_ConfirmApp() == 0);
     TEST_ASSERT(!BootStatus_IsUnconfirmed());
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_none);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_none);
 }
 
 static void test_finish_fwu_preconfirmed(void)
@@ -107,13 +107,13 @@ static void test_finish_fwu_preconfirmed(void)
     mock_flash_reset();
 
     /* Rollback restores golden image which is known-good → pre-confirmed */
-    TEST_ASSERT(BootStatus_FinishFwu(FWU_ROLLBACK, true) == 0);
+    TEST_ASSERT(BootStatus_FinishFwu(fwuRes_rollback, true) == 0);
     TEST_ASSERT(!BootStatus_IsUnconfirmed());
-    TEST_ASSERT(BootStatus_GetFwuAction() == fwu_none);
+    TEST_ASSERT(BootStatus_GetFwuAction() == fwuAction_none);
 
     sBootStatus st;
     TEST_ASSERT(BootStatus_Read(&st) == 0);
-    TEST_ASSERT(st.last_fwu_result == FWU_ROLLBACK);
+    TEST_ASSERT(st.last_fwu_result == fwuRes_rollback);
     TEST_ASSERT(BootStatus_AttemptsRemaining() == 3);   /* attempts restored */
 }
 
@@ -131,7 +131,7 @@ static void test_corrupt_header_detected_and_recovered(void)
     /* EnsureValid must rewrite a fresh default */
     TEST_ASSERT(BootStatus_EnsureValid() == 0);
     TEST_ASSERT(BootStatus_Read(&st) == 0);
-    TEST_ASSERT(st.last_fwu_result == FWU_NO_RESULT);
+    TEST_ASSERT(st.last_fwu_result == fwuRes_noResult);
 }
 
 int main(void)

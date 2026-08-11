@@ -135,7 +135,7 @@ static void publish_point(const char *devPrefix,
         return;                      /* response too short for this point */
     }
 
-    if (pt->decodeType == MB_DECODE_ASCII) {
+    if (pt->decodeType == mbDecode_ascii) {
         int n = MbDecode_Ascii(pt, &regs[pt->offset], value, sizeof(value));
         if (n < 0) {
             return;
@@ -172,7 +172,7 @@ static void publish_point(const char *devPrefix,
             return;
         }
 
-        if (pt->decodeType == MB_DECODE_BITFIELD) {
+        if (pt->decodeType == mbDecode_bitfield) {
             snprintf(value, sizeof(value), "%u", (unsigned)(uint16_t)scaled);
         } else {
             MbFormat_Scaled(value, sizeof(value), scaled, pt->scalePow10);
@@ -223,7 +223,7 @@ static void process_pending_write(void)
 
     eModbusErr err = Modbus_WriteSingleRegister(slave, reg, val,
                                                 s_cfg.responseTimeoutMs);
-    if (err == MODBUS_OK) {
+    if (err == mbErr_ok) {
         TRice("Modbus: wrote reg %u = %u\n", reg, val);
     } else {
         TRice("Modbus: write reg %u failed (%d)\n", reg, (int)err);
@@ -268,7 +268,7 @@ static void walk_lap(void)
 
             if (due) {
                 eModbusErr err =
-                    (txn.functionCode == MB_FC_HOLDING)
+                    (txn.functionCode == mbFc_holding)
                         ? Modbus_ReadHoldingRegisters(dev.slaveAddr,
                                                       txn.startAddr, txn.count,
                                                       s_regBuf,
@@ -282,7 +282,7 @@ static void walk_lap(void)
                     s_lastPollTick[txnOrd] = 1u;   /* keep 0 = never */
                 }
 
-                if (err == MODBUS_OK) {
+                if (err == mbErr_ok) {
                     s_pollCount++;
                     device_mark_result(devOrd, dev.topicPrefix, 1);
                     devOffline = 0;

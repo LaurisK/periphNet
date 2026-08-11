@@ -37,22 +37,23 @@ extern "C" {
  * ========================================================================== */
 
 typedef enum {
-    MB_DECODE_END        = 0,   /* sentinel: end of this transaction's points */
-    MB_DECODE_U16        = 1,
-    MB_DECODE_S16        = 2,
-    MB_DECODE_U32_BE     = 3,
-    MB_DECODE_U32_LE     = 4,
-    MB_DECODE_S32_BE     = 5,
-    MB_DECODE_S32_LE     = 6,
-    MB_DECODE_FLOAT32_BE = 7,
-    MB_DECODE_FLOAT32_LE = 8,
-    MB_DECODE_BITFIELD   = 9,
-    MB_DECODE_ASCII      = 10,
+    mbDecode_end        = 0,   /* sentinel: end of this transaction's points */
+    mbDecode_u16        = 1,
+    mbDecode_s16        = 2,
+    mbDecode_u32Be     = 3,
+    mbDecode_u32Le     = 4,
+    mbDecode_s32Be     = 5,
+    mbDecode_s32Le     = 6,
+    mbDecode_float32Be = 7,
+    mbDecode_float32Le = 8,
+    mbDecode_bitfield   = 9,
+    mbDecode_ascii      = 10,
+    mbDecode_last               /* sentinel — not a stored value */
 } eModbusDecodeType;
 
 typedef enum {
-    MB_FC_HOLDING = 3,
-    MB_FC_INPUT   = 4,
+    mbFc_holding = 3,
+    mbFc_input   = 4,
 } eModbusFunctionCode;
 
 #define MB_POINT_FLAG_WRITABLE   (1u << 0)
@@ -129,18 +130,18 @@ typedef struct __attribute__((packed)) {
 static inline uint8_t MbRecords_RegWidth(uint8_t decodeType, uint8_t asciiLen)
 {
     switch (decodeType) {
-    case MB_DECODE_U16:
-    case MB_DECODE_S16:
-    case MB_DECODE_BITFIELD:
+    case mbDecode_u16:
+    case mbDecode_s16:
+    case mbDecode_bitfield:
         return 1;
-    case MB_DECODE_U32_BE:
-    case MB_DECODE_U32_LE:
-    case MB_DECODE_S32_BE:
-    case MB_DECODE_S32_LE:
-    case MB_DECODE_FLOAT32_BE:
-    case MB_DECODE_FLOAT32_LE:
+    case mbDecode_u32Be:
+    case mbDecode_u32Le:
+    case mbDecode_s32Be:
+    case mbDecode_s32Le:
+    case mbDecode_float32Be:
+    case mbDecode_float32Le:
         return 2;
-    case MB_DECODE_ASCII:
+    case mbDecode_ascii:
         return asciiLen;
     default:
         return 0;

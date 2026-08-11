@@ -102,13 +102,13 @@ static void assert_worked_example_stream(void)
 
     sModbusLutHeader hdr;
     TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR,
-                             (uint8_t *)&hdr, sizeof(hdr)) == W25Q128_OK);
+                             (uint8_t *)&hdr, sizeof(hdr)) == w25q_ok);
     TEST_ASSERT(hdr.streamLen == expect.len);
 
     static uint8_t got[4096];
     TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR +
                              MODBUS_LUT_HEADER_SIZE,
-                             got, expect.len) == W25Q128_OK);
+                             got, expect.len) == w25q_ok);
     TEST_ASSERT_MEM_EQ(got, expect.buf, expect.len);
 }
 
@@ -175,7 +175,7 @@ static void test_scale_forms(void)
     TEST_ASSERT(MbCfg_Open(EXT_FLASH_MODBUS_LUT_A_ADDR, &c) == 0);
     TEST_ASSERT(MbCfg_NextDevice(&c, &dev) == 1);
     TEST_ASSERT(MbCfg_NextTransaction(&c, &txn) == 1);
-    TEST_ASSERT(txn.functionCode == MB_FC_HOLDING);
+    TEST_ASSERT(txn.functionCode == mbFc_holding);
     TEST_ASSERT(txn.count == 3);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);

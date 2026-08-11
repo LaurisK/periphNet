@@ -96,7 +96,7 @@ void App_DefaultTaskEntry(void)
     TRice("PeriphNet started. Heap=%u\n", xPortGetFreeHeapSize());
 
     /* External flash init + read JEDEC ID */
-    if (W25Q128_Init() == W25Q128_OK) {
+    if (W25Q128_Init() == w25q_ok) {
         W25Q128_ID_t id;
         W25Q128_ReadID(&id);
         TRice("Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\n",

@@ -16,13 +16,13 @@ extern "C" {
  * @brief Reset cause flags (subset of RCC_CSR reset flags)
  */
 typedef enum {
-    eRst_pin  = 0x01,  /*!< NRST pin reset     */
-    eRst_por  = 0x02,  /*!< Power-on reset     */
-    eRst_sw   = 0x04,  /*!< Software reset     */
-    eRst_iwdg = 0x08,  /*!< IWDG reset         */
-    eRst_wwdg = 0x10,  /*!< WWDG reset         */
-    eRst_bor  = 0x20,  /*!< BOR reset          */
-    eRst_lpwr = 0x40,  /*!< Low-power reset    */
+    sysRst_pin  = 0x01,  /*!< NRST pin reset     */
+    sysRst_por  = 0x02,  /*!< Power-on reset     */
+    sysRst_sw   = 0x04,  /*!< Software reset     */
+    sysRst_iwdg = 0x08,  /*!< IWDG reset         */
+    sysRst_wwdg = 0x10,  /*!< WWDG reset         */
+    sysRst_bor  = 0x20,  /*!< BOR reset          */
+    sysRst_lpwr = 0x40,  /*!< Low-power reset    */
 } eResetCause;
 
 /**

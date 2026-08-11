@@ -152,7 +152,7 @@ so nobody reads it as current:
 | contract 6: ordinals valid within one generation | both ordinals are authored identities | step 2 |
 | `OPEN Q2` / `Q3` / `Q4` comments | closed, §2.15 | steps 1-2 |
 | `Modbus_SubmitWrite(sModbusWriteReq*, id)`, one point, async id | `Modbus_Request(devOrd, ids, values, count, timeout_ms, cb, ctx)`, §2.9a | step 1 shape, step 11 engine |
-| `MB_EVT_WRITE_RESULT`, `MB_WRITE_NO_POINT` | deleted — the outcome goes to the requester's callback | step 11 |
+| `mbEvt_writeResult`, `MB_WRITE_NO_POINT` | deleted — the outcome goes to the requester's callback | step 11 |
 | `Modbus_ConfigReset`, and `Modbus_Init` "provisions the built-in default" | `Modbus_ConfigErase`; no built-in exists, invalid regions are erased, §2.15 Q6 | step 6 |
 | `sModbusPointDesc`: `MB_PT_WRITABLE`, `int16_t` bounds, no period | access bits (`MB_PT_READ`/`MB_PT_WRITE`), `int32_t` bounds, `period_sec` (0 = unmonitored), §2.6/§2.11 | step 6 |
 | `Modbus_SubmitRawWrite`, `Modbus_ForceRefresh` | both deleted, §2.9a / §2.7 | step 11 |
@@ -167,8 +167,8 @@ so nobody reads it as current:
 | Configuration | `Modbus_ConfigVerify` · `Compile` · `Apply` · `Erase` · `Export` · `Status` |
 | Diagnostics | `Modbus_Stats` · `LogStatus` · `SetMonitor`/`GetMonitor` |
 
-Events: `MB_EVT_SAMPLE`, `MB_EVT_POINT_DESC`, `MB_EVT_DEVICE_STATE`,
-`MB_EVT_CONFIG`, `MB_EVT_TXN` — five, not six. `MB_EVT_WRITE_RESULT` is gone:
+Events: `mbEvt_sample`, `mbEvt_pointDesc`, `mbEvt_deviceState`,
+`mbEvt_config`, `mbEvt_txn` — five, not six. `mbEvt_writeResult` is gone:
 a write's outcome goes to the requester that asked for it, through the
 completion callback it supplied (§2.9a), not to every subscriber.
 
@@ -291,7 +291,7 @@ Consequences, all of them simplifications:
   `s_lastPublishTick[192]` and `s_hasPublished` (~1.9 KB of CCM) do not
   reappear in the MQTT bridge, because a bridge that publishes every sample
   needs no memory of the last one.
-- The MQTT bridge's `MB_EVT_SAMPLE` handler is `format → MqttBridge_Publish`,
+- The MQTT bridge's `mbEvt_sample` handler is `format → MqttBridge_Publish`,
   with no decision in it.
 - ASCII loses its CRC32 dedup — an ASCII point republishes its unchanged string
   on every read. **No shipped config has an ASCII point**, so nothing observes
@@ -351,7 +351,7 @@ of any one line. A second RS485 bus buys real throughput rather than just
 address space.
 
 **The test port replaces every test hook.** `Modbus_InjectResponse`, the
-`modbus inject` command and `MODBUS_PORT_DISABLED` all go. Where injection fed
+`modbus inject` command and `mbPort_disabled` all go. Where injection fed
 a *response* in below the port and could never show what the engine
 transmitted, the test port is the peer: the harness sees the request the engine
 actually formed — address, function code, start, count, CRC — and answers it on
@@ -650,7 +650,7 @@ int Modbus_Request(uint8_t devOrd, const uint16_t *ids, const int32_t *values,
 ```
 
 **Two parallel arrays in.** `ids[i]` is a `ptOrd`; `values[i]` is the value to
-write, in the scaled-integer domain — the same domain `MB_EVT_SAMPLE.value`
+write, in the scaled-integer domain — the same domain `mbEvt_sample.value`
 arrives in and `writeMin`/`writeMax` are authored in. One device per call:
 `devOrd` is a parameter, the ids are points of that device's capability, and the whole
 batch belongs to one sequence on one port at one baud, so "the module finished"
@@ -728,14 +728,14 @@ It has to: "the callback always fires" is what lets a caller reclaim its arrays,
 and a swap is not permitted to be the exception that strands them.
 
 **In flight: a small FIFO** of submissions, drained in arrival order. Callers
-rarely meet `MODBUS_ERR_FULL`, which matters once several consumers can write —
+rarely meet `mbErr_full`, which matters once several consumers can write —
 and it is why the borrowing rule above is stated as loudly as it is, since the
 module may be holding more than one requester's arrays at a time. Each entry
 carries its own deadline.
 
 Consequences worth naming:
 
-- **`MB_EVT_WRITE_RESULT` is deleted.** An outcome belongs to whoever asked for
+- **`mbEvt_writeResult` is deleted.** An outcome belongs to whoever asked for
   it, not to every subscriber; the event enum drops to five types.
 - **`writable: true` becomes `access`** in the JSON and two bits in the point
   record's existing `flags` byte (`MB_PT_READ`, `MB_PT_WRITE`), so it costs no
@@ -794,7 +794,7 @@ forcing case: it publishes one discovery message per point at MQTT connect time
 and cannot wait for samples — a 60 s point would take a minute, and a point on
 an offline device would never appear.
 
-So the module replays a **catalogue**: a burst of `MB_EVT_POINT_DESC`, one per
+So the module replays a **catalogue**: a burst of `mbEvt_pointDesc`, one per
 point in the subscription's scope, `last = 1` on the final entry. Delivered
 after `Modbus_Subscribe`, after every config swap, and on demand via
 `Modbus_RequestCatalogue` — which is what MQTT calls on broker connect, since
@@ -863,7 +863,7 @@ addressing both became ordinals: an id that expires every swap cannot be the
 thing a requester names. The residual risk moved rather than vanishing — a
 requester that caches ordinals across a **reordered** config writes or reads the
 wrong entry, which is the price §2.3 already documents and the reason
-`MB_EVT_CONFIG` is followed by a fresh catalogue.
+`mbEvt_config` is followed by a fresh catalogue.
 
 Four of them are load-bearing under the event-driven engine:
 
@@ -927,22 +927,22 @@ Two consequences worth stating rather than discovering:
 ### 2.13 What the consumers become
 
 ```c
-Modbus_Subscribe(MB_DEV_ALL, MB_EVT_ALL, trice_sink, NULL);
+Modbus_Subscribe(MB_DEV_ALL, mbEvt_all, trice_sink, NULL);
 
-Modbus_Subscribe(MB_DEV_ALL, MB_EVT_SAMPLE | MB_EVT_POINT_DESC |
-                             MB_EVT_DEVICE_STATE | MB_EVT_CONFIG,
+Modbus_Subscribe(MB_DEV_ALL, mbEvt_sample | mbEvt_pointDesc |
+                             mbEvt_deviceState | mbEvt_config,
                  mqtt_modbus_cb, NULL);
 
-Modbus_Subscribe(0x0F, MB_EVT_SAMPLE | MB_EVT_DEVICE_STATE,
+Modbus_Subscribe(0x0F, mbEvt_sample | mbEvt_deviceState,
                  bms_fusion_cb, NULL);      /* four packs, one subscription */
 ```
 
-- `MB_EVT_POINT_DESC` → one HA discovery message per point;
+- `mbEvt_pointDesc` → one HA discovery message per point;
   `Modbus_RequestCatalogue()` on broker connect re-drives it.
-- `MB_EVT_SAMPLE` → copy into an allocation, post to `mqttTask`, and format +
+- `mbEvt_sample` → copy into an allocation, post to `mqttTask`, and format +
   `MqttBridge_Publish` there (§2.12a). No decision, no state.
-- `MB_EVT_DEVICE_STATE` → the retained `<topicPrefix>/availability` topic.
-- `MB_EVT_CONFIG` → nothing to do; the catalogue that follows carries the new
+- `mbEvt_deviceState` → the retained `<topicPrefix>/availability` topic.
+- `mbEvt_config` → nothing to do; the catalogue that follows carries the new
   point set.
 - Inbound `<topicPrefix>/<name>/set` → resolve the name to `{devOrd, ptOrd}`
   against the map built from the catalogue, then `Modbus_Request` with `count = 1`
@@ -998,7 +998,7 @@ answer arrives, which is what makes "the next open decision" unambiguous.
   rather than pending, and kept because its answer is contested: the module
   owns it, because the retry
   throttle is a bus decision only the module can make and two consumers deriving
-  "offline" from `MB_EVT_TXN` independently would disagree with each other. The
+  "offline" from `mbEvt_txn` independently would disagree with each other. The
   strict reading of §2.2 would push it out.
 
 **Q6 closed 2026-08-11 — the firmware carries no built-in config at all.** The
@@ -1260,7 +1260,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t  count;           /* register block length; 0 = end-of-txns.
                                  Compiler-derived, never authored.         */
-    uint8_t  functionCode;    /* MB_FC_HOLDING(3) | MB_FC_INPUT(4)         */
+    uint8_t  functionCode;    /* mbFc_holding(3) | mbFc_input(4)         */
     uint16_t startAddr;       /* wire register address                     */
     uint16_t readPeriodS;     /* caps at 18h12m — see §7                   */
 } sModbusTransactionRecord;                                   /* 6 bytes */
@@ -1870,7 +1870,7 @@ bottom is the genuinely undesigned part.
 |---|---|---|
 | One physical bus, hardcoded `huart2` | `modbus_rtu.c` throughout; `modbus_walker.h:23`, applied at `modbus_walker.c:328` | §2.5 — ports become a serviced set |
 | One baud for the whole bus | same | §2.6 — a device parameter |
-| `MODBUS_PORT_UART6` in the enum but refused (pins not confirmed in the schematic) | `modbus_rtu.c:289` | §2.5 — an unpopulated port is simply absent; the schematic question remains |
+| `mbPort_uart6` in the enum but refused (pins not confirmed in the schematic) | `modbus_rtu.c:289` | §2.5 — an unpopulated port is simply absent; the schematic question remains |
 | Framing constants sized for 9600 — 4 ms gap, 5 ms silence | `modbus_rtu.c:122`, `:156` | §2.5/§2.6 — derived from baud, inside the port |
 | Write address assumed `startAddr + offset`; JK registers are byte-addressed | `modbus_config_store.c:334` (live); `mqtt_bridge.c:377` computes the same expression but `ha_publish_entity` discards it (`(void)regAddr`) — dead, not a second bug | §2.6 — address stride on the type; the dead one goes when MQTT stops walking the config |
 | A **writable point is never checked against its transaction's function code** — marking a point on an `input` transaction writable compiles clean, and the FC06 write then lands on a *holding* register of the same number, a different register in a different space | `modbus_config_compiler.c:605-609` validates width only; the shipped config is correct by authorship, not by validation | §2.9a — `w`/`rw` access requires a `holding` transaction, rejected at compile |
@@ -2007,7 +2007,7 @@ being re-posed:
     callback" is livable. A timed-out request is abandoned, never written into
     afterwards.
 
-    Four things fell out rather than being decided: `MB_EVT_WRITE_RESULT` is
+    Four things fell out rather than being decided: `mbEvt_writeResult` is
     deleted (an outcome belongs to its requester, not to every subscriber),
     `writeMin`/`writeMax` widen to `int32_t` to match the value domain,
     `MbCfg_FindWritablePoint()` disappears because the catalogue already is the
@@ -2029,7 +2029,7 @@ being re-posed:
 
 17. *Two calls deleted on review* — the clarifications above left both
     stranded. `Modbus_SubmitRawWrite` lost its result path when
-    `MB_EVT_WRITE_RESULT` went, and reviewing it exposed the deeper problem:
+    `mbEvt_writeResult` went, and reviewing it exposed the deeper problem:
     it is a hole through the access model §2.9a is built on, and unlike
     `Modbus_Probe` its blast radius is a device that gets a setpoint nobody
     authorised. `Modbus_ForceRefresh` was defined as "mark every transaction

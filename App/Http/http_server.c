@@ -452,7 +452,7 @@ static void handle_image_download(struct netconn *conn)
 {
     const sImageStoreState *st = ImgStore_GetState();
 
-    if (st->status != IMG_STORE_READY || !st->blob.valid) {
+    if (st->status != imgStore_ready || !st->blob.valid) {
         send_body(conn, "404 Not Found", "text/plain",
                   "No image available for download\r\n");
         return;
@@ -496,11 +496,11 @@ static void handle_image_info(struct netconn *conn)
 
     const char *status_str;
     switch (st->status) {
-        case IMG_STORE_EMPTY:       status_str = "empty";       break;
-        case IMG_STORE_UPLOADING:   status_str = "uploading";   break;
-        case IMG_STORE_READY:       status_str = "ready";       break;
-        case IMG_STORE_DOWNLOADING: status_str = "downloading"; break;
-        case IMG_STORE_ERROR:       status_str = "error";       break;
+        case imgStore_empty:       status_str = "empty";       break;
+        case imgStore_uploading:   status_str = "uploading";   break;
+        case imgStore_ready:       status_str = "ready";       break;
+        case imgStore_downloading: status_str = "downloading"; break;
+        case imgStore_error:       status_str = "error";       break;
         default:                    status_str = "unknown";     break;
     }
 
@@ -546,10 +546,10 @@ static void handle_image_info(struct netconn *conn)
 static void handle_image_delete(struct netconn *conn)
 {
     switch (ImgStore_Delete()) {
-    case IMG_STORE_OK:
+    case imgRes_ok:
         send_json(conn, "200 OK", "{\"status\":\"deleted\"}");
         break;
-    case IMG_STORE_BUSY:
+    case imgRes_busy:
         send_json(conn, "409 Conflict",
                   "{\"error\":\"image in use (transfer or FWU)\"}");
         break;
@@ -572,7 +572,7 @@ static void handle_fwu_status(struct netconn *conn)
     bool     bs_ok       = (BootStatus_Read(&bs) == 0);
     bool     unconfirmed = BootStatus_IsUnconfirmed();
     uint8_t  attempts    = BootStatus_AttemptsRemaining();
-    uint32_t last_result = bs_ok ? bs.last_fwu_result : (uint32_t)FWU_NO_RESULT;
+    uint32_t last_result = bs_ok ? bs.last_fwu_result : (uint32_t)fwuRes_noResult;
 
     const sBlobInfo *golden = FwuCtl_GetGolden();
     char golden_field[32];
@@ -609,7 +609,7 @@ static void handle_fwu_status(struct netconn *conn)
 static void handle_fwu_install(struct netconn *conn)
 {
     switch (FwuCtl_RequestInstall()) {
-    case FWU_CTL_OK: {
+    case fwuCtlRes_ok: {
         const sImageStoreState *st = ImgStore_GetState();
         TRice("FWU: install requested, rebooting\n");
         snprintf(resp_buf, sizeof(resp_buf),
@@ -619,11 +619,11 @@ static void handle_fwu_install(struct netconn *conn)
         send_json(conn, "200 OK", resp_buf);
         break;
     }
-    case FWU_CTL_NO_IMAGE:
+    case fwuCtlRes_noImage:
         send_json(conn, "409 Conflict",
                   "{\"error\":\"no image available\"}");
         break;
-    case FWU_CTL_BUSY:
+    case fwuCtlRes_busy:
         send_json(conn, "409 Conflict",
                   "{\"error\":\"golden promotion in progress\"}");
         break;
@@ -638,14 +638,14 @@ static void handle_fwu_confirm(struct netconn *conn)
 {
     bool promote;
     switch (FwuCtl_Confirm(&promote)) {
-    case FWU_CTL_OK:
+    case fwuCtlRes_ok:
         TRice("FWU: confirmed (promote=%d)\n", (int)promote);
         snprintf(resp_buf, sizeof(resp_buf),
                  "{\"status\":\"confirmed\",\"promote\":%s}",
                  promote ? "true" : "false");
         send_json(conn, "200 OK", resp_buf);
         break;
-    case FWU_CTL_ALREADY:
+    case fwuCtlRes_already:
         send_json(conn, "200 OK", "{\"status\":\"already_confirmed\"}");
         break;
     default:
@@ -661,10 +661,10 @@ static void handle_fwu_verify(struct netconn *conn)
 
     const char *reason = NULL;
     switch (res) {
-        case FWU_OK:             break;
-        case FWU_ERR_WRONG_MAGIC: reason = "no app header";      break;
-        case FWU_ERR_IMAGE_SIZE:  reason = "unsigned image";     break;
-        case FWU_ERR_NO_IMAGE:    reason = "BL API unavailable"; break;
+        case fwuRes_ok:             break;
+        case fwuRes_errWrongMagic: reason = "no app header";      break;
+        case fwuRes_errImageSize:  reason = "unsigned image";     break;
+        case fwuRes_errNoImage:    reason = "BL API unavailable"; break;
         default:                  reason = "HMAC mismatch";      break;
     }
 

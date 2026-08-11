@@ -27,7 +27,7 @@ bool ImgMgmt_GetVersion(uint32_t base, bool is_external, sFwVerArea *out);
  * @param is_external  true = external SPI flash, false = internal flash.
  * @param work_buf     Scratch buffer (>= 256 bytes).
  * @param buf_size     Size of work_buf.
- * @return FWU_OK if image is valid.
+ * @return fwuRes_ok if image is valid.
  */
 eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external, uint8_t *work_buf, uint32_t buf_size);
 
@@ -36,7 +36,7 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external, uint8_t *work_buf, uin
  *
  * @param current_ver  Currently running firmware version.
  * @param incoming_ver Candidate firmware version (from staged image).
- * @return FWU_OK if compatible.
+ * @return fwuRes_ok if compatible.
  */
 eFwuRes ImgMgmt_CheckVerForFwu(const sFwVerArea *current_ver, const sFwVerArea *incoming_ver);
 

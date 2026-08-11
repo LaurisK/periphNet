@@ -138,17 +138,17 @@ static inline void ts_build_worked_example(sTestStream *s)
 
     ts_device(s, 1, "periphnet");
     /* count derived: max(offset + width) = 7 + 1 = 8 */
-    ts_txn(s, 8, MB_FC_INPUT, 3132, 5);
+    ts_txn(s, 8, mbFc_input, 3132, 5);
 
-    p = ts_mkpoint(MB_DECODE_U16, 0, -1, TS_UNIT_V, "battery_voltage");
+    p = ts_mkpoint(mbDecode_u16, 0, -1, TS_UNIT_V, "battery_voltage");
     ts_point(s, &p);
-    p = ts_mkpoint(MB_DECODE_S16, 1, -1, TS_UNIT_A, "battery_current");
+    p = ts_mkpoint(mbDecode_s16, 1, -1, TS_UNIT_A, "battery_current");
     ts_point(s, &p);
-    p = ts_mkpoint(MB_DECODE_U16, 6, 0, TS_UNIT_PCT, "battery_soc");
+    p = ts_mkpoint(mbDecode_u16, 6, 0, TS_UNIT_PCT, "battery_soc");
     p.publishThreshold  = 1;
     p.publishHeartbeatS = 300;
     ts_point(s, &p);
-    p = ts_mkpoint(MB_DECODE_U16, 7, 0, TS_UNIT_PCT, "overdischarge_soc_set");
+    p = ts_mkpoint(mbDecode_u16, 7, 0, TS_UNIT_PCT, "overdischarge_soc_set");
     p.flags    = MB_POINT_FLAG_WRITABLE;
     p.writeMin = 5;
     p.writeMax = 40;
@@ -157,8 +157,8 @@ static inline void ts_build_worked_example(sTestStream *s)
     ts_end_txns(s);
 
     ts_device(s, 2, "periphnet_meter");
-    ts_txn(s, 2, MB_FC_INPUT, 0, 5);
-    p = ts_mkpoint(MB_DECODE_FLOAT32_BE, 0, 0, TS_UNIT_W, "power");
+    ts_txn(s, 2, mbFc_input, 0, 5);
+    p = ts_mkpoint(mbDecode_float32Be, 0, 0, TS_UNIT_W, "power");
     ts_point(s, &p);
     ts_end_points(s);
     ts_end_txns(s);

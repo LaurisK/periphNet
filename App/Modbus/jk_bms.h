@@ -61,16 +61,16 @@ typedef struct {
  * @brief  One-shot DeviceInfo read — proves the BMS is present and talking.
  *
  *         Takes over USART2 for the duration (init at `baud`, transact,
- *         deinit), so it is refused with MODBUS_ERR_BUSY while the walker is
+ *         deinit), so it is refused with mbErr_busy while the walker is
  *         running — stop the walker first.  Blocks for at most ~2x timeoutMs.
  *
  * @param  slave      Modbus slave address (JK default 1)
  * @param  baud       Bus baud rate (JK PB default 115200)
  * @param  timeoutMs  Response timeout
- * @param  out        Filled in on MODBUS_OK; untouched otherwise
- * @return MODBUS_OK, or an eModbusErr.  On MODBUS_ERR_EXCEPTION the slave
+ * @param  out        Filled in on mbErr_ok; untouched otherwise
+ * @return mbErr_ok, or an eModbusErr.  On mbErr_exception the slave
  *         answered but rejected the request — Modbus_LastException() says why.
- *         MODBUS_ERR_BUSY also covers a bad argument (NULL out, slave out of
+ *         mbErr_busy also covers a bad argument (NULL out, slave out of
  *         range); eModbusErr has no parameter-error code.
  */
 eModbusErr JkBms_Probe(uint8_t slave, uint32_t baud, uint32_t timeoutMs,

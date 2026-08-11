@@ -32,7 +32,7 @@ static int bl_verify_internal_app(void)
 
     eFwuRes res = ImgMgmt_Validate(APPLICATION_START_ADDR, false,
                                    work_buf, sizeof(work_buf));
-    if (res != FWU_OK) {
+    if (res != fwuRes_ok) {
         return BL_WRONG_MAGIC;
     }
 
@@ -76,7 +76,7 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
                                      const uint8_t expected[DFU_HMAC_SIZE])
 {
     if (size == 0 || !expected) {
-        return FWU_ERR_IMAGE_HMAC;
+        return fwuRes_errImageHmac;
     }
 
     /* Check for all-0xFF placeholder (unsigned image) */
@@ -88,7 +88,7 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
         }
     }
     if (all_ff) {
-        return FWU_OK;  /* unsigned image, skip verification */
+        return fwuRes_ok;  /* unsigned image, skip verification */
     }
 
     sHmacSha256Ctx ctx;
@@ -105,8 +105,8 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
 
         /* Read from flash */
         if (is_external) {
-            if (W25Q128_Read(flash_addr + offset, chunk, n) != W25Q128_OK) {
-                return FWU_ERR_FLASH_READ;
+            if (W25Q128_Read(flash_addr + offset, chunk, n) != w25q_ok) {
+                return fwuRes_errFlashRead;
             }
         } else {
             memcpy(chunk, (const void *)(flash_addr + offset), n);
@@ -136,7 +136,7 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
         diff |= computed[i] ^ expected[i];
     }
 
-    return (diff == 0) ? FWU_OK : FWU_ERR_IMAGE_HMAC;
+    return (diff == 0) ? fwuRes_ok : fwuRes_errImageHmac;
 }
 
 /* --------------------------------------------------------------------------
@@ -149,11 +149,11 @@ eFwuRes bl_verify_image_hmac(uint32_t flash_addr, bool is_external,
 static eFwuRes bl_decrypt_blob(uint8_t *data, uint32_t size)
 {
     if (!data || size <= AES_GCM_IV_SIZE + AES_GCM_TAG_SIZE) {
-        return FWU_ERR_DECRYPT;
+        return fwuRes_errDecrypt;
     }
 
     return aes_gcm_decrypt(GLB_blKey, data, size, NULL, 0)
-        ? FWU_OK : FWU_ERR_DECRYPT;
+        ? fwuRes_ok : fwuRes_errDecrypt;
 }
 
 /* --------------------------------------------------------------------------

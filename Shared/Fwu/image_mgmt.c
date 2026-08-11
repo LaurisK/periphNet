@@ -41,7 +41,7 @@ uint32_t ImgMgmt_Crc32(const uint8_t *data, uint32_t len)
 static bool flash_read(uint32_t addr, bool is_external, void *buf, uint32_t len)
 {
     if (is_external) {
-        return W25Q128_Read(addr, (uint8_t *)buf, len) == W25Q128_OK;
+        return W25Q128_Read(addr, (uint8_t *)buf, len) == w25q_ok;
     }
 
     /* Internal flash — memory-mapped */
@@ -76,7 +76,7 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
                          uint8_t *work_buf, uint32_t buf_size)
 {
     if (!work_buf || buf_size < sizeof(sAppInfo)) {
-        return FWU_ERR_IMAGE_SIZE;
+        return fwuRes_errImageSize;
     }
 
     sAppInfo *info = (sAppInfo *)work_buf;
@@ -84,21 +84,21 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
     /* Read app info header */
     if (!flash_read(base + FW_OFFSET_APP_HEADER, is_external,
                     info, sizeof(sAppInfo))) {
-        return FWU_ERR_FLASH_READ;
+        return fwuRes_errFlashRead;
     }
 
     /* Check magic */
     if (info->magic != APP_INFO_MAGIC) {
-        return FWU_ERR_WRONG_MAGIC;
+        return fwuRes_errWrongMagic;
     }
 
     /* Check image size bounds.
      * 0xFFFFFFFF = unpatched placeholder (no post-build tool yet) — allowed. */
     if (info->image_size == 0) {
-        return FWU_ERR_IMAGE_SIZE;
+        return fwuRes_errImageSize;
     }
     if (info->image_size != 0xFFFFFFFFu && info->image_size > APPLICATION_SIZE) {
-        return FWU_ERR_IMAGE_SIZE;
+        return fwuRes_errImageSize;
     }
 
     /* ---- HMAC verification ---- */
@@ -125,8 +125,8 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
             eFwuRes hmac_res = bl_verify_image_hmac(base, false,
                                                      info->image_size,
                                                      info->image_hmac);
-            if (hmac_res != FWU_OK) {
-                return FWU_ERR_IMAGE_HMAC;
+            if (hmac_res != fwuRes_ok) {
+                return fwuRes_errImageHmac;
             }
 #else
             const sBootloaderApi *bl_api =
@@ -136,15 +136,15 @@ eFwuRes ImgMgmt_Validate(uint32_t base, bool is_external,
                 bl_api->verify_image_hmac != NULL) {
                 eFwuRes hmac_res = bl_api->verify_image_hmac(
                     base, false, info->image_size, info->image_hmac);
-                if (hmac_res != FWU_OK) {
-                    return FWU_ERR_IMAGE_HMAC;
+                if (hmac_res != fwuRes_ok) {
+                    return fwuRes_errImageHmac;
                 }
             }
 #endif
         }
     }
 
-    return FWU_OK;
+    return fwuRes_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -155,7 +155,7 @@ eFwuRes ImgMgmt_CheckVerForFwu(const sFwVerArea *current_ver,
                                 const sFwVerArea *incoming_ver)
 {
     if (!current_ver || !incoming_ver) {
-        return FWU_ERR_NO_IMAGE;
+        return fwuRes_errNoImage;
     }
 
     return ver_checkCompatibility(&current_ver->ver, &incoming_ver->ver);

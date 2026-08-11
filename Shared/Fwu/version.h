@@ -24,7 +24,7 @@ void ver_toString(const sFwVer *ver, char *buf, uint8_t size);
  *
  * @param current   Currently running version.
  * @param incoming  Candidate version.
- * @return FWU_OK if compatible, error code otherwise.
+ * @return fwuRes_ok if compatible, error code otherwise.
  */
 eFwuRes ver_checkCompatibility(const sFwVer *current, const sFwVer *incoming);
 

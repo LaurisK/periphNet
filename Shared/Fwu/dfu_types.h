@@ -55,25 +55,25 @@ _Static_assert(sizeof(sFwVerArea) == FW_VER_AREA_SIZE, "sFwVerArea size mismatch
  * ========================================================================== */
 
 typedef enum {
-    FWU_OK                  = 0,
-    FWU_ERR_IMAGE_SIZE      = 1,
-    FWU_ERR_IMAGE_HMAC      = 2,
-    FWU_ERR_VER_NOT_NEWER   = 3,
-    FWU_ERR_VER_DEVICE_TYPE = 4,
-    FWU_ERR_VER_HW_ID       = 5,
-    FWU_ERR_FLASH_READ      = 6,
-    FWU_ERR_FLASH_WRITE     = 7,
-    FWU_ERR_NO_IMAGE        = 8,
-    FWU_ERR_INSTALL         = 9,
-    FWU_ERR_DECRYPT         = 10,
-    FWU_ERR_BOOT_STATUS     = 11,
-    FWU_ERR_WRONG_MAGIC     = 12,
-    FWU_ROLLBACK            = 13,
-    FWU_ERR_MANIFEST        = 14,   /* blob manifest inconsistent           */
-    FWU_ERR_BLOB_CRC        = 15,   /* blob CRC32 mismatch (torn transfer)  */
-    FWU_ERR_AUTH_TAG        = 16,   /* AES-GCM authentication tag mismatch  */
+    fwuRes_ok                  = 0,
+    fwuRes_errImageSize      = 1,
+    fwuRes_errImageHmac      = 2,
+    fwuRes_errVerNotNewer   = 3,
+    fwuRes_errVerDeviceType = 4,
+    fwuRes_errVerHwId       = 5,
+    fwuRes_errFlashRead      = 6,
+    fwuRes_errFlashWrite     = 7,
+    fwuRes_errNoImage        = 8,
+    fwuRes_errInstall         = 9,
+    fwuRes_errDecrypt         = 10,
+    fwuRes_errBootStatus     = 11,
+    fwuRes_errWrongMagic     = 12,
+    fwuRes_rollback            = 13,
+    fwuRes_errManifest        = 14,   /* blob manifest inconsistent           */
+    fwuRes_errBlobCrc        = 15,   /* blob CRC32 mismatch (torn transfer)  */
+    fwuRes_errAuthTag        = 16,   /* AES-GCM authentication tag mismatch  */
 
-    FWU_NO_RESULT           = 0xFF, /* last_fwu_result: no FWU attempted    */
+    fwuRes_noResult           = 0xFF, /* last_fwu_result: no FWU attempted    */
 } eFwuRes;
 
 /* ==========================================================================
@@ -124,7 +124,7 @@ typedef struct {
     uint32_t    magic;                      /* BOOT_STATUS_MAGIC             */
     uint32_t    version;                    /* BOOT_STATUS_VERSION           */
     uint32_t    last_fwu_result;            /* eFwuRes of last BL install /
-                                               rollback, FWU_NO_RESULT once
+                                               rollback, fwuRes_noResult once
                                                none was attempted            */
     uint32_t    header_crc32;               /* CRC32(magic..last_fwu_result) */
     sBootFlags  flags;                      /* boot flags (outside CRC!)     */
@@ -135,9 +135,10 @@ typedef struct {
  * ========================================================================== */
 
 typedef enum {
-    fwu_none = 0,           /* normal boot                              */
-    fwu_install,            /* install staged image from ext flash       */
-    fwu_rollback,           /* boot attempts exhausted → rollback        */
+    fwuAction_none = 0,           /* normal boot                              */
+    fwuAction_install,            /* install staged image from ext flash       */
+    fwuAction_rollback,
+    fwuAction_last          /* sentinel */           /* boot attempts exhausted → rollback        */
 } eFwuAction;
 
 /* ==========================================================================

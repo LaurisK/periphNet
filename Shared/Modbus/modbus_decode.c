@@ -25,29 +25,29 @@ int32_t MbDecode_Scaled(const sModbusPointRecord *p, const uint16_t *regs)
     uint32_t u;
 
     switch (p->decodeType) {
-    case MB_DECODE_U16:
-    case MB_DECODE_BITFIELD:
+    case mbDecode_u16:
+    case mbDecode_bitfield:
         return (int32_t)regs[0];
-    case MB_DECODE_S16:
+    case mbDecode_s16:
         return (int32_t)(int16_t)regs[0];
-    case MB_DECODE_U32_BE:
+    case mbDecode_u32Be:
         u = ((uint32_t)regs[0] << 16) | regs[1];
         return clamp_i64((int64_t)u);
-    case MB_DECODE_U32_LE:
+    case mbDecode_u32Le:
         u = ((uint32_t)regs[1] << 16) | regs[0];
         return clamp_i64((int64_t)u);
-    case MB_DECODE_S32_BE:
+    case mbDecode_s32Be:
         u = ((uint32_t)regs[0] << 16) | regs[1];
         return (int32_t)u;
-    case MB_DECODE_S32_LE:
+    case mbDecode_s32Le:
         u = ((uint32_t)regs[1] << 16) | regs[0];
         return (int32_t)u;
-    case MB_DECODE_FLOAT32_BE:
-    case MB_DECODE_FLOAT32_LE: {
+    case mbDecode_float32Be:
+    case mbDecode_float32Le: {
         /* The single permitted float step (design §8): decode the IEEE754
          * wire value, quantize into the scaled-int domain, never let float
          * propagate further. */
-        u = (p->decodeType == MB_DECODE_FLOAT32_BE)
+        u = (p->decodeType == mbDecode_float32Be)
                 ? (((uint32_t)regs[0] << 16) | regs[1])
                 : (((uint32_t)regs[1] << 16) | regs[0]);
         float f;

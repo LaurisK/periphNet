@@ -42,11 +42,12 @@
 #define W25Q128_ERASE_TIMEOUT_MS        5000
 
 typedef enum {
-    W25Q128_OK = 0,
-    W25Q128_ERROR = 1,
-    W25Q128_BUSY = 2,
-    W25Q128_TIMEOUT = 3
-} W25Q128_Status_t;
+    w25q_ok = 0,
+    w25q_error = 1,
+    w25q_busy = 2,
+    w25q_timeout = 3,
+    w25q_last          /* sentinel */
+} eW25qStatus;
 
 typedef struct {
     uint8_t manufacturer_id;
@@ -56,18 +57,18 @@ typedef struct {
 
 extern SPI_HandleTypeDef W25Q128_SPI_HANDLE;
 
-W25Q128_Status_t W25Q128_Init(void);
-W25Q128_Status_t W25Q128_ReadID(W25Q128_ID_t *id);
-W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len);
-W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len);
-W25Q128_Status_t W25Q128_EraseSector(uint32_t addr);
-W25Q128_Status_t W25Q128_EraseBlock32K(uint32_t addr);
-W25Q128_Status_t W25Q128_EraseBlock64K(uint32_t addr);
-W25Q128_Status_t W25Q128_EraseChip(void);
+eW25qStatus W25Q128_Init(void);
+eW25qStatus W25Q128_ReadID(W25Q128_ID_t *id);
+eW25qStatus W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len);
+eW25qStatus W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len);
+eW25qStatus W25Q128_EraseSector(uint32_t addr);
+eW25qStatus W25Q128_EraseBlock32K(uint32_t addr);
+eW25qStatus W25Q128_EraseBlock64K(uint32_t addr);
+eW25qStatus W25Q128_EraseChip(void);
 bool W25Q128_IsBusy(void);
-W25Q128_Status_t W25Q128_WaitReady(uint32_t timeout_ms);
-W25Q128_Status_t W25Q128_PowerDown(void);
-W25Q128_Status_t W25Q128_WakeUp(void);
-W25Q128_Status_t W25Q128_Reset(void);
+eW25qStatus W25Q128_WaitReady(uint32_t timeout_ms);
+eW25qStatus W25Q128_PowerDown(void);
+eW25qStatus W25Q128_WakeUp(void);
+eW25qStatus W25Q128_Reset(void);
 
 #endif /* W25Q128_H */

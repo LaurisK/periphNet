@@ -8,8 +8,8 @@
  *
  * Usage:
  *   Cmd_Init();                              // call once from a task
- *   Cmd_Feed(CMD_SRC_USB, data, len);        // call from USB CDC RX callback
- *   Cmd_Feed(CMD_SRC_UART, &byte, 1);       // call from UART RX callback
+ *   Cmd_Feed(cmdSrc_usb, data, len);        // call from USB CDC RX callback
+ *   Cmd_Feed(cmdSrc_uart, &byte, 1);       // call from UART RX callback
  *
  * Available commands:
  *   peripherals   — list device peripherals (stub: "n/a")
@@ -23,9 +23,9 @@
 #include <stddef.h>
 
 typedef enum {
-    CMD_SRC_USB,
-    CMD_SRC_UART,
-    CMD_SRC_COUNT
+    cmdSrc_usb,
+    cmdSrc_uart,
+    cmdSrc_last
 } eCmdSrc;
 
 /**

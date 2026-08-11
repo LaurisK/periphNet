@@ -29,7 +29,7 @@ static uint32_t sel_header_crc(const sMbSelector *sel)
 static int sel_read(sMbSelector *sel)
 {
     if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR,
-                     (uint8_t *)sel, sizeof(*sel)) != W25Q128_OK) {
+                     (uint8_t *)sel, sizeof(*sel)) != w25q_ok) {
         return -1;
     }
 
@@ -45,11 +45,11 @@ static int sel_read(sMbSelector *sel)
 
 static int sel_write(const sMbSelector *sel)
 {
-    if (W25Q128_EraseSector(EXT_FLASH_MODBUS_SEL_ADDR) != W25Q128_OK) {
+    if (W25Q128_EraseSector(EXT_FLASH_MODBUS_SEL_ADDR) != w25q_ok) {
         return -1;
     }
     if (W25Q128_WritePage(EXT_FLASH_MODBUS_SEL_ADDR,
-                          (const uint8_t *)sel, sizeof(*sel)) != W25Q128_OK) {
+                          (const uint8_t *)sel, sizeof(*sel)) != w25q_ok) {
         return -1;
     }
     return 0;
@@ -115,7 +115,7 @@ bool MbCfgStore_RegionValid(uint32_t base)
 {
     sModbusLutHeader hdr;
 
-    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != W25Q128_OK) {
+    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != w25q_ok) {
         return false;
     }
 
@@ -135,7 +135,7 @@ bool MbCfgStore_RegionValid(uint32_t base)
             n = sizeof(chunk);
         }
         if (W25Q128_Read(base + MODBUS_LUT_HEADER_SIZE + off,
-                         chunk, n) != W25Q128_OK) {
+                         chunk, n) != w25q_ok) {
             return false;
         }
         crc = ImgMgmt_Crc32Update(crc, chunk, n);
@@ -157,14 +157,14 @@ int MbCfgStore_SetSwapPending(void)
 
     sMbSelFlags flags;
     if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
+                     (uint8_t *)&flags, sizeof(flags)) != w25q_ok) {
         return -1;
     }
 
     flags.bits.swap_pending = 0;
     if (W25Q128_WritePage(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
                           (const uint8_t *)&flags,
-                          sizeof(flags)) != W25Q128_OK) {
+                          sizeof(flags)) != w25q_ok) {
         return -1;
     }
     return 0;
@@ -175,7 +175,7 @@ bool MbCfgStore_IsSwapPending(void)
     sMbSelFlags flags;
 
     if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != W25Q128_OK) {
+                     (uint8_t *)&flags, sizeof(flags)) != w25q_ok) {
         return false;
     }
     return flags.bits.swap_pending == 0;
@@ -212,7 +212,7 @@ int MbCfg_Open(uint32_t base, sMbCfgCursor *c)
         return -1;
     }
 
-    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != W25Q128_OK ||
+    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != w25q_ok ||
         hdr.magic != MODBUS_LUT_MAGIC ||
         hdr.version != MODBUS_LUT_VERSION ||
         hdr.streamLen == 0u ||
@@ -233,7 +233,7 @@ static int cursor_read(sMbCfgCursor *c, void *rec, uint32_t size)
         return -1;
     }
     if (W25Q128_Read(c->base + MODBUS_LUT_HEADER_SIZE + c->off,
-                     (uint8_t *)rec, size) != W25Q128_OK) {
+                     (uint8_t *)rec, size) != w25q_ok) {
         return -1;
     }
     c->off += size;
@@ -264,7 +264,7 @@ int MbCfg_NextPoint(sMbCfgCursor *c, sModbusPointRecord *p)
     if (r != 1) {
         return -1;
     }
-    return (p->decodeType == MB_DECODE_END) ? 0 : 1;
+    return (p->decodeType == mbDecode_end) ? 0 : 1;
 }
 
 /* ==========================================================================

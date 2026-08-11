@@ -324,7 +324,7 @@ static void ha_publish_entity(const char *devPrefix,
             n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
                 "\"device_class\":\"%s\",", unit->haDeviceClass);
         }
-        if (pt->decodeType != MB_DECODE_ASCII && unit != NULL) {
+        if (pt->decodeType != mbDecode_ascii && unit != NULL) {
             n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
                 "\"state_class\":\"%s\",", unit->haStateClass);
         }

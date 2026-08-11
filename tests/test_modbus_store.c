@@ -86,17 +86,17 @@ static void test_cursor_traversal(void)
 
     TEST_ASSERT(MbCfg_NextTransaction(&c, &txn) == 1);
     TEST_ASSERT(txn.count == 8);                 /* derived: 7 + 1 */
-    TEST_ASSERT(txn.functionCode == MB_FC_INPUT);
+    TEST_ASSERT(txn.functionCode == mbFc_input);
     TEST_ASSERT(txn.startAddr == 3132);
     TEST_ASSERT(txn.readPeriodS == 5);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);
-    TEST_ASSERT(pt.decodeType == MB_DECODE_U16);
+    TEST_ASSERT(pt.decodeType == mbDecode_u16);
     TEST_ASSERT(pt.scalePow10 == -1);
     TEST_ASSERT(strcmp(pt.name, "battery_voltage") == 0);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);
-    TEST_ASSERT(pt.decodeType == MB_DECODE_S16);
+    TEST_ASSERT(pt.decodeType == mbDecode_s16);
     TEST_ASSERT(strcmp(pt.name, "battery_current") == 0);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);
@@ -122,7 +122,7 @@ static void test_cursor_traversal(void)
     TEST_ASSERT(txn.startAddr == 0);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);
-    TEST_ASSERT(pt.decodeType == MB_DECODE_FLOAT32_BE);
+    TEST_ASSERT(pt.decodeType == mbDecode_float32Be);
     TEST_ASSERT(strcmp(pt.name, "power") == 0);
 
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 0);

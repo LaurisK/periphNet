@@ -183,7 +183,7 @@ fit.
 
 Options, in the order I would reach for them:
 
-1. **Put the BMS on its own UART.** `MODBUS_PORT_UART6` already exists in
+1. **Put the BMS on its own UART.** `mbPort_uart6` already exists in
    `modbus_rtu.h` as "not wired up yet — deferred until schematic review".
    This deletes the arbitration problem instead of managing it, and lets
    each bus run at its own baud.

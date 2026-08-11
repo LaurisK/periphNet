@@ -24,46 +24,46 @@ void mock_w25q128_fail_erase_after(int n) { flash_erase_fail_after = n; }
 void mock_w25q128_fail_write_after(int n) { flash_write_fail_after = n; }
 void mock_w25q128_fail_read_after(int n)  { flash_read_fail_after = n; }
 
-W25Q128_Status_t W25Q128_EraseSector(uint32_t addr)
+eW25qStatus W25Q128_EraseSector(uint32_t addr)
 {
     if (flash_erase_fail_after >= 0 && flash_erase_count >= flash_erase_fail_after)
-        return W25Q128_ERROR;
+        return w25q_error;
     flash_erase_count++;
 
     /* Align to 4KB sector */
     uint32_t sector_addr = addr & ~0xFFFu;
     if (sector_addr + W25Q128_SECTOR_SIZE > MOCK_FLASH_SIZE)
-        return W25Q128_ERROR;
+        return w25q_error;
 
     memset(&mock_flash[sector_addr], 0xFF, W25Q128_SECTOR_SIZE);
-    return W25Q128_OK;
+    return w25q_ok;
 }
 
-W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
+eW25qStatus W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len)
 {
     if (flash_write_fail_after >= 0 && flash_write_count >= flash_write_fail_after)
-        return W25Q128_ERROR;
+        return w25q_error;
     flash_write_count++;
 
     if (len > W25Q128_PAGE_SIZE) len = W25Q128_PAGE_SIZE;
     if (addr + len > MOCK_FLASH_SIZE)
-        return W25Q128_ERROR;
+        return w25q_error;
 
     memcpy(&mock_flash[addr], buffer, len);
-    return W25Q128_OK;
+    return w25q_ok;
 }
 
-W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
+eW25qStatus W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len)
 {
     if (flash_read_fail_after >= 0 && flash_read_count >= flash_read_fail_after)
-        return W25Q128_ERROR;
+        return w25q_error;
     flash_read_count++;
 
     if (addr + len > MOCK_FLASH_SIZE)
-        return W25Q128_ERROR;
+        return w25q_error;
 
     memcpy(buffer, &mock_flash[addr], len);
-    return W25Q128_OK;
+    return w25q_ok;
 }
 
 /* ============================================================================

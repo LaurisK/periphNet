@@ -30,7 +30,7 @@ int BootStatus_Read(sBootStatus *status)
     }
 
     if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR,
-                     (uint8_t *)status, sizeof(sBootStatus)) != W25Q128_OK) {
+                     (uint8_t *)status, sizeof(sBootStatus)) != w25q_ok) {
         return -1;
     }
 
@@ -50,13 +50,13 @@ int BootStatus_Write(const sBootStatus *status)
         return -1;
     }
 
-    if (W25Q128_EraseSector(EXT_FLASH_FWU_STATUS_ADDR) != W25Q128_OK) {
+    if (W25Q128_EraseSector(EXT_FLASH_FWU_STATUS_ADDR) != w25q_ok) {
         return -1;
     }
 
     if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR,
                           (const uint8_t *)status,
-                          sizeof(sBootStatus)) != W25Q128_OK) {
+                          sizeof(sBootStatus)) != w25q_ok) {
         return -1;
     }
 
@@ -79,7 +79,7 @@ int BootStatus_EnsureValid(void)
     memset(&st, 0, sizeof(st));
     st.magic           = BOOT_STATUS_MAGIC;
     st.version         = BOOT_STATUS_VERSION;
-    st.last_fwu_result = FWU_NO_RESULT;
+    st.last_fwu_result = fwuRes_noResult;
     st.header_crc32    = compute_header_crc(&st);
     st.flags.word      = 0xFFFFFFFFu;       /* all flags at erased state */
 
@@ -93,7 +93,7 @@ int BootStatus_EnsureValid(void)
 static int write_flags(const sBootFlags *flags)
 {
     if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                          (const uint8_t *)flags, sizeof(*flags)) != W25Q128_OK) {
+                          (const uint8_t *)flags, sizeof(*flags)) != w25q_ok) {
         return -1;
     }
     return 0;
@@ -106,7 +106,7 @@ int BootStatus_GetFlags(sBootFlags *flags)
     }
 
     if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                     (uint8_t *)flags, sizeof(*flags)) != W25Q128_OK) {
+                     (uint8_t *)flags, sizeof(*flags)) != w25q_ok) {
         return -1;
     }
 
@@ -213,12 +213,12 @@ eFwuAction BootStatus_GetFwuAction(void)
     sBootStatus st;
 
     if (BootStatus_Read(&st) != 0) {
-        return fwu_none;
+        return fwuAction_none;
     }
 
     /* FWU requested by application? */
     if (st.flags.bits.fwu_requested == 0) {
-        return fwu_install;
+        return fwuAction_install;
     }
 
     /* Unconfirmed with all boot attempts exhausted? */
@@ -226,10 +226,10 @@ eFwuAction BootStatus_GetFwuAction(void)
         st.flags.bits.boot_attempt_0 == 0 &&
         st.flags.bits.boot_attempt_1 == 0 &&
         st.flags.bits.boot_attempt_2 == 0) {
-        return fwu_rollback;
+        return fwuAction_rollback;
     }
 
-    return fwu_none;
+    return fwuAction_none;
 }
 
 /* --------------------------------------------------------------------------

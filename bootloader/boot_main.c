@@ -112,24 +112,24 @@ static bool internal_app_is_local(void)
 static eFwuRes blob_read_manifest(uint32_t base, uint32_t area_size,
                                   sFwuManifest *man)
 {
-    if (W25Q128_Read(base, (uint8_t *)man, sizeof(*man)) != W25Q128_OK) {
-        return FWU_ERR_FLASH_READ;
+    if (W25Q128_Read(base, (uint8_t *)man, sizeof(*man)) != w25q_ok) {
+        return fwuRes_errFlashRead;
     }
 
     if (man->magic != FWU_BLOB_MAGIC) {
-        return FWU_ERR_NO_IMAGE;
+        return fwuRes_errNoImage;
     }
     if (man->format != FWU_BLOB_FORMAT) {
-        return FWU_ERR_MANIFEST;
+        return fwuRes_errManifest;
     }
     if (man->image_size < FW_OFFSET_APP_HEADER + sizeof(sAppInfo) ||
         man->image_size > APPLICATION_SIZE ||
         man->blob_size != man->image_size + FWU_BLOB_OVERHEAD ||
         man->blob_size > area_size) {
-        return FWU_ERR_MANIFEST;
+        return fwuRes_errManifest;
     }
 
-    return FWU_OK;
+    return fwuRes_ok;
 }
 
 static eFwuRes blob_check_crc(uint32_t base, uint32_t blob_size)
@@ -142,19 +142,19 @@ static eFwuRes blob_check_crc(uint32_t base, uint32_t blob_size)
         uint32_t n = body_len - off;
         if (n > INSTALL_BUF_SIZE) n = INSTALL_BUF_SIZE;
 
-        if (W25Q128_Read(base + off, buf, n) != W25Q128_OK) {
-            return FWU_ERR_FLASH_READ;
+        if (W25Q128_Read(base + off, buf, n) != w25q_ok) {
+            return fwuRes_errFlashRead;
         }
         crc = ImgMgmt_Crc32Update(crc, buf, n);
     }
 
     uint32_t stored;
     if (W25Q128_Read(base + body_len, (uint8_t *)&stored,
-                     sizeof(stored)) != W25Q128_OK) {
-        return FWU_ERR_FLASH_READ;
+                     sizeof(stored)) != w25q_ok) {
+        return fwuRes_errFlashRead;
     }
 
-    return (ImgMgmt_Crc32Final(crc) == stored) ? FWU_OK : FWU_ERR_BLOB_CRC;
+    return (ImgMgmt_Crc32Final(crc) == stored) ? fwuRes_ok : fwuRes_errBlobCrc;
 }
 
 /* Copy the part of pt[off..off+n) overlapping [dst_off, dst_off+dst_len)
@@ -198,8 +198,8 @@ static eFwuRes blob_authenticate(uint32_t base, const sFwuManifest *man,
         uint32_t n = man->image_size - off;
         if (n > INSTALL_BUF_SIZE) n = INSTALL_BUF_SIZE;
 
-        if (W25Q128_Read(base + FWU_BLOB_OFF_CT + off, ct, n) != W25Q128_OK) {
-            return FWU_ERR_FLASH_READ;
+        if (W25Q128_Read(base + FWU_BLOB_OFF_CT + off, ct, n) != w25q_ok) {
+            return fwuRes_errFlashRead;
         }
 
         aes_gcm_dec_update(&gcm, ct, pt, n);
@@ -214,20 +214,20 @@ static eFwuRes blob_authenticate(uint32_t base, const sFwuManifest *man,
 
     uint8_t tag[FWU_GCM_TAG_SIZE];
     if (W25Q128_Read(base + FWU_BLOB_OFF_CT + man->image_size,
-                     tag, sizeof(tag)) != W25Q128_OK) {
-        return FWU_ERR_FLASH_READ;
+                     tag, sizeof(tag)) != w25q_ok) {
+        return fwuRes_errFlashRead;
     }
 
     if (!aes_gcm_dec_final(&gcm, tag)) {
-        return FWU_ERR_AUTH_TAG;
+        return fwuRes_errAuthTag;
     }
 
     /* Plaintext is authentic from here on */
     if (app_info->magic != APP_INFO_MAGIC) {
-        return FWU_ERR_WRONG_MAGIC;
+        return fwuRes_errWrongMagic;
     }
     if (app_info->image_size != man->image_size) {
-        return FWU_ERR_MANIFEST;
+        return fwuRes_errManifest;
     }
 
     uint8_t mac[HMAC_SHA256_SIZE];
@@ -237,10 +237,10 @@ static eFwuRes blob_authenticate(uint32_t base, const sFwuManifest *man,
         diff |= mac[i] ^ app_info->image_hmac[i];
     }
     if (diff != 0) {
-        return FWU_ERR_IMAGE_HMAC;
+        return fwuRes_errImageHmac;
     }
 
-    return FWU_OK;
+    return fwuRes_ok;
 }
 
 static eFwuRes blob_program(uint32_t base, const sFwuManifest *man,
@@ -261,7 +261,7 @@ static eFwuRes blob_program(uint32_t base, const sFwuManifest *man,
     uint32_t sector_error;
     if (HAL_FLASHEx_Erase(&erase_init, &sector_error) != HAL_OK) {
         HAL_FLASH_Lock();
-        return FWU_ERR_INSTALL;
+        return fwuRes_errInstall;
     }
 
     boot_blink_led(1);  /* erase complete indicator */
@@ -275,9 +275,9 @@ static eFwuRes blob_program(uint32_t base, const sFwuManifest *man,
         uint32_t n = man->image_size - off;
         if (n > INSTALL_BUF_SIZE) n = INSTALL_BUF_SIZE;
 
-        if (W25Q128_Read(base + FWU_BLOB_OFF_CT + off, ct, n) != W25Q128_OK) {
+        if (W25Q128_Read(base + FWU_BLOB_OFF_CT + off, ct, n) != w25q_ok) {
             HAL_FLASH_Lock();
-            return FWU_ERR_FLASH_READ;
+            return fwuRes_errFlashRead;
         }
 
         aes_gcm_dec_update(&gcm, ct, pt, n);
@@ -292,14 +292,14 @@ static eFwuRes blob_program(uint32_t base, const sFwuManifest *man,
                                   APPLICATION_START_ADDR + off + i,
                                   (uint64_t)word) != HAL_OK) {
                 HAL_FLASH_Lock();
-                return FWU_ERR_INSTALL;
+                return fwuRes_errInstall;
             }
         }
 
         /* Verify chunk by read-back */
         if (memcmp(pt, (const void *)(APPLICATION_START_ADDR + off), n) != 0) {
             HAL_FLASH_Lock();
-            return FWU_ERR_INSTALL;
+            return fwuRes_errInstall;
         }
 
         if (off >= next_led) {
@@ -309,7 +309,7 @@ static eFwuRes blob_program(uint32_t base, const sFwuManifest *man,
     }
 
     HAL_FLASH_Lock();
-    return FWU_OK;
+    return fwuRes_ok;
 }
 
 /**
@@ -323,25 +323,25 @@ static eFwuRes boot_install_blob(uint32_t base, uint32_t area_size,
 {
     sFwuManifest man;
     eFwuRes res = blob_read_manifest(base, area_size, &man);
-    if (res != FWU_OK) {
+    if (res != fwuRes_ok) {
         return res;
     }
 
     res = blob_check_crc(base, man.blob_size);
-    if (res != FWU_OK) {
+    if (res != fwuRes_ok) {
         return res;
     }
 
     uint8_t nonce[FWU_GCM_NONCE_SIZE];
     if (W25Q128_Read(base + FWU_BLOB_OFF_NONCE, nonce,
-                     sizeof(nonce)) != W25Q128_OK) {
-        return FWU_ERR_FLASH_READ;
+                     sizeof(nonce)) != w25q_ok) {
+        return fwuRes_errFlashRead;
     }
 
     /* Pass 1: authenticate + capture decrypted app header */
     sAppInfo staged_info;
     res = blob_authenticate(base, &man, nonce, &staged_info);
-    if (res != FWU_OK) {
+    if (res != fwuRes_ok) {
         return res;
     }
 
@@ -350,7 +350,7 @@ static eFwuRes boot_install_blob(uint32_t base, uint32_t area_size,
         if (internal_app_header(&current)) {
             res = ver_checkCompatibility(&current.fw_version.ver,
                                          &staged_info.fw_version.ver);
-            if (res != FWU_OK) {
+            if (res != fwuRes_ok) {
                 return res;
             }
         }
@@ -385,7 +385,7 @@ int main(void)
     boot_blink_led(3);
 
     /* Initialize external flash */
-    if (W25Q128_Init() != W25Q128_OK) {
+    if (W25Q128_Init() != w25q_ok) {
         boot_blink_error();
         /* Can't access ext flash — skip FWU logic, try to boot */
         goto validate_and_jump;
@@ -398,14 +398,14 @@ int main(void)
     eFwuAction action = BootStatus_GetFwuAction();
 
     switch (action) {
-    case fwu_install: {
+    case fwuAction_install: {
         eFwuRes res = boot_install_blob(EXT_FLASH_FWU_IMG_ADDR,
                                         EXT_FLASH_FWU_IMG_SIZE, true);
-        if (res == FWU_OK) {
+        if (res == fwuRes_ok) {
             /* New image boots unconfirmed: the outside actor must confirm
              * within BOOT_ATTEMPTS_MAX boots or the BL rolls back.  This
              * boot counts as the first attempt (local builds exempt). */
-            BootStatus_FinishFwu(FWU_OK, false);
+            BootStatus_FinishFwu(fwuRes_ok, false);
             if (!internal_app_is_local()) {
                 BootStatus_ConsumeBootAttempt();
             }
@@ -420,15 +420,15 @@ int main(void)
         break;
     }
 
-    case fwu_rollback: {
+    case fwuAction_rollback: {
         eFwuRes res = boot_install_blob(EXT_FLASH_GOLDEN_IMG_ADDR,
                                         EXT_FLASH_GOLDEN_IMG_SIZE, false);
-        if (res == FWU_OK) {
+        if (res == fwuRes_ok) {
             /* Invalidate the staged blob that failed to confirm so it
              * cannot be re-installed by accident. */
             W25Q128_EraseSector(EXT_FLASH_FWU_IMG_ADDR);
             /* Golden is the last confirmed image — pre-confirmed. */
-            BootStatus_FinishFwu(FWU_ROLLBACK, true);
+            BootStatus_FinishFwu(fwuRes_rollback, true);
             boot_blink_led(5);
         } else {
             /* No usable golden image — give up on rollback and keep the
@@ -439,7 +439,7 @@ int main(void)
         break;
     }
 
-    case fwu_none:
+    case fwuAction_none:
     default:
         /* Unconfirmed boot consumes one attempt (local builds exempt) */
         if (BootStatus_IsUnconfirmed() && !internal_app_is_local()) {
@@ -454,7 +454,7 @@ validate_and_jump:
         uint8_t work_buf[sizeof(sAppInfo)];
         eFwuRes res = ImgMgmt_Validate(APPLICATION_START_ADDR, false,
                                        work_buf, sizeof(work_buf));
-        if (res == FWU_OK) {
+        if (res == fwuRes_ok) {
             boot_blink_led(2);
             boot_jump_to_application(APPLICATION_ADDRESS);
         } else {

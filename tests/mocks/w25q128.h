@@ -18,16 +18,17 @@ extern "C" {
 
 /* Return codes */
 typedef enum {
-    W25Q128_OK = 0,
-    W25Q128_ERROR = 1,
-    W25Q128_BUSY = 2,
-    W25Q128_TIMEOUT = 3
-} W25Q128_Status_t;
+    w25q_ok = 0,
+    w25q_error = 1,
+    w25q_busy = 2,
+    w25q_timeout = 3,
+    w25q_last          /* sentinel */
+} eW25qStatus;
 
 /* Function declarations (implemented in mock_support.c) */
-W25Q128_Status_t W25Q128_EraseSector(uint32_t addr);
-W25Q128_Status_t W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len);
-W25Q128_Status_t W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len);
+eW25qStatus W25Q128_EraseSector(uint32_t addr);
+eW25qStatus W25Q128_WritePage(uint32_t addr, const uint8_t *buffer, uint32_t len);
+eW25qStatus W25Q128_Read(uint32_t addr, uint8_t *buffer, uint32_t len);
 
 #ifdef __cplusplus
 }

@@ -39,7 +39,7 @@ static uint32_t record_crc(const sWgCfgRecord *rec)
 static int record_read(sWgCfgRecord *rec)
 {
     if (W25Q128_Read(EXT_FLASH_WG_CFG_ADDR, (uint8_t *)rec,
-                     (uint32_t)sizeof(*rec)) != W25Q128_OK) {
+                     (uint32_t)sizeof(*rec)) != w25q_ok) {
         return -1;
     }
     if (rec->magic != WG_CFG_MAGIC || rec->version != WG_CFG_VERSION ||
@@ -95,13 +95,13 @@ int WgCfg_Save(const sWgLinkCfg *cfg)
     rec.keepAlive    = cfg->keepAlive;
     rec.crc32        = record_crc(&rec);
 
-    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != W25Q128_OK) {
+    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != w25q_ok) {
         TRice("WG cfg: erase failed\n");
         return -2;
     }
     /* sizeof(rec) is far below the 256 B page size, so one write suffices. */
     if (W25Q128_WritePage(EXT_FLASH_WG_CFG_ADDR, (const uint8_t *)&rec,
-                          (uint32_t)sizeof(rec)) != W25Q128_OK) {
+                          (uint32_t)sizeof(rec)) != w25q_ok) {
         TRice("WG cfg: write failed\n");
         return -3;
     }
@@ -111,7 +111,7 @@ int WgCfg_Save(const sWgLinkCfg *cfg)
 
 int WgCfg_Clear(void)
 {
-    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != W25Q128_OK) {
+    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != w25q_ok) {
         return -1;
     }
     return 0;

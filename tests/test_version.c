@@ -65,33 +65,33 @@ static void test_compat_gate(void)
 
     /* Strictly newer → OK */
     sFwVer in = make_ver(fwTarget_release, 1, 2, 4, 0);
-    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == FWU_OK);
+    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == fwuRes_ok);
 
     /* Equal / older → rejected */
     in = cur;
-    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == FWU_ERR_VER_NOT_NEWER);
+    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == fwuRes_errVerNotNewer);
     in = make_ver(fwTarget_release, 1, 2, 2, 0);
-    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == FWU_ERR_VER_NOT_NEWER);
+    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == fwuRes_errVerNotNewer);
 
     /* Device type mismatch */
     in = make_ver(fwTarget_release, 9, 9, 9, 0);
     in.deviceType = 'X';
-    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == FWU_ERR_VER_DEVICE_TYPE);
+    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == fwuRes_errVerDeviceType);
 
     /* Hardware ID mismatch */
     in = make_ver(fwTarget_release, 9, 9, 9, 7);
-    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == FWU_ERR_VER_HW_ID);
+    TEST_ASSERT(ver_checkCompatibility(&cur, &in) == fwuRes_errVerHwId);
 
     /* Local-target current build accepts equal and older versions */
     sFwVer local = make_ver(fwTarget_local, 1, 2, 3, 0);
     in = make_ver(fwTarget_release, 1, 0, 0, 0);
-    TEST_ASSERT(ver_checkCompatibility(&local, &in) == FWU_OK);
+    TEST_ASSERT(ver_checkCompatibility(&local, &in) == fwuRes_ok);
     in = local;
-    TEST_ASSERT(ver_checkCompatibility(&local, &in) == FWU_OK);
+    TEST_ASSERT(ver_checkCompatibility(&local, &in) == fwuRes_ok);
 
     /* NULL args */
-    TEST_ASSERT(ver_checkCompatibility(NULL, &in) == FWU_ERR_NO_IMAGE);
-    TEST_ASSERT(ver_checkCompatibility(&cur, NULL) == FWU_ERR_NO_IMAGE);
+    TEST_ASSERT(ver_checkCompatibility(NULL, &in) == fwuRes_errNoImage);
+    TEST_ASSERT(ver_checkCompatibility(&cur, NULL) == fwuRes_errNoImage);
 }
 
 int main(void)

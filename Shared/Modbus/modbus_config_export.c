@@ -27,16 +27,16 @@ static int emit(fMbByteSink sink, void *ctx, const char *fmt, ...)
 static const char *decode_type_str(uint8_t type)
 {
     switch (type) {
-    case MB_DECODE_U16:        return "u16";
-    case MB_DECODE_S16:        return "s16";
-    case MB_DECODE_U32_BE:     return "u32_be";
-    case MB_DECODE_U32_LE:     return "u32_le";
-    case MB_DECODE_S32_BE:     return "s32_be";
-    case MB_DECODE_S32_LE:     return "s32_le";
-    case MB_DECODE_FLOAT32_BE: return "float32_be";
-    case MB_DECODE_FLOAT32_LE: return "float32_le";
-    case MB_DECODE_BITFIELD:   return "bitfield";
-    case MB_DECODE_ASCII:      return "ascii";
+    case mbDecode_u16:        return "u16";
+    case mbDecode_s16:        return "s16";
+    case mbDecode_u32Be:     return "u32_be";
+    case mbDecode_u32Le:     return "u32_le";
+    case mbDecode_s32Be:     return "s32_be";
+    case mbDecode_s32Le:     return "s32_le";
+    case mbDecode_float32Be: return "float32_be";
+    case mbDecode_float32Le: return "float32_le";
+    case mbDecode_bitfield:   return "bitfield";
+    case mbDecode_ascii:      return "ascii";
     default:                   return "?";
     }
 }
@@ -82,7 +82,7 @@ static int export_point(fMbByteSink sink, void *ctx,
         return -1;
     }
 
-    if (pt->decodeType == MB_DECODE_ASCII &&
+    if (pt->decodeType == mbDecode_ascii &&
         emit(sink, ctx, ",\"length\":%u", pt->length) != 0) {
         return -1;
     }
@@ -159,7 +159,7 @@ int MbCfgExport(uint32_t regionBase, fMbByteSink sink, void *ctx)
                      "%s{\"startAddr\":%u,\"functionCode\":\"%s\","
                      "\"readPeriodS\":%u,\"points\":[",
                      firstTxn ? "" : ",", txn.startAddr,
-                     (txn.functionCode == MB_FC_HOLDING) ? "holding" : "input",
+                     (txn.functionCode == mbFc_holding) ? "holding" : "input",
                      txn.readPeriodS) != 0) {
                 return -1;
             }
