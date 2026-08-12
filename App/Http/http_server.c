@@ -17,6 +17,7 @@
 #include "App/Img/image_store.h"
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/crash.h"
+#include "App/Log/trice_udp.h"
 #include "App/Modbus/modbus_default_config.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
@@ -43,6 +44,12 @@
 /* CPU-only buffers → CCM RAM (never handed to DMA: netconn_write here
  * always uses NETCONN_COPY, so lwIP copies into SRAM pbufs) */
 #define CCMRAM_BSS __attribute__((section(".ccmram")))
+
+/* Largest body still considered as a possible WireGuard .conf.  A real one is
+ * ~300 B; a .pnfw is ~316 KB, so there is no ambiguity to resolve by size. */
+#define WG_CONF_UPLOAD_MAX  4096u
+
+static void wg_status_json(char *buf, size_t sz);
 
 /* Single-task server: static buffers are safe and cheap */
 static char req_buf[REQ_BUF_SIZE] CCMRAM_BSS;
@@ -389,6 +396,83 @@ static int read_request_header(sConnStream *s)
  * Endpoint handlers
  * -------------------------------------------------------------------------- */
 
+/* Consume the body into the WireGuard .conf parser.  Nothing is written to
+ * flash until the whole file has parsed, so a truncated upload cannot leave
+ * the board holding half an identity. */
+static void handle_wg_conf_upload(struct netconn *conn, sConnStream *s,
+                                  uint32_t content_length)
+{
+    static sWgConfParser parser CCMRAM_BSS;   /* ~200 B, too big for the stack */
+    const char *err = "malformed configuration";
+    uint32_t    remaining = content_length;
+
+    WgConf_Begin(&parser);
+
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    while (remaining > 0u) {
+        uint32_t n;
+
+        if (cs_fill(s) != ERR_OK) {
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"connection lost during upload\"}");
+            return;
+        }
+        n = (uint32_t)(s->len - s->off);
+        if (n > remaining) {
+            n = remaining;
+        }
+        WgConf_Feed(&parser, (const uint8_t *)s->data + s->off, n);
+        s->off    += (u16_t)n;
+        remaining -= n;
+    }
+
+    if (WgConf_Finish(&parser, &err) != 0) {
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"error\":\"%s\",\"line\":%u}",
+                 err, (unsigned)WgConf_ErrorLine(&parser));
+        send_json(conn, "422 Unprocessable Entity", resp_buf);
+        TRiceS("WG conf: rejected — %s\n", (char *)err);
+        return;
+    }
+
+    /* Applying restarts the tunnel, so a response sent afterwards may not
+     * reach a caller who came in over the tunnel itself. */
+    if (WgLink_ApplyConf(WgConf_Result(&parser), 1) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not store or start the tunnel\"}");
+        return;
+    }
+
+    TRice("WG conf: applied and stored\n");
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* One upload endpoint, two kinds of file.  The type is decided by content,
+ * not by the filename: a .pnfw always starts with its cleartext manifest
+ * magic, and is three orders of magnitude larger than any .conf. */
+static int body_is_fwu_blob(sConnStream *s)
+{
+    /* A short first segment is legal, so keep filling until the magic is
+     * either present or ruled out. */
+    while ((uint32_t)(s->len - s->off) < 4u) {
+        if (cs_fill(s) != ERR_OK) {
+            return 0;
+        }
+        if ((uint32_t)(s->len - s->off) >= 4u) {
+            break;
+        }
+    }
+    if ((uint32_t)(s->len - s->off) < 4u) {
+        return 0;
+    }
+    /* FWU_BLOB_MAGIC as it appears on the wire (little-endian "PNFW"). */
+    return (memcmp(s->data + s->off, "PNFW", 4u) == 0) ? 1 : 0;
+}
+
 static void handle_image_upload(struct netconn *conn, sConnStream *s)
 {
     uint32_t content_length = parse_content_length(req_buf);
@@ -396,6 +480,14 @@ static void handle_image_upload(struct netconn *conn, sConnStream *s)
     char raw_name[IMG_STORE_NAME_MAX], name[IMG_STORE_NAME_MAX] = "";
     if (header_value(req_buf, "x-filename:", raw_name, sizeof(raw_name))) {
         sanitize_filename(raw_name, name, sizeof(name));
+    }
+
+    /* Peeking costs nothing: cs_fill() buffers without consuming, so the
+     * bytes examined here are still delivered to whichever path wins. */
+    if (content_length > 0u && content_length <= WG_CONF_UPLOAD_MAX &&
+        !body_is_fwu_blob(s)) {
+        handle_wg_conf_upload(conn, s, content_length);
+        return;
     }
 
     const char *err;
@@ -1072,21 +1164,49 @@ static void wg_status_json(char *buf, size_t sz)
     WgTime_GetStatus(&now, &persisted, &flashOk);
     WgPlatform_GetRngStatus(&hwSeeded, &rngFailures);
 
+    char pubKey[WG_KEY_B64_SIZE]  = "";
+    char peerKey[WG_KEY_B64_SIZE] = "";
+    char allowed[64]              = "";
+    int  n = 0;
+    uint8_t i;
+
+    /* The public key is what the operator pastes into the hub.  The private
+     * key is never reported by any endpoint. */
+    (void)WgLink_GetPublicKeyB64(pubKey, sizeof(pubKey));
+    (void)WgLink_GetPeerKeyB64(peerKey, sizeof(peerKey));
+
+    for (i = 0u; i < cfg->allowedCount && n >= 0 &&
+                 n < (int)sizeof(allowed); i++) {
+        n += snprintf(allowed + n, sizeof(allowed) - (size_t)n,
+                      "%s\"%u.%u.%u.%u/%u.%u.%u.%u\"", (i > 0u) ? "," : "",
+                      cfg->allowed[i].ip[0], cfg->allowed[i].ip[1],
+                      cfg->allowed[i].ip[2], cfg->allowed[i].ip[3],
+                      cfg->allowed[i].mask[0], cfg->allowed[i].mask[1],
+                      cfg->allowed[i].mask[2], cfg->allowed[i].mask[3]);
+    }
+
     (void)snprintf(buf, sz,
-        "{\"running\":%s,\"session_up\":%s,\"config_source\":\"%s\","
+        "{\"running\":%s,\"session_up\":%s,\"provisioned\":%s,"
+        "\"config_source\":\"%s\",\"config_version\":%u,"
+        "\"public_key\":\"%s\",\"peer_public_key\":\"%s\","
         "\"tunnel_ip\":\"%u.%u.%u.%u\",\"tunnel_mask\":\"%u.%u.%u.%u\","
+        "\"allowed_ips\":[%s],"
         "\"endpoint_ip\":\"%u.%u.%u.%u\",\"endpoint_port\":%u,"
         "\"keepalive\":%u,\"rng_hw_seeded\":%s,\"rng_failures\":%u,"
         "\"time_now\":%u,\"time_persisted\":%u,\"time_flash_backed\":%s}",
         WgLink_IsRunning() ? "true" : "false",
         WgLink_IsUp()      ? "true" : "false",
-        WgLink_CfgIsStored() ? "stored" : "built-in",
+        WgLink_HasIdentity() ? "true" : "false",
+        WgLink_CfgIsStored() ? "stored" : "none",
+        (unsigned)WgLink_CfgStoredVersion(),
+        pubKey, peerKey,
         cfg->tunnelIp[0], cfg->tunnelIp[1], cfg->tunnelIp[2], cfg->tunnelIp[3],
         cfg->tunnelMask[0], cfg->tunnelMask[1],
         cfg->tunnelMask[2], cfg->tunnelMask[3],
+        allowed,
         cfg->endpointIp[0], cfg->endpointIp[1],
         cfg->endpointIp[2], cfg->endpointIp[3],
-        (unsigned)cfg->endpointPort, (unsigned)cfg->keepAlive,
+        (unsigned)cfg->endpointPort, (unsigned)cfg->keepAlive_sec,
         hwSeeded ? "true" : "false", (unsigned)rngFailures,
         (unsigned)now, (unsigned)persisted, flashOk ? "true" : "false");
 }
@@ -1199,7 +1319,68 @@ static void handle_wg_config_reset(struct netconn *conn)
                   "{\"error\":\"could not clear stored config\"}");
         return;
     }
-    TRice("WG: config reset to built-in defaults\n");
+    TRice("WG: stored config erased\n");
+    wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* Retarget the Trice UDP stream at runtime.
+ *
+ * The default destination is a tunnel address, which makes the log stream
+ * useless for diagnosing the tunnel itself — the output only arrives over the
+ * link being debugged.  This endpoint breaks that circle: point Trice at a
+ * host on whatever network currently works. */
+static void handle_trice_dest(struct netconn *conn, sConnStream *s)
+{
+    uint32_t content_length = parse_content_length(req_buf);
+    char     body[96];
+    uint32_t got = 0u;
+    uint8_t  ip[4];
+
+    if (content_length == 0u || content_length >= sizeof(body)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"JSON body required (max 95 bytes)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+    while (got < content_length) {
+        int ch = cs_read_byte(s);
+        if (ch < 0) {
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"incomplete body\"}");
+            return;
+        }
+        body[got++] = (char)ch;
+    }
+    body[got] = '\0';
+
+    if (!json_ipv4(body, "ip", ip)) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"expected {\\\"ip\\\":\\\"a.b.c.d\\\"}\"}");
+        return;
+    }
+
+    Trice_UdpSetDest(ip[0], ip[1], ip[2], ip[3]);
+    TRice("Trice UDP retargeted to %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"dest\":\"%u.%u.%u.%u\",\"port\":%u}",
+             ip[0], ip[1], ip[2], ip[3], (unsigned)TRICE_UDP_PORT);
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* Mint a fresh identity on-device.  The private key never leaves the board;
+ * the caller gets the public half to register with the hub. */
+static void handle_wg_keygen(struct netconn *conn)
+{
+    if (WgLink_GenerateKey(1) < 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not generate or store a key\"}");
+        return;
+    }
+    TRice("WG: new identity key generated on-device\n");
     wg_status_json(resp_buf, sizeof(resp_buf));
     send_json(conn, "200 OK", resp_buf);
 }
@@ -1262,6 +1443,10 @@ static void handle_connection(struct netconn *conn)
         handle_wg_config(conn, &stream);
     } else if (route_is("DELETE /api/wg/config")) {
         handle_wg_config_reset(conn);
+    } else if (route_is("POST /api/trice/dest")) {
+        handle_trice_dest(conn, &stream);
+    } else if (route_is("POST /api/wg/keygen")) {
+        handle_wg_keygen(conn);
     } else if (route_is("POST /api/wg/restart")) {
         handle_wg_restart(conn);
     } else if (route_is("GET / ")) {

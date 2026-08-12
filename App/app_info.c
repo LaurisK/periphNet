@@ -9,8 +9,8 @@
  * newer) and MUST be confirmed via POST /api/fwu/confirm within 3 boots. */
 #define APP_FW_TARGET       fwTarget_dev
 #define APP_FW_MAJOR        1
-#define APP_FW_MINOR        0
-#define APP_FW_PATCH        9
+#define APP_FW_MINOR        1
+#define APP_FW_PATCH        2
 #define APP_FW_HW_ID        0
 
 __attribute__((section(".app_header")))

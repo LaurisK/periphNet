@@ -494,7 +494,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Web UI (Image Management + Firmware Update cards + crash log) |
-| `/api/image/upload` | POST | Upload `.pnfw` blob (Content-Length required; optional `X-Filename` header, persisted) |
+| `/api/image/upload` | POST | Upload `.pnfw` blob (Content-Length required; optional `X-Filename` header, persisted). **Also accepts a WireGuard `.conf`** — the body is sniffed for the `PNFW` manifest magic, anything else under 4 KB is parsed as a tunnel config and applied+persisted (422 with the offending line number on reject) |
 | `/api/image/info` | GET | JSON: status, present, name, version, size, image_size, crc32, progress, error |
 | `/api/image/download` | GET | Download stored blob (still encrypted), original filename |
 | `/api/image` | DELETE | Erase stored image (manifest + metadata) |
@@ -508,9 +508,10 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
 | `/api/modbus/config` | DELETE | Stage the built-in Solis default + arm swap (hot factory reset) |
-| `/api/wg/status` | GET | JSON: running/session_up, config_source, tunnel addr/mask, endpoint, keepalive, RNG health, time base |
+| `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base |
 | `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
-| `/api/wg/config` | DELETE | Drop the persisted config, revert to built-in defaults |
+| `/api/wg/config` | DELETE | Erase the stored config **including the private key** — the board becomes unprovisioned and the tunnel stops |
+| `/api/wg/keygen` | POST | Mint a new identity key on-device from the DRBG, persist it, return the public half to register with the hub |
 | `/api/wg/restart` | POST | Stop + start the tunnel (forces a fresh handshake) |
 
 **Server architecture:** dedicated `http` task using the lwIP **netconn API**
@@ -544,7 +545,29 @@ take the short path and only the tunnel subnet routes through WG.
 
 Bring-up runs in **defaultTask** (`App_DefaultTaskEntry`), not `MX_LWIP_Init()`
 — `WgTime_Init()` needs `W25Q128_Init()` first. CLI: `wg start|stop|status|
-endpoint <ip> [port]|ip <addr> [mask]|save|reset`.
+endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
+
+- **NOTHING WireGuard lives in the image.** Keys, tunnel address, endpoint and
+  routes are all per-device data in ext flash (`wg_cfg` record v2). The normal
+  way to provision is to upload the `.conf` WGDashboard issues to
+  `POST /api/image/upload`, which sniffs it apart from a `.pnfw` by content.
+  An unprovisioned board **does not start the tunnel** and says so — it does
+  not fall back to a shared identity, because two boards presenting one key to
+  the hub take turns stealing the peer's endpoint and the greatest-timestamp
+  rule locks the loser out. `App/Net/wg_conf.c` is the parser (host-tested,
+  libc only); v1 records (address-only, pre-2026-08-12) are still read, and a
+  board holding one has no keys, so it needs a `.conf` before it tunnels again.
+
+- **Interface address and AllowedIPs are different things and must not be
+  derived from each other.** `[Interface] Address` is a /32 in every `.conf`;
+  `[Peer] AllowedIPs` is what routes into the tunnel. lwIP picks an output
+  netif by subnet match, which a /32 never satisfies, so routing comes from
+  `LWIP_HOOK_IP4_ROUTE` → `WgLink_Ip4Route()` walking the configured ranges
+  (declared in `LWIP/Target/lwip_hooks.h`, wired in `lwipopts.h`). Up to
+  `WIREGUARD_MAX_SRC_IPS` (2) ranges are honoured, so a second range such as
+  the site LAN reaches hosts beyond the tunnel subnet. The hook refuses to
+  route the hub's own endpoint address, so an over-broad `AllowedIPs` cannot
+  swallow the encapsulated UDP and deadlock the link.
 
 - **The tunnel address is device config, not network-assigned.** WireGuard has
   no address-assignment protocol: the hub's `AllowedIPs` is simultaneously the
@@ -570,9 +593,14 @@ endpoint <ip> [port]|ip <addr> [mask]|save|reset`.
   `wg_time.c` persists a seconds counter to a 4 KB ext-flash slot ring
   (append-only, one write per 15 min), jumps it forward 1 h every boot, and
   floors it at the CMake-supplied `WG_TIME_BUILD_EPOCH`.
-- **Device private key is still a build constant** (bring-up only, board #1).
-  Production needs a per-device key generated on-device and stored outside the
-  image — and NOT through the FWU key mechanism, which is bootloader-only.
+- **Device private key is per-device flash data, never in the image.** It
+  arrives with an uploaded `.conf`, or is minted on-device by `wg genkey` /
+  `POST /api/wg/keygen` (DRBG + Curve25519 clamping) in which case it exists
+  nowhere else. No endpoint ever returns it; `/api/wg/status` reports only the
+  derived public key. It is NOT protected by the FWU key mechanism, which is
+  bootloader-only by design — anything with SPI access to the W25Q64 can read
+  it, so the guarantee is per-board isolation, not secrecy from a local
+  attacker.
 - **Control stays outbound-only.** Metrics and actuation both ride MQTT over a
   board-initiated socket; inbound (HTTP OTA UI, Trice) is debug-only. Do not
   add an HA→board request/response path that needs inbound routing per site.

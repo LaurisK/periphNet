@@ -173,6 +173,13 @@
 #undef  MEMP_NUM_SYS_TIMEOUT
 #define MEMP_NUM_SYS_TIMEOUT      16
 
+/* WireGuard needs an explicit route hook: its netif carries the /32 address
+ * every .conf assigns, so lwIP's subnet match would never select it and the
+ * tunnel would carry nothing.  The routes come from the peer's AllowedIPs
+ * instead — see App/Net/wg_link.c WgLink_Ip4Route(). */
+#define LWIP_HOOK_FILENAME        "lwip_hooks.h"
+#define LWIP_HOOK_IP4_ROUTE(dest) WgLink_Ip4Route(dest)
+
 /* Keep the complete index_html (~4.3 KB) in the TCP send buffer so
  * that netconn_write can finish the whole response in one go.
  * 6144 bytes = ~4× the default (1460×2), fitting 4234-byte HTML +

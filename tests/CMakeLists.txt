@@ -102,6 +102,19 @@ add_executable(test_modbus_export
 target_include_directories(test_modbus_export PRIVATE ${UNIT_INCLUDES})
 add_test(NAME modbus_export COMMAND test_modbus_export)
 
+# App/Net/wg_conf.c is application code, but it depends only on libc by
+# design (no lwIP, no HAL) precisely so the .conf parser can be tested here.
+add_executable(test_wg_conf
+    test_wg_conf.c
+    ${PROJECT_ROOT}/App/Net/wg_conf.c
+)
+target_include_directories(test_wg_conf PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+    ${PROJECT_ROOT}/App/Net
+)
+add_test(NAME wg_conf COMMAND test_wg_conf)
+
 # ==============================================================================
 # CppUTest suite (fetched from GitHub) — OFF by default.
 #

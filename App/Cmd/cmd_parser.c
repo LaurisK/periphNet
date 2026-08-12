@@ -438,8 +438,9 @@ static void cmd_mqtt(const char *args)
  *   wg status                 — Config, session state, RNG health, time base
  *   wg endpoint <a.b.c.d> [port] — Point at a different hub (live if running)
  *   wg ip <a.b.c.d> [mask]    — Set our address inside the tunnel (restarts it)
+ *   wg genkey                 — Mint a new identity key on-device + print pub
  *   wg save                   — Persist the active config across reboot/OTA
- *   wg reset                  — Drop the persisted config, back to defaults
+ *   wg reset                  — Erase the stored config (and its private key)
  *
  * "ip" and "endpoint" change the running config only; follow with "wg save"
  * to make them survive a reset.
@@ -486,6 +487,17 @@ static void cmd_wg(const char *args)
         } else {
             TRice("Usage: wg ip <a.b.c.d> [mask]\n");
         }
+    } else if (strncmp(args, "genkey", 6) == 0) {
+        /* Generating on-device means the private key exists nowhere else —
+         * register the printed public key with the hub. */
+        if (WgLink_GenerateKey(1) >= 0) {
+            char pub[WG_KEY_B64_SIZE];
+            if (WgLink_GetPublicKeyB64(pub, sizeof(pub)) == 0) {
+                TRiceS("WG new public key: %s\n", pub);
+            }
+        } else {
+            TRice("WG genkey failed\n");
+        }
     } else if (strncmp(args, "save", 4) == 0) {
         if (WgLink_SaveCfg() == 0) {
             TRice("WG config saved\n");
@@ -517,13 +529,29 @@ static void cmd_wg(const char *args)
         TRice("WG: endpoint %d.%d.%d.%d:%d keepalive=%us\n",
               cfg->endpointIp[0], cfg->endpointIp[1],
               cfg->endpointIp[2], cfg->endpointIp[3],
-              cfg->endpointPort, cfg->keepAlive);
+              cfg->endpointPort, cfg->keepAlive_sec);
+        {
+            char pub[WG_KEY_B64_SIZE];
+            uint8_t i;
+            if (WgLink_GetPublicKeyB64(pub, sizeof(pub)) == 0) {
+                TRiceS("WG: public key %s\n", pub);
+            } else {
+                TRice("WG: NO IDENTITY — upload a .conf to provision\n");
+            }
+            for (i = 0u; i < cfg->allowedCount; i++) {
+                TRice("WG: allowed %d.%d.%d.%d/%d.%d.%d.%d\n",
+                      cfg->allowed[i].ip[0], cfg->allowed[i].ip[1],
+                      cfg->allowed[i].ip[2], cfg->allowed[i].ip[3],
+                      cfg->allowed[i].mask[0], cfg->allowed[i].mask[1],
+                      cfg->allowed[i].mask[2], cfg->allowed[i].mask[3]);
+            }
+        }
         TRice("WG: rng hw_seeded=%u failures=%u\n",
               (unsigned)hwSeeded, rngFailures);
         TRice("WG: time now=%us persisted=%us flash=%u\n",
               now, persisted, (unsigned)flashOk);
     } else {
-        TRice("Usage: wg start|stop|status|endpoint|ip|save|reset\n");
+        TRice("Usage: wg start|stop|status|endpoint|ip|genkey|save|reset\n");
     }
 }
 
