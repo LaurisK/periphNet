@@ -108,10 +108,10 @@ value cache "just for change detection"; per-subscription delivery counters.
   map, and `topicPrefix` as the module's device identity. When a field looks
   like it belongs to two things, it belongs to the one that *varies
   independently*.
-- **Cardinality is the model.** Port 1:many devices, capability 1:many plans,
-  plan 1:many devices, communication data 1:1. Anything shared is *referenced by
-  id*, never copied per device — the config caps count records, so copying spends
-  the budget on duplicates.
+- **Cardinality is the model.** Port 1:many devices, capability 1:many devices
+  and 1:many plans, plan many:many devices, communication data 1:1. Anything
+  shared is *referenced by id*, never copied per device — the config caps count
+  records, so copying spends the budget on duplicates.
 - **Data, never behaviour.** A device is a config, not a driver (§2.3). A
   dialect is four data fields on a capability, and the engine runs one code path
   whose constants come from them. If a future slave needs something that cannot
@@ -167,13 +167,16 @@ change.
 #### How things are represented
 
 - **Derive rather than store, and never store a pure function of the stream.**
-  Read blocks are derived from points, not authored and not compiled in. Ids are
-  positions, not stored fields. Verify is the compile pass with a counting sink,
-  not a second validator. The hazard being avoided each time is *two things that
-  can disagree*.
+  Read blocks are derived from points, not authored and not compiled in. A
+  referenced id is a position, not a stored field. Verify is the compile pass with
+  a counting sink, not a second validator. The hazard being avoided each time is
+  *two things that can disagree*.
 - **Single pass, no rewind, no backpatch.** The compiler reads a stream it
-  cannot rewind and holds no index, which is why everything links by dense
-  authored id, why section order is forced, and why names link nothing.
+  cannot rewind and holds no index, which is why every *reference* is a dense
+  authored id, why section order is forced, and why names link nothing. The one
+  id nothing references — a plan's — is a slot instead, and that exception is
+  what the rule earns: density is for range-checking references, so where there
+  are none it buys nothing (§3.2).
 - **Author the redundancy that makes silence loud.** Ids are authored even
   though position is identity, and blocks are authored even though they could be
   inferred — in both cases so that a mistake becomes a **compile error naming the
@@ -294,7 +297,7 @@ JSON file, not a `.c` file.**
 
 ## 3. The model — ports, capabilities, plans, devices
 
-### 3.1 Four things, and the cardinalities are the design
+### 3.1 The objects, and the cardinalities are the design
 
 | | Cardinality | Holds | Example |
 |---|---|---|---|
@@ -458,12 +461,22 @@ runs. Capabilities and devices state what is physically present and move only by
 upload; a plan states what is being watched, which is a decision, and decisions
 made at authoring time are not the only ones worth making.
 
-**Plans live in flash like everything else, and only the ones in use are in RAM.**
-The record stream is the truth. A plan with no subscribers is never loaded; a plan
-that acquires one is read out of flash into a working copy the engine uses to arm
-timers and derive read blocks (§5.2), and that copy is released when the last
-subscriber goes. Nothing holds the whole plan section resident, and nothing holds
-capabilities or devices at all.
+**Plans live in flash like everything else, and only the ones in use are fully in
+RAM.** The record stream is the truth, and the split has two levels:
+
+- **Plan headers are resident, all 8 slots.** `{name, capId, devices, tableCount}`
+  ≈ 24 B a slot, ~192 B in main SRAM, rebuilt by one walk of the plan section at
+  `Modbus_Init` and after every swap. This is what makes `Modbus_PlanList`
+  synchronous (§4.3) and what lets a critical section answer "is this plan
+  active" without touching flash (§4.8).
+- **Time tables and their point id lists are not.** A plan acquiring its first
+  subscriber reads them out of flash into a working copy the engine uses to arm
+  timers and derive read blocks (§5.2); the copy is released when the last
+  subscriber goes.
+
+No capability, device or point record is ever RAM-resident. The 192 B of plan
+headers is the one deliberate exception to that, and it is stated here rather than
+discovered because the rule it bends is load-bearing everywhere else.
 
 **An edit is a record edit, and it persists.** There is no overlay, no second
 source of plan truth and no new flash mechanism: creating, modifying or deleting a
@@ -475,12 +488,13 @@ write never validates, and the swap is hot. Because JSON is only the outward
 translation (§1.2), `GET …/config/download` after an edit returns the edited
 plans with no extra work.
 
-**A plan with subscribers cannot be modified or deleted.** `mbErr_busy`, and the
-caller is told which plan. This is the whole safety rule, and it needs no state:
-active is the OR of the plan masks of live subscriptions. Retuning a live plan
-therefore means unsubscribing, or creating a second plan and moving to it — which
-is honest, because a consumer's timers and derived blocks were built from the plan
-it subscribed to and cannot silently change underneath it.
+**A plan with subscribers cannot be modified or deleted.** `mbErr_busy`. This is
+the whole safety rule, and it needs no stored state: *active* is the OR of the
+plan masks of live subscriptions **excluding wildcards**, recomputed from the
+subscription table whenever it is asked for. Retuning a live plan therefore means
+unsubscribing, or creating a second plan and moving to it — which is honest,
+because a consumer's timers and derived blocks were built from the plan it
+subscribed to and cannot silently change underneath it.
 
 **`MB_PLAN_ALL` does not pin anything.** A subscriber that asked for every plan
 expressed no dependency on which plans exist, so it does not make them immutable;
@@ -494,11 +508,18 @@ fresh catalogue.
 that is not. Density exists so the single-pass compiler can range-check a
 *reference* against a count it already holds — and since the device→plan link
 inverted, **nothing in the stream references a plan at all**. The only thing that
-names a plan is a subscriber's mask bit, which is exactly a slot number. So the
-plan section is 8 slots, a free slot is `name[0] == 0`, `Modbus_PlanCreate` takes
-the lowest free one, and a delete frees a slot without moving any other. That is
-what makes deletion safe: without it, deleting an unused plan would shift the ids
-above it and silently re-point the mask of a subscriber that had pinned one.
+names a plan is a subscriber's mask bit, which is exactly a slot number. So there
+are 8 slots, `Modbus_PlanCreate` takes the lowest free one, and a delete frees a
+slot without moving any other. That is what makes deletion safe: without it,
+deleting an unused plan would shift the ids above it and silently re-point the
+mask of a subscriber that had pinned one.
+
+**A free slot has no record in the stream.** Plan records carry their own
+`planId`, are written in ascending slot order and simply skip the free ones, so
+the section stays sentinel-terminated with no blank entries — a stored blank would
+collide with the `name[0] == 0` sentinel and truncate the section at the first
+hole. The resident header table is what represents "slot 2 is free"; the stream
+only ever says what exists.
 
 `MB_MAX_PLANS` is 8 because `planMask` is a `uint8_t`; a create with no free slot
 returns `mbErr_full`, and deleting an unused plan is how room is made.
@@ -590,7 +611,10 @@ names them by slot. The two are one conversation: a subscription is what makes a
 plan run, and what makes it immutable while it does (§3.5).
 
 ```c
-#define MB_PLAN_ALL  0xFFu          /* MB_MAX_PLANS is 8 */
+#define MB_PLAN_ALL      0xFFu   /* every plan; pins none of them (§3.5)   */
+#define MB_PLAN_REQUEST  0xFFu   /* mbEvt_txn.planId: traffic a request    */
+                                 /*   caused, not a timer (§4.4)           */
+                                 /* MB_MAX_PLANS is 8, so slots are 0..7   */
 
 /* ---- plans ------------------------------------------------------------ */
 typedef struct {
@@ -652,12 +676,18 @@ depending on the operator having authored one. `Modbus_PlanCreate` is the honest
 form of "I need this data this often", and it is the same object the operator
 sees in `modbus plan list`.
 
-**`PlanList`/`PlanGet` are synchronous and read the plan slots**, which are the
-one part of the config the module keeps addressable without a flash walk (§5.2).
+**`PlanList` and `PlanGet` are synchronous** because plan headers are resident —
+the ~192 B table of §3.5, and the one part of the config the module keeps
+addressable without a flash walk. `PlanGet` fills the header fields directly;
+`sModbusPlanInfo.subscribers` is counted from the subscription table on the spot,
+so it is a live answer rather than a stored one. **A plan's time tables are not in
+that table** — a caller wanting them asks while the plan is live, and the module
+reads them from flash on the modbus task like any other record.
+
 `Create`/`Modify`/`Delete` claim the plan table in the same brief critical section
-that `Subscribe` uses, so "is it active" cannot race a subscribe and the call
-keeps a real error return; the flash rewrite and the timer rebuild that follow are
-posted (§4.8).
+that `Subscribe` uses, so "is it active" cannot race a subscribe and the call keeps
+a real error return; the flash rewrite and the timer rebuild that follow are posted
+(§4.8).
 
 | Return | Means |
 |---|---|
@@ -697,7 +727,8 @@ nothing, and the answer is the same for every consumer of that plan. Within its
 scope a subscription gets **every read**. `eventMask` is the same kind of thing
 one level up — a stateless predicate on the event *type*.
 
-The table is 8 entries of 16 B in main SRAM.
+The subscription table is 8 entries of 16 B in main SRAM, beside the ~192 B plan
+header table (§3.5). Neither is latency-critical, so neither is in CCM.
 
 ### 4.4 Events
 
@@ -714,7 +745,7 @@ typedef enum {
 typedef struct {
     const char *topicPrefix;   /* MQTT's display string for the device     */
     const char *name;          /* topic suffix; links nothing, not unique  */
-    int32_t     writeMin, writeMax;   /* scaled-int domain; valid if WRITE */
+    int32_t     writeMin, writeMax;   /* scaled-int; valid if MB_PT_BOUNDED*/
     uint32_t    period_sec;    /* shortest live period; 0 = unwatched      */
     uint16_t    ptOrd;         /* point id within the device's capability  */
     uint8_t     devOrd;        /* device id (position in devices[])        */
@@ -792,7 +823,7 @@ for samples — a 60 s point would take a minute, and a point on a silent device
 would never appear.
 
 So the module replays a **catalogue**: a burst of `mbEvt_pointDesc`, one per
-point of every device on a subscribed plan, `last = 1` on the final entry.
+point of every device covered by a subscribed plan, `last = 1` on the final entry.
 Delivered after `Modbus_Subscribe`, after every config swap, and on demand via
 `Modbus_RequestCatalogue`. The empty catalogue is `last = 1` with `pt == NULL`.
 
@@ -830,8 +861,10 @@ breakdown reads it from `Modbus_PlanGet` rather than from the catalogue.
 and infrequent, and it is the consumer's call whether to copy-and-post or to act
 inline.
 
-Note that the config is walked **from flash** and never held in RAM. That
-property is load-bearing and must not leak away through the API.
+Note that capability, device and point records are walked **from flash** and never
+held in RAM — the plan headers of §3.5 are the one stated exception, and they carry
+no points. That property is load-bearing and must not leak away through the API: a
+catalogue call is a flash walk, which is exactly why it runs on the modbus task.
 
 ### 4.6 Requests — one array of items, in and out
 
@@ -1002,7 +1035,9 @@ one object — which a broadcast cannot express.
    order alone. A requester caching ordinals across a *reordered* config addresses
    the wrong entry, which is why `mbEvt_config` is followed by a fresh catalogue;
    under id linking that reordering is itself a compile error, so what remains is
-   an author who deliberately renumbered.
+   an author who deliberately renumbered. **A `planId` is stabler than either**: it
+   is a slot, so creating and deleting other plans never moves it, and only an
+   upload that re-authors the plan section can (§3.2).
 7. **Borrowing runs both ways, and a borrow ends when the module says it ended**
    (§1.2) — the request array until the completion callback, the subscriber `ctx`
    until `mbEvt_released`.
@@ -1179,8 +1214,11 @@ behind it.
 string, and deliberately not what a subscription scopes to. `topicPrefix` survives
 as exactly what it says it is: MQTT's display string, rendered into topics, HA
 `unique_id`s and the device grouping by the one consumer that needs it. The
-module has no name-based entry point at all; its whole addressable surface is two
-ordinals.
+module has no name-based entry point for **data**: a reading is addressed by
+`{devOrd, ptOrd}` and nothing else. Plan names are the one place a string is
+matched, and deliberately so — a plan is a thing an operator authors and a
+consumer looks for, and `Modbus_PlanList` returns the slot so the match happens
+once, in the consumer, and never on a data path.
 
 ---
 
@@ -1304,8 +1342,9 @@ cheap enough that there is no reason to build something else; the discipline is
 that the timer callback runs in the timer service task, so like the ISR case it
 **only posts an event**.
 
-**A sequence is what one timer fires:** the derived read blocks of one device's
-time table, run back to back on that device's port. Two things fall out. Every
+**A sequence is what one timer fires:** the derived read blocks of one device for
+one time table of one plan, run back to back on that device's port. Two things
+fall out. Every
 block goes to one device, so a sequence costs **one line reconfiguration** rather
 than one per block. And a pending request has an obvious injection point —
 between blocks *within* a sequence — which keeps requests responsive without ever
@@ -1359,14 +1398,16 @@ from the plan's device set with `Modbus_PlanModify` and its timers go with it �
 hot, persistent, and not an upload (§3.5). That is the case the device set was
 worth having for.
 
-**Config and device lifecycle drive timers directly.** Setting a device's
-parameters starts its process; destroying a device, changing its port, or swapping
-the config kills its timers. Stop the timers, let anything in flight land,
-construct the new devices. A completion arriving for a device being torn down is
-discarded on a per-device generation counter — no waiting, no locks.
+**Plan lifecycle drives timers directly.** A plan going live creates one timer per
+(device, time table) it covers; a plan losing its last subscriber, being edited, or
+a config swap destroys them. Stop the timers, let anything in flight land, rebuild.
+A completion arriving for a device being torn down is discarded on a per-device
+generation counter — no waiting, no locks. Editing a plan therefore rebuilds only
+the timers of the devices *that plan* covers; a second plan over the same device is
+untouched, because its timers are a different identity.
 
-**Not staggered, and first-come-first-served.** All of a device's timers start at
-device init, so everything is due at once at startup and stays phase-locked;
+**Not staggered, and first-come-first-served.** A plan's timers all start when it
+goes live, so everything it covers is due at once and stays phase-locked;
 sequences due together are serviced in arrival order. Both are accepted: they are
 latency effects on a line that serialises anyway, and they are visible through the
 missed counter if they ever stop being acceptable.
@@ -1439,10 +1480,13 @@ Uploading replaces capabilities, devices and plans together; **plans can also be
 changed without it** (§3.5), and a download afterwards shows those changes because
 it re-serialises the records rather than replaying an uploaded file.
 
-- **`id`, everywhere** — every object carries one and it must equal its position:
-  `0, 1, 2 …`, no gaps, no reordering. Authored rather than inferred so that an
-  insertion or deletion fails loudly instead of silently re-pointing every
-  reference after it.
+- **`id`, everywhere** — every object carries one, and for capabilities, points,
+  devices and time tables it must equal its position: `0, 1, 2 …`, no gaps, no
+  reordering. Authored rather than inferred so that an insertion or deletion fails
+  loudly instead of silently re-pointing every reference after it. **A plan's `id`
+  is a slot** (§3.2): 0…7, unique, gaps allowed, and it is what a subscriber's mask
+  bit means — so moving a plan's `id` between uploads is the one renumbering that
+  reaches consumer code.
 - **Capability** — `id`, `name` (≤15 chars, display only), the dialect
   (`addrStride`, `writeFc`, `maxReadRegs`), `blocks[]`, `points[]`. It describes
   what the hardware can do and contains **no periods**.
@@ -1485,8 +1529,8 @@ it re-serialises the records rather than replaying an uploaded file.
 of devices, so both must already be defined when the single-pass compiler meets
 it (§7.2).
 
-**Sharing is the normal case, not an option.** Four battery packs are four
-devices, one capability, one or two plans:
+**Sharing is the normal case, not an option.** Three battery packs are three
+devices, one capability, two plans:
 
 ```jsonc
 {
@@ -1545,8 +1589,11 @@ records, not instances** — four packs on a 50-point capability cost 50 points,
 costs flash reads and MQTT messages, not RAM.
 
 The point ceiling is a **flash** limit: a point costs its 40 bytes of stream and
-nothing in RAM, and 384 is about what a 16 KB region holds. Device count is the
-exception — pinned at 8 by the `uint8_t` subscription mask.
+nothing in RAM, and 384 is about what a 16 KB region holds. Two counts are pinned
+by masks instead: **plans at 8** by the `uint8_t` subscription mask (§4.3), and
+**devices at 8** by the `uint8_t` device set on the plan record (§7.1). Raising
+either is a width change in one field, not a flash-map move — but the plan mask is
+also the API's `planMask` parameter, so widening it is a surface change.
 
 **ASCII and bitfield semantics, frozen:** an ASCII point emits its decoded string
 on every read; a bitfield emits the raw `u16` formatted as unsigned decimal;
@@ -1559,7 +1606,8 @@ neither gets an HA `device_class` or unit.
 ### 7.1 The stream
 
 Flat, sentinel-terminated, no stored pointers or offsets — a linear scan is
-self-describing, and nothing is ever RAM-resident.
+self-describing, and no capability, device or point record is ever RAM-resident
+(§3.5 states the one exception, the plan headers).
 
 ```
 [Header]
@@ -1606,11 +1654,14 @@ typedef struct __attribute__((packed)) {
 } sModbusPointRecord;                                         /* 40 bytes */
 
 typedef struct __attribute__((packed)) {
-    char     name[16];        /* name[0] == 0 = free slot / end-of-plans   */
+    char     name[16];        /* name[0] == 0 = end-of-plans               */
     uint16_t capId;           /* the capability its point ids index into   */
     uint8_t  planId;          /* SLOT 0..7 — stored, unlike every other id */
     uint8_t  devices;         /* device set, one bit per deviceId          */
 } sModbusPlanRecord;                                          /* 20 bytes */
+/* Free slots have NO record: plans are written in ascending planId order,
+ * skipping the unused ones, so a blank entry can never be mistaken for the
+ * sentinel (§3.5).                                                        */
 
 typedef struct __attribute__((packed)) {
     uint32_t period_sec;      /* ≥1; uint32 so 24 h is expressible         */
@@ -1643,8 +1694,9 @@ array position, and a linear scan over a self-describing stream already knows th
 position of what it is reading; the `"id"` in the JSON is an authoring assertion
 the compiler checks, not a field it stores. A `planId` is a **slot** rather than a
 position (§3.2), precisely so that deleting a plan does not move any other, so it
-has to be written down — a free slot is `name[0] == 0` and the section is not
-required to be contiguous.
+has to be written down. A free slot is simply **absent from the stream**, so the
+section is not required to be contiguous in `planId` and no blank record can
+shadow the `name[0] == 0` sentinel.
 
 **Sentinel or count, decided by one rule: does anything address it?** A
 capability, point, plan, time table and device are all reachable by id, so they
@@ -1842,8 +1894,10 @@ curl -X DELETE http://10.42.0.203/api/modbus/plans/1         # delete  (409 if s
 
 A plan body is one element of the config's `plans[]` array, so the same JSON an
 operator would paste into a config is what these endpoints take — one schema, one
-validator (§7.4). **409 means the plan has a subscriber that named it**, with the
-body saying which; `MB_PLAN_ALL` subscribers do not lock a plan (§3.5).
+validator (§7.4). **409 means the plan has a subscriber that named it** —
+`MB_PLAN_ALL` subscribers do not lock a plan (§3.5) — and the body reports the
+subscriber count so an operator can tell "something holds this" from "the region
+is busy", which is the other 409.
 
 Uploads are refused with 409 while an apply is pending, and so are plan writes —
 both need the inactive region. The uploaded JSON is not retained — download
@@ -1982,7 +2036,10 @@ records and dialect constants, and the alternative — reaching into `App/Modbus
 from the test build — would make an engine internal a test dependency.
 
 **Plans get their own group, and it is mostly about the slot semantics** (§3.5):
-a non-contiguous plan section accepted; a duplicate or out-of-range slot rejected;
+a non-contiguous plan section accepted **and fully readable past the gap** — the
+one case where a blank record would shadow the `name[0] == 0` sentinel and
+silently truncate the section, so assert the plan *after* the hole is still found;
+a duplicate or out-of-range slot rejected;
 a plan naming a device that does not exist, or one implementing a different
 capability, rejected; an empty device set and an empty time-table list both
 accepted; a point listed in two time tables of one plan rejected but in two
@@ -2240,13 +2297,16 @@ full when it is not.
   `MB_MAX_POINTS_TOTAL` → CCM coupling entirely: a point now costs only flash.
 - **Added, in main SRAM deliberately:** ~1 KB of frame buffers (two ports × 256 B
   tx+rx, which *must* leave CCM because DMA writes into them), a 128 B
-  subscription table and a 256 B request FIFO. Nothing about any of them is
-  latency-critical.
-- **Added, in CCM, and the number to watch:** the per-device derived read-block
-  tables and the FreeRTOS software timers, which come off the 48 KB `.ccmheap`
-  that task stacks also come from. Nothing in the design bounds this in advance —
-  measure it across step 10 with `size -A` before and after, and treat a claimed
-  saving that does not show up as evidence something else grew.
+  subscription table, a ~192 B plan header table (§3.5) and a 256 B request FIFO.
+  Nothing about any of them is latency-critical.
+- **Added, in CCM, and the number to watch:** the live plans' working copies
+  (time tables plus their point id lists), the per-device derived read-block
+  tables, and the FreeRTOS software timers — all off the 48 KB `.ccmheap` that
+  task stacks also come from. Nothing in the design bounds this in advance, and
+  it now scales with *subscribed* plans rather than with config size, which is
+  the better shape but not a bound. Measure it across step 10 with `size -A`
+  before and after, and treat a claimed saving that does not show up as evidence
+  something else grew.
 
 Consumer event copies are not module memory, but they do transit the same
 `.ccmheap`, so a consumer leaking allocations exhausts the heap task stacks come
