@@ -66,29 +66,34 @@ discovery and set-topic resolution.
 
 ```
                     ┌──────────────────────────────────────────┐
-   App/Cmd ────────►│  App/Modbus/modbus.h   (the only header  │
-   App/Http ───────►│                         anyone includes) │
+   App/Cmd ────────►│  App/Modbus/modbus.h                     │
+   App/Http ───────►│  (the only header a CONSUMER includes)   │
    App/Mqtt ───────►│                                          │
    App/Can  ───────►│  ┌────────────────────────────────────┐  │
-   App/Data ───────►│  │ scheduler   timers → events        │  │
-        ▲           │  │ engine      FSM, sequences, decode │  │
-        │ events    │  │ ports       uart · test  (§2.5)    │  │
-        └───────────┤  │ config      facade over Shared/    │  │
+        ▲           │  │ scheduler   timers → events        │  │
+        │ events    │  │ engine      FSM, sequences, decode │  │
+        └───────────┤  │ port table  slots + frame buffers  │  │
+                    │  │ config      facade over Shared/    │  │
                     │  └────────────────────────────────────┘  │
-                    └──────────┬───────────────────────────────┘
-                               │ may depend on
-                               ▼
-             HAL · CMSIS-OS/FreeRTOS · Shared/Modbus · w25q128 · trice
+                    └──────▲───────────────────┬───────────────┘
+   RS485 driver ───────────┤ modbus_port.h     │ may depend on
+   test driver  ───────────┘ register+complete ▼
+                              (§2.5)    HAL · CMSIS-OS/FreeRTOS ·
+                                        Shared/Modbus · w25q128 · trice
 ```
 
 **Rules:**
 
 - Files in `App/Modbus/` must not include `App/Mqtt`, `App/Http`, `App/Can`,
   `App/Data`, or any lwIP header.
-- Everything outside the module includes only `App/Modbus/modbus.h`. Ports,
-  the scheduler, the engine and the framing layer are all module-internal —
-  in particular there is no way to select or configure a port from outside,
-  because a port is where a device lives and that is config (§2.5, §2.6).
+- A **consumer** includes only `App/Modbus/modbus.h`. The scheduler, the engine
+  and the framing layer are module-internal, and there is no way to select a
+  port for a device from outside — a port is where a device lives, and that is
+  config (§2.5, §2.6).
+- A **peripheral driver** is the one other thing outside the module that talks
+  to it, through `modbus_port.h`: it registers itself into a port slot and calls
+  back when a frame completes (§2.5). It knows nothing about config, events or
+  consumers, and the module knows nothing about its transport.
 - **No device-specific code lives here.** A device is described by config, not
   by a driver — see §1.3.
 - Consumers may use `Shared/Modbus` **types** (`modbus_records.h` — enums, unit
@@ -109,17 +114,18 @@ it does is expressible without device-specific firmware:
 
 | `jk_bms.c` does | replaced by |
 |---|---|
-| a hardcoded FC03 read of block `0x1400` | a transaction in a device type, `startAddr: 5120` |
+| a hardcoded FC03 read of block `0x1400` | points at `addr: 5120…` in a capability that declares that block ([§2.6](#26-capabilities-plans-devices-and-parameters)) |
 | ASCII decode of model / hw / sw version | `decodeType: "ascii"` points — already supported |
-| its own USART2 init at 115200 | the device's `baud` parameter ([§2.6](#26-capabilities-plans-devices-and-parameters)) |
-| byte-addressed registers | the type's address stride — data, not code (§2.6) |
+| its own USART2 init at 115200 | the device's `baud` parameter (§2.6) |
+| byte-addressed registers | the capability's `addrStride` — data, not code (§2.6) |
+| no FC06 handler on the slave | the capability's `writeFc` — likewise (§2.6) |
 | "is a JK actually there?" for bring-up | a capability declaring its blocks, plus `Modbus_Request` (§2.9) |
 
-**The JK BMS becomes a device type, on the same footing as the Solis config.**
+**The JK BMS becomes a capability, on the same footing as the Solis config.**
 That is what makes the module worth extracting at all: the next device after JK
 must cost a JSON file, not a `.c` file. The rule that keeps it that way —
-**types carry data, never behaviour** — is stated in §2.6, because a type table
-that may hold code is just `jk_bms.c` with extra steps.
+**capabilities carry data, never behaviour** — is stated in §2.6, because a
+capability that may hold code is just `jk_bms.c` with extra steps.
 
 ### 1.4 Why the API first
 
@@ -139,36 +145,27 @@ involved. MQTT then becomes just another subscriber.
 
 ## 2. The design
 
-Nothing here is implemented. §2.1-§2.4 and §2.8-§2.15 are the module's
+Nothing here is implemented. §2.1-§2.4 and §2.8-§2.14 are the module's
 **surface** — what a consumer sees and may rely on. §2.5-§2.7 are what sits
-**behind** it: peripherals, the device model, and scheduling. The split is the
-point: the surface is what §2.16 lands first and holds constant while
-everything behind it is replaced.
+**behind** it: peripherals, the device model, and scheduling. §2.15 is the
+record of how each of those was decided. The split is the point: the surface is
+what §2.16 lands first and holds constant while everything behind it is
+replaced.
 
-`App/Modbus/modbus.h` is written, compiles clean, and carries the contracts as
-comments. This section is the rationale behind it, not a duplicate of it.
+**`App/Modbus/modbus.h` predates the 2026-08-11/12 audit and is superseded
+throughout.** It compiles and it carries the original contracts as comments, but
+the audit changed the surface in more places than it left untouched, so it is
+**not** a second source of truth and no attempt is made here to enumerate the
+differences — that list would be longer than the header. Read §2 as
+authoritative; §2.16 steps 1-6 rewrite the header to match, and step 2 is where
+most of it lands.
 
-**As of 2026-08-11 this document leads the header.** Closing Q2/Q3/Q4 (§2.15)
-changed the surface, and the header is edited by the §2.16 step that first acts
-on each answer, so until then it is stale in the places listed here — recorded
-so nobody reads it as current:
+Every call, event, contract and struct the header still shows in its old form is
+covered by a §2.15 entry saying what replaced it and why.
 
-| `modbus.h` today | This document | Lands at |
-|---|---|---|
-| `Modbus_Subscribe(const char *deviceId, …)` | `(uint8_t planMask, …)`, `MB_PLAN_ALL`, and subscribing is what starts polling, §2.3 | step 2 |
-| `mbEvt_deviceState` | deleted — availability leaves the module, §2.15 Q5 | step 2 |
-| `sModbusCompileError` mirror struct | `sModbusCompileResult` in `modbus_records.h` | step 1 |
-| contract 6: ordinals valid within one generation | both ordinals are authored identities | step 2 |
-| contract 8: "the table is fixed and not lock-free; late subscription … is not hot-plug-safe under load" | subscribe at any time, including before `Modbus_Init` — publish-last ordering, §2.12b | step 2 |
-| contract 4's safe-from-a-callback list names `Modbus_SubmitWrite`, `SubmitRawWrite`, `ForceRefresh` | `Modbus_Request`, `RequestCatalogue`, `Unsubscribe`, `Stats` — all posted, all non-blocking, §2.12b | step 2 |
-| `OPEN Q2` / `Q3` / `Q4` comments | closed, §2.15 | steps 1-2 |
-| `Modbus_SubmitWrite(sModbusWriteReq*, id)`, one point, async id | `Modbus_Request(devOrd, sModbusReqItem*, count, timeout_ms, cb, ctx)`, §2.9a | step 1 shape, step 11 engine |
-| `mbEvt_writeResult`, `MB_WRITE_NO_POINT` | deleted — the outcome goes to the requester's callback | step 11 |
-| `Modbus_ConfigReset`, and `Modbus_Init` "provisions the built-in default" | `Modbus_ConfigErase`; no built-in exists, invalid regions are erased, §2.15 Q6 | step 6 |
-| `sModbusPointDesc`: `MB_PT_WRITABLE`, `int16_t` bounds, no period | access bits (`MB_PT_READ`/`MB_PT_WRITE`), `int32_t` bounds, `period_sec` (0 = unmonitored), §2.6/§2.11 | step 6 |
-| `Modbus_SubmitRawWrite`, `Modbus_ForceRefresh` | both deleted, §2.9a / §2.7 | step 11 |
-| `Modbus_Probe`, `sModbusProbeReq` | deleted — no direct bus access in either direction, §2.9 | step 9 |
-| `mbEvt_released` absent from the event enum | the release point for a subscriber's `ctx`, §2.12b | step 2 |
+The one thing the header carries that this document does not is its `OPEN Qn`
+markers. All six questions are closed (§2.15); the markers are deleted by the
+step that first acts on each answer.
 
 ### 2.1 Shape
 
@@ -176,7 +173,7 @@ so nobody reads it as current:
 |---|---|
 | Lifecycle | `Modbus_Init` — that is all of it, [§2.8](#28-lifecycle--set-it-and-forget-it) |
 | Subscriptions | `Modbus_Subscribe` · `Unsubscribe` · `RequestCatalogue` |
-| Commands | `Modbus_Request` ([§2.9a](#29a-requests--two-arrays-in-three-arrays-back)) — that is all of it, [§2.9](#29-no-direct-bus-access-in-either-direction) |
+| Commands | `Modbus_Request` ([§2.9a](#29a-requests--one-array-of-items-in-and-out)) — that is all of it, [§2.9](#29-no-direct-bus-access-in-either-direction) |
 | Configuration | `Modbus_ConfigVerify` · `Compile` · `Apply` · `Erase` · `Export` · `Status` |
 | Diagnostics | `Modbus_Stats` · `LogStatus` · `SetMonitor`/`GetMonitor` |
 
@@ -389,7 +386,7 @@ typedef struct {
 typedef struct {
     uint32_t baud;
     uint32_t responseTimeout_ms;   /* the DRIVER arms it; 0 = its default */
-    uint8_t  format;               /* eModbusLineFormat — 8N1 today (§9)  */
+    uint8_t  format;               /* eModbusLineFormat — 8N1 default     */
 } sModbusPortParams;
 
 typedef enum {
@@ -458,8 +455,9 @@ failure is simply a fourth completion outcome and a transaction is exactly one
 event.
 
 **A port with no driver registered is disabled.** There is no `mbPort_disabled`
-and no port-selection API; §2.8 argued that "port disabled" already said
-everything `Stop` said, and registration makes that structural. `mbPort_uart6`
+and no port-selection API; §2.8 argued that "no devices" and "port disabled"
+already said everything `Stop` said, and registration makes the second of those
+structural. `mbPort_uart6`
 goes the same way — it was an enum entry with no pins behind it — so the enum is
 `mbPort_rs485 = 0` and `mbPort_test = 1`, and a second real bus later is a third
 slot with a third driver.
@@ -718,11 +716,12 @@ that the timer callback runs in the timer service task, so like the ISR case it
 **only posts an event**.
 
 **A sequence is what one timer fires:** the derived read blocks of one device's
-time table, run back to back on that device's port. Two useful things fall
-out. A device's transactions all share its baud, so a sequence costs **one line
-reconfiguration**, not one per transaction. And a pending request has an obvious
-injection point — between transactions *within* a sequence — which keeps
-requests responsive without ever interleaving on a half-duplex wire.
+time table, run back to back on that device's port. Two useful things fall out.
+Every block in a sequence goes to one device, so they all share its baud and
+format and a sequence costs **one line reconfiguration**, not one per block. And
+a pending request has an obvious injection point — between blocks *within* a
+sequence — which keeps requests responsive without ever interleaving on a
+half-duplex wire.
 
 **A request batch runs whole, at one injection point.** §2.9a promises the batch
 "belongs to one sequence on one port at one baud", and splitting it across
@@ -743,13 +742,15 @@ independent of the servicer, nothing rearms a timer on completion, so a period
 is a period and drift has nowhere to accumulate. There are no absolute-deadline
 computations and no tick-wrap comparisons anywhere in the engine.
 
-**Stacking is dropped and counted.** Event identity is the event plus its
-argument — the device and the period. If the engine is handed a 5 s event for a
-device whose previous 5 s event is still unserviced, the new one is **dropped
-and recorded**. The same device's 60 s event is a different identity and is
-unaffected. This is coalescing with an observable, and it makes the queue depth
-trivial: it need only match the timer count, and a post that fails because the
-queue is full is just another dropped event through the same counter.
+**Stacking is dropped and counted.** Event identity is `{deviceId,
+timeTableId}` — which is what makes the time table an authored object rather
+than a period found by scanning (§2.6). If the engine is handed a device's 5 s
+event while its previous one is still unserviced, the new one is **dropped and
+recorded**. That device's 60 s table is a different identity and is unaffected.
+This is coalescing with an observable, and it keeps the queue small: timer
+count plus a few slots for the API calls that post (§2.12b). A post that fails
+because the queue is full is just another dropped event through the same
+counter.
 
 **The missed counter is a capacity signal, not a curiosity.** A non-zero count
 means the config is asking for more than the wire can deliver — which is exactly
@@ -797,9 +798,9 @@ neither is worth pre-solving.
 the A/B regions, **erases anything that fails validation**, constructs whatever
 devices the config describes. Timers are **not** started here — they come and go
 with subscriptions (§2.3), so a board that boots with a valid config and no
-subscribers puts nothing on the wire. From then on the module
-runs: it owns its peripherals, reads what the config tells it to read, and
-services a request at the first opening between reads.
+subscribers puts nothing on the wire. From then on the module runs: it services
+whatever plans are subscribed to, and takes a request at the first opening
+between reads.
 
 **There is no built-in default config, and none is provisioned** (§2.15 Q6). A
 register map describes hardware the board may not have, so a fallback config is
@@ -824,10 +825,10 @@ Everything that used to let an outsider steer it is gone —
 `InjectResponse`. None of them described anything a consumer needs. A port is
 not a mode to be selected; it is where a device lives, which is config. A baud
 is not a global; it is a device parameter. "Stopped" is not a state worth
-having when "no devices configured" and "port disabled" already say everything
-it said, and both are config.
+having when "no devices configured", "nothing subscribed" and "no driver
+registered" already say everything it said.
 
-It reshaped one more call, and then deleted it: `Modbus_Probe` (§2.9).
+It reshaped one more call before deleting it outright: `Modbus_Probe` (§2.9).
 
 ### 2.9 No direct bus access, in either direction
 
@@ -882,8 +883,7 @@ The write path was §7's largest undesigned cluster. What settled it was framing
 it as **the contract between the module and a requester** rather than as a
 function-code question: the config already describes every accessible register,
 so the module publishes that set with its data types and access, keeps
-addresses, offsets and function codes inside, and the requester submits a
-selection.
+addresses and function codes inside, and the requester submits a selection.
 
 It is `Modbus_Request`, not `Modbus_Write`, because **the config decides what
 each item means**, not the caller:
@@ -963,7 +963,7 @@ port at one baud, so "the module finished" is a statement about one slave.
 **A `ptOrd` is an identity, not a cursor** — the point's position in the config,
 exactly as `devOrd` is the device's position in `devices[]` (§2.14). The module
 owns the mapping and nothing internal leaks: a requester never sees a
-`startAddr`, an `offset`, a stride or a function code. It carries the same price
+a wire address, a stride or a function code. It carries the same price
 as §2.3, and it is the same price an enum carries: **reordering points in the
 JSON reassigns identity.**
 
@@ -1254,7 +1254,7 @@ is load-bearing and must not leak away through the API.
 
 **The catalogue is also the requestable-set source.** `sModbusPointDesc` carries
 the access bits, `writeMin`/`writeMax`, `decodeType`, `scalePow10` and the
-ordinals, and deliberately no address, offset or function code — so "the full
+ordinals, and deliberately no address or function code — so "the full
 set with its data types and access, internals withheld" (§2.9a) *is* the
 catalogue. A requester reads the access bits to know whether an id will be read,
 written or written-and-read-back. No second enumeration API exists or is needed.
@@ -1278,30 +1278,29 @@ side of the boundary for it.
 
 ### 2.12 Contracts
 
-Eight of them, in the header, and they matter more than the struct shapes.
-Summarised: callbacks run **in the modbus task, synchronously**; they **must not
-block**; **every pointer in an event is borrowed** and dies when the callback
-returns; a subscriber cannot fail a sequence; and **both ordinals are authored
+Eight of them, and they matter more than the struct shapes. Summarised:
+callbacks run **in the modbus task, synchronously**; they **must not block**;
+**every pointer in an event is borrowed** and dies when the callback returns; a
+subscriber cannot fail a sequence; and **both ordinals are authored
 identities** — `devOrd` is the device's position in `devices[]` (§2.14), `ptOrd`
-the point's position in its capability (§2.9a), and each survives a config swap for
-exactly as long as the author leaves that array order alone.
+the point's position in its capability (§2.9a), and each survives a config swap
+for exactly as long as the author leaves that array order alone.
 
 That last one replaced the original contract 6, which said ordinals were valid
 only within one config generation. It stopped being true when scope and write
 addressing both became ordinals: an id that expires every swap cannot be the
 thing a requester names. The residual risk moved rather than vanishing — a
 requester that caches ordinals across a **reordered** config writes or reads the
-wrong entry, which is the price §2.3 already documents and the reason
-`mbEvt_config` is followed by a fresh catalogue. Under ID linking that reordering
-is itself a compile error (§2.6), so what remains is a config the author
-deliberately renumbered.
+wrong entry, which is the reason `mbEvt_config` is followed by a fresh
+catalogue. Under ID linking that reordering is itself a compile error (§2.6, §4),
+so what remains is a config whose author deliberately renumbered it.
 
 **Contract 8 became a guarantee rather than a caveat.** It used to say the table
 "is fixed and not lock-free" and that late subscription "is not hot-plug-safe
 under load" — an admitted race. §2.12b decides it: subscribe at any time,
 including before `Modbus_Init`.
 
-Four of them are load-bearing under the event-driven engine:
+Four are load-bearing under the event-driven engine:
 
 - **Nothing dispatches from ISR or timer context.** Port completion callbacks
   and timer callbacks post events and return. Decode and subscriber dispatch
@@ -1312,15 +1311,14 @@ Four of them are load-bearing under the event-driven engine:
   multiplied by config size, not by how much the plant is moving.
 - **Borrowed pointers are what make the whole dispatch model work** (§2.12a) —
   an observer that keeps anything copies it before returning.
-- **A borrow ends when the module says it ended**, and that is one rule with two
-  instances: a requester's item array is released by its completion callback
-  (§2.9a), a subscriber's `ctx` by `mbEvt_released` (§2.12b). No flag, no
-  handshake word — the module notifies, and until it has, the memory is on loan.
-- **Borrowing runs both ways.** A requester's `Modbus_Request` item array is
-  borrowed by the module until its completion callback returns (§2.9a); freeing
-  or reusing them earlier corrupts a transaction still on the wire. The callback
-  is guaranteed to fire within the request's `timeout_ms`, which is what makes
-  that rule livable rather than an open-ended loan.
+- **Borrowing runs both ways, and a borrow ends when the module says it ended.**
+  A requester's `Modbus_Request` item array is the module's until the completion
+  callback fires — freeing or reusing it earlier corrupts a frame still on the
+  wire — and a subscriber's `ctx` is its own until `mbEvt_released` (§2.12b). One
+  rule, two instances, no flag or handshake word in either: the module notifies,
+  and until it has, the memory is on loan. The request's guarantee that its
+  callback fires within `timeout_ms` (§2.9a) is what keeps that livable rather
+  than open-ended.
 
 #### 2.12a Dispatch — the module hands over, the observer owns what happens next
 
@@ -1463,9 +1461,10 @@ It covers the request arrays (§2.9a) and the subscriber `ctx` identically.
   implementable: submissions already ahead of the swap event run normally, and
   ones stamped with the retiring generation are completed with *not attempted*
   when the swap is processed.
-- **Queue depth is timers plus a few API slots**, not timers alone as §2.7 says
-  in isolation. Depth still stays trivial, and a post that fails because the
-  queue is full is reported through the same dropped-event counter.
+- **Queue depth is timers plus a few API slots.** §2.7 sizes it from the timer
+  count; the API calls that post are the rest of it. Depth still stays trivial,
+  and a post that fails because the queue is full is reported through the same
+  dropped-event counter.
 
 One cost, stated rather than buried: **a catalogue burst now runs on the modbus
 task by construction**, and §2.12a already calls it the heaviest thing the
@@ -1558,20 +1557,18 @@ two ordinals.
 
 ### 2.15 Decisions, and what they cost
 
-**Nothing here is open.** Every question this section was opened to hold has
-been answered; what is still undecided lives in [§9](#9-open-decisions), which is
-ordered by the [§2.16](#216-implementation-order) step that needs each answer.
-This section is the record of the ones that closed and, more usefully, of *what
-was rejected on the way* — several were re-proposed across review rounds, and
-the reasoning is kept so they are not re-proposed a third time.
+**Nothing here is open**, and neither is [§9](#9-open-decisions). This section
+is the record of what was decided and, more usefully, *what was rejected on the
+way* — several proposals came back across review rounds, so the reasoning is
+kept to stop them coming back a third time.
 
-The `Qn` numbering matches the `OPEN Qn` markers in `modbus.h`, which still
-carries the older list. A marker present there and closed here means "decided,
-not yet written into the surface"; each is deleted by the §2.16 step that first
-acts on the answer, listed in the §2 table above.
+It is also the reference for reading `App/Modbus/modbus.h`, which predates the
+audit: anything the header still shows in its old form has an entry here saying
+what replaced it. The `Qn` numbering matches the header's `OPEN Qn` markers,
+each deleted by the §2.16 step that first acts on the answer.
 
 Entries are grouped by the round that closed them rather than by step, since
-none of them is waiting on anything.
+none is waiting on anything.
 
 - **Q1 — should `topicPrefix` get a transport-neutral spelling in the JSON?**
   Deferred, see §2.14, and **downgraded to cosmetic** by the Q3 answer: identity
@@ -2512,8 +2509,8 @@ is nothing for it to count towards. What survives into the engine is one frame
 buffer per port instead of the single shared `s_regBuf[125]`.
 
 The word this document used for one traversal was "lap". It is retired: the
-engine has no traversal to bound. The unit of work is a **sequence** (§2.7),
-which is one device's transactions at one period.
+engine has no traversal to bound. The unit of work is a **sequence** (§2.7) —
+one device's derived read blocks for one time table.
 
 Per-device availability: 3 consecutive failed transactions mark a device offline
 (retained `<topicPrefix>/availability`); the first success brings it back. Offline
@@ -2846,7 +2843,7 @@ carry an `availability` array (bridge status AND device availability, mode
 Modbus: unprovisioned (no valid config)
 Modbus: started                            <- at Modbus_Init, not on command
 MQTT: device online: periphnet             <- bridge-derived, §2.15 Q5
-Modbus config: staged 2 devices 13 txns 29 points
+Modbus config: staged 1 capability 1 plan 1 device 29 points
 Modbus: config swapped, active region 1
 MQTT: device offline: periphnet            <- bridge-derived, §2.15 Q5
 Modbus: missed periphnet 5s (n=1)          <- sequence still running when due again
@@ -2863,10 +2860,11 @@ running count belongs in `modbus status`, not in the log (§2.7). It prints the
 period for a human, but the counter it reports keys on `{deviceId,
 timeTableId}`, which is the timer's actual identity (§2.6).
 
-The staged-counts line changes at step 6 and is **not** covered by the steps 1-7
-acceptance rule, which binds the §6 contract table rather than these landmarks:
-`txns` is not a thing any more, so it becomes
-`Modbus config: staged N devices M points`.
+The staged-counts line above is its **post-step-6** form; today it reads
+`Modbus config: staged 2 devices 13 txns 29 points`. It changes because
+transactions cease to exist and `sModbusConfigCounts` gains capabilities and
+plans (§3.3), and it is **not** covered by the steps 1-7 acceptance rule, which
+binds the §6 contract table rather than these landmarks.
 
 ### 5.5 RS485 timing
 
@@ -2926,8 +2924,9 @@ time table listing a `w` point; a device naming a nonexistent plan or an unknown
 port; `publish` now rejected as an unknown key; `access` accept+reject
 (including `w`/`rw` on an `input` point, rejected always, and on a
 multi-register type, rejected only under `writeFc: 6` — §2.6); `int32` write
-bounds round-tripping past ±32767; and the export round trip through both
-spellings. **Reject cases assert on `res.err`, not on prose** (§3.3) — a code
+bounds round-tripping past ±32767; and the export round trip over every new
+field, since a field the exporter forgets is invisible until someone downloads a
+config and re-uploads it. **Reject cases assert on `res.err`, not on prose** (§3.3) — a code
 survives rewording the message, a `strcmp` against `reason` does not, and every
 existing reject test changes that way. The stride cases want a JK-shaped vector specifically —
 `addrStride: 2` is where a contiguity or quantity computed in the address domain
@@ -3032,11 +3031,11 @@ bottom is the genuinely undesigned part.
 | One physical bus, hardcoded `huart2` | `modbus_rtu.c` throughout; `modbus_walker.h:23`, applied at `modbus_walker.c:328` | §2.5 — ports become a serviced set |
 | One baud for the whole bus | same | §2.6 — a device parameter |
 | `mbPort_uart6` in the enum but refused (pins not confirmed in the schematic) | `modbus_rtu.c:289` | **closed** — §2.5 deletes the entry at step 8: a slot with no registered driver *is* absent. The schematic question survives only for a future second *real* RS485 bus |
-| Framing constants sized for 9600 — 4 ms gap, 5 ms silence | `modbus_rtu.c:122`, `:156` | §2.5/§2.6 — derived from baud, inside the port |
+| Framing constants sized for 9600 — 4 ms gap, 5 ms silence | `modbus_rtu.c:122`, `:156` | §2.5/§5.5 — derived from baud inside the driver, and format-independent since 11 bits is RTU's maximum |
 | Write address assumed `startAddr + offset`; JK registers are byte-addressed | `modbus_config_store.c:334` (live); `mqtt_bridge.c:377` computes the same expression but `ha_publish_entity` discards it (`(void)regAddr`) — dead, not a second bug | §2.6 — the point's `addr` is authored verbatim and a write uses it unchanged, so there is no offset left to add; the dead one goes when MQTT stops walking the config |
-| A **writable point is never checked against its transaction's function code** — marking a point on an `input` transaction writable compiles clean, and the FC06 write then lands on a *holding* register of the same number, a different register in a different space | `modbus_config_compiler.c:605-609` validates width only; the shipped config is correct by authorship, not by validation | §2.9a — `w`/`rw` access requires a `holding` transaction, rejected at compile |
+| A **writable point is never checked against its transaction's function code** — marking a point on an `input` transaction writable compiles clean, and the FC06 write then lands on a *holding* register of the same number, a different register in a different space | `modbus_config_compiler.c:605-609` validates width only; the shipped config is correct by authorship, not by validation | §2.9a — `w`/`rw` access requires a `holding` point, rejected at compile |
 | `readPeriodS` is `uint16_t`, so periods cap at 18h12m — **a 24 h read cannot be expressed** | `modbus_records.h:89` | §3.2 — `uint32_t` on the v2 time-table record |
-| One map per device, copied per device — no way to share a register map between identical slaves | `modbus_records.h` (no map record) | §2.6/§3.2 — shared capabilities referenced by ordinal |
+| One map per device, copied per device — no way to share a register map between identical slaves | `modbus_records.h` (no map record) | §2.6/§3.2 — shared capabilities referenced by `capId` |
 | **The read period lives inside the register map**, so two devices sharing a map must share its periods — a spare pack cannot be polled lazily off the same map | `modbus_records.h` (`readPeriodS` on the txn record) | §2.6 — capability/plan split |
 | The walker publishes straight to MQTT | `modbus_walker.c:183` | §2.13 — the whole point of the API |
 | Publish policy lives in the Modbus config | `modbus_records.h:77-78` | §2.4 — deleted |
@@ -3044,7 +3043,7 @@ bottom is the genuinely undesigned part.
 | Reads are FC03/FC04; writes are FC06 only, one register | `modbus_rtu.c`; `Modbus_WriteSingleRegister` | §2.6 — `writeFc` is a capability field, and it has to be: the JK implements only FC 0x03 and 0x10 and rejects FC06 |
 | Writable points must be exactly 1 register | `modbus_config_compiler.c:606` | §2.6 — an FC06 consequence, so the rule follows `writeFc`; under FC16 a multi-register setpoint is legal, which the JK's `u32` Settings fields require |
 | Write bounds are `int16_t` | `modbus_records.h:79` | §2.9a/§3.2 — widened to `int32_t` in v2 |
-| One pending write at a time | `modbus_walker.c:35-38` | §2.9a — a small FIFO of batch submissions |
+| One pending write at a time | `modbus_walker.c:35-38` | §2.9a — a FIFO of 8 batch submissions |
 
 Not designed, deliberately:
 - **A fifth dialect fact.** The group is closed at four — `addrStride`,
@@ -3052,9 +3051,6 @@ Not designed, deliberately:
   bench. Whatever a third slave turns out to need, the constraint is unchanged
   and is the point of the rule: it must be expressible as **data on the
   capability**, never a code path, or it is refused.
-- **The v2 compile-error location.** A failure inside `capabilities[0].points[2]`
-  has no device index, so the `{device, transaction, point}` triple must gain a
-  section discriminator. Named in §2.15 Q2 as forced; its shape is not decided.
 - **MQTT publish rate control.** §2.4 deletes the per-point threshold/heartbeat,
   which nothing used, and leaves the bridge publishing every sample. If broker
   or recorder load ever makes that a problem, the answer is a policy on the MQTT
@@ -3087,16 +3083,17 @@ was edited to match. What changed, and why:
 
 1. *JK BMS is not a module component* — a device is a config, not a driver.
    `jk_bms` left the boundary, the `jk` CLI tree went with it, and its two real
-   facts became a device-type field (byte addressing → address stride) and a
-   device parameter (115200 → baud).
+   facts became capability data (byte addressing → `addrStride`) and a device
+   parameter (115200 → baud).
 2. *Baud is a device property* — different slaves at different rates share one
    wire by time-multiplexing. `Modbus_SetBaud` left the API. Framing constants
    became baud-derived, which later moved them into the port entirely.
 3. *The module must not store values* — it reads, translates, emits. Two
    corrections were needed here:
-   - **Per-device subscriptions stayed.** The first pass removed them by reading
-     the finding as a ban on filtering; it is a ban on *memory*. Device scope is
-     an ordinal — later a mask of them (§2.3) — and stores nothing.
+   - **Scoped subscriptions stayed.** The first pass removed them by reading the
+     finding as a ban on filtering; it is a ban on *memory*. Scope is a bitmask
+     — over devices then, over plans since entry 30 (§2.3) — and stores
+     nothing.
    - **The publish policy was deleted, not carried.** The second pass had the
      module transporting `publish.threshold`/`heartbeatS` to consumers so
      authoring would stay in one place. Wrong place: Modbus has no basis to
@@ -3124,6 +3121,9 @@ was edited to match. What changed, and why:
    filter in the engine, since a free-running timer cannot know a slave is
    dead; and the config swap became per-device timer teardown rather than a
    traversal boundary. The word "lap" is retired with the traversal.
+   *(Entry 29 later deleted the backoff outright, along with the notion of a
+   slave being dead; and entry 30 made a timer's existence depend on a
+   subscription.)*
 
 **Revised 2026-08-10 (second pass), closing the record-format question.** The
 review above left §3.2 asserting the format would move once while §2.16
@@ -3418,13 +3418,14 @@ closed here and the rest are still open, listed in §7 and §2.15:
     caching what §2.2 says not to cache.
 33. *The numbering said the sequence had been edited* — §2.16 carried a step
     "10a" wedged between 10 and 11, left from inserting the write path into a
-    finished list, and the §2 staleness table pointed at "step 11" for a write
+    finished list, and §2's staleness table pointed at "step 11" for a write
     engine the list called 10a. Renumbered 10a → 11 with everything after it
     shifted, and the eleven cross-references chased through §2.5, §2.6, §2.15,
     §3.2, §7 and §8. §2.15 lost its claim to be ordered by §2.16 step — true
-    when it held open questions, meaningless now that §9 holds them — and is
-    retitled to what it actually is: the record of decisions and of what was
-    rejected on the way.
+    when it held open questions, meaningless once §9 held them — and is retitled
+    to what it actually is. The staleness table went with a later sweep: the
+    audit moved the header so far that enumerating the differences was longer
+    and less honest than saying the header is superseded outright.
 34. *One array of items, not three parallel ones* — raised while deferring a
     requester-side memory question, and worth more than the tidiness it was
     offered as. Parallel `ids`/`values`/`results` made the caller's borrow three
