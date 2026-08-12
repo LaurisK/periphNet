@@ -9,6 +9,8 @@
 
 static struct udp_pcb *s_trice_pcb;
 static ip_addr_t       s_dest_addr;
+static uint32_t        s_sentCount;
+static uint32_t        s_failedCount;
 
 static void Trice_UdpConsumerTask(void *arg);
 
@@ -25,14 +27,34 @@ void Trice_UdpWrite(const uint8_t *data, size_t len)
     memcpy(p->payload, data, len);
 
     LOCK_TCPIP_CORE();
-    /* Return value ignored on purpose: with a tunnel destination this fails
-     * with ERR_RTE whenever the WireGuard netif is down.  Logging must never
-     * be able to disturb anything, so a dropped log line is the correct
-     * outcome — not a retry, and not an error path. */
-    (void)udp_sendto(s_trice_pcb, p, &s_dest_addr, TRICE_UDP_PORT);
+    /* A failure here must never disturb anything — with a tunnel destination
+     * this returns ERR_RTE whenever the WireGuard netif is down, and a dropped
+     * log line is the correct outcome, not a retry.  It is counted rather than
+     * discarded so "the transport is trying but the route is dead" can be told
+     * apart from "nothing is being logged at all". */
+    if (udp_sendto(s_trice_pcb, p, &s_dest_addr, TRICE_UDP_PORT) == ERR_OK) {
+        s_sentCount++;
+    } else {
+        s_failedCount++;
+    }
     UNLOCK_TCPIP_CORE();
 
     pbuf_free(p);
+}
+
+int Trice_UdpIsReady(void)
+{
+    return (s_trice_pcb != NULL) ? 1 : 0;
+}
+
+void Trice_UdpGetStats(uint32_t *sent, uint32_t *failed)
+{
+    if (sent != NULL) {
+        *sent = s_sentCount;
+    }
+    if (failed != NULL) {
+        *failed = s_failedCount;
+    }
 }
 
 void Trice_UdpSetDest(uint8_t a, uint8_t b, uint8_t c, uint8_t d)

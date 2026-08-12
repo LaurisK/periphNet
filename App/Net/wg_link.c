@@ -98,6 +98,46 @@ int WgLink_HasIdentity(void)
     return (s_cfg.hasPrivateKey && s_cfg.hasPeerKey) ? 1 : 0;
 }
 
+int WgLink_GetPeerStats(sWgPeerStats *out)
+{
+    struct wireguard_device *dev;
+    struct wireguard_peer   *peer;
+
+    if (out == NULL) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (!s_running || s_peerIndex == WIREGUARDIF_INVALID_INDEX) {
+        return -2;
+    }
+
+    LOCK_TCPIP_CORE();
+    dev = (struct wireguard_device *)s_wgNetif.state;
+    if (dev != NULL && s_peerIndex < WIREGUARD_MAX_PEERS) {
+        peer = &dev->peers[s_peerIndex];
+
+        out->sessionValid = peer->curr_keypair.valid ? 1u : 0u;
+        out->lastRx_ms    = peer->last_rx;
+        out->lastTx_ms    = peer->last_tx;
+        out->txPackets    = (uint32_t)peer->curr_keypair.sending_counter;
+        out->rxCounter    = (uint32_t)peer->curr_keypair.replay_counter;
+
+        /* peer->ip is the endpoint the port is actually sending to, which is
+         * not necessarily the configured one — it follows the source of the
+         * last valid handshake, so a roaming or NAT-remapped hub shows up
+         * here and nowhere else. */
+        out->endpointIp[0] = (uint8_t)(ip4_addr_get_u32(ip_2_ip4(&peer->ip)) >>  0);
+        out->endpointIp[1] = (uint8_t)(ip4_addr_get_u32(ip_2_ip4(&peer->ip)) >>  8);
+        out->endpointIp[2] = (uint8_t)(ip4_addr_get_u32(ip_2_ip4(&peer->ip)) >> 16);
+        out->endpointIp[3] = (uint8_t)(ip4_addr_get_u32(ip_2_ip4(&peer->ip)) >> 24);
+        out->endpointPort  = peer->port;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return 0;
+}
+
 /* --------------------------------------------------------------------------
  * Keys
  * -------------------------------------------------------------------------- */

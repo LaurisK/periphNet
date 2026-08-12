@@ -51,4 +51,15 @@ void Trice_UdpWrite(const uint8_t *data, size_t len);
  */
 void Trice_UdpSetDest(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 
+/**
+ * @brief  1 if the UDP PCB was allocated, i.e. the transport can send.
+ */
+int Trice_UdpIsReady(void);
+
+/**
+ * @brief  Number of datagrams handed to udp_sendto(), and how many of those
+ *         it rejected (typically ERR_RTE while the tunnel is down).
+ */
+void Trice_UdpGetStats(uint32_t *sent, uint32_t *failed);
+
 #endif /* TRICE_UDP_H_ */

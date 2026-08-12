@@ -18,6 +18,10 @@
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/crash.h"
 #include "App/Log/trice_udp.h"
+#include "App/Log/trice_consumer.h"
+#include "usart.h"
+#include "usbd_cdc_if.h"
+#include "usbd_cdc.h"
 #include "App/Modbus/modbus_default_config.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
@@ -53,7 +57,7 @@ static void wg_status_json(char *buf, size_t sz);
 
 /* Single-task server: static buffers are safe and cheap */
 static char req_buf[REQ_BUF_SIZE] CCMRAM_BSS;
-static char resp_buf[1024] CCMRAM_BSS;
+static char resp_buf[1280] CCMRAM_BSS;
 
 static const char index_html[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
@@ -1185,6 +1189,21 @@ static void wg_status_json(char *buf, size_t sz)
                       cfg->allowed[i].mask[2], cfg->allowed[i].mask[3]);
     }
 
+    sWgPeerStats st;
+    char peerStats[160] = "";
+
+    if (WgLink_GetPeerStats(&st) == 0) {
+        (void)snprintf(peerStats, sizeof(peerStats),
+            ",\"peer_last_rx_ms\":%u,\"peer_last_tx_ms\":%u,"
+            "\"tx_packets\":%u,\"rx_counter\":%u,"
+            "\"live_endpoint\":\"%u.%u.%u.%u:%u\",\"now_ms\":%u",
+            (unsigned)st.lastRx_ms, (unsigned)st.lastTx_ms,
+            (unsigned)st.txPackets, (unsigned)st.rxCounter,
+            st.endpointIp[0], st.endpointIp[1],
+            st.endpointIp[2], st.endpointIp[3],
+            (unsigned)st.endpointPort, (unsigned)sys_now());
+    }
+
     (void)snprintf(buf, sz,
         "{\"running\":%s,\"session_up\":%s,\"provisioned\":%s,"
         "\"config_source\":\"%s\",\"config_version\":%u,"
@@ -1193,7 +1212,7 @@ static void wg_status_json(char *buf, size_t sz)
         "\"allowed_ips\":[%s],"
         "\"endpoint_ip\":\"%u.%u.%u.%u\",\"endpoint_port\":%u,"
         "\"keepalive\":%u,\"rng_hw_seeded\":%s,\"rng_failures\":%u,"
-        "\"time_now\":%u,\"time_persisted\":%u,\"time_flash_backed\":%s}",
+        "\"time_now\":%u,\"time_persisted\":%u,\"time_flash_backed\":%s%s}",
         WgLink_IsRunning() ? "true" : "false",
         WgLink_IsUp()      ? "true" : "false",
         WgLink_HasIdentity() ? "true" : "false",
@@ -1208,7 +1227,8 @@ static void wg_status_json(char *buf, size_t sz)
         cfg->endpointIp[2], cfg->endpointIp[3],
         (unsigned)cfg->endpointPort, (unsigned)cfg->keepAlive_sec,
         hwSeeded ? "true" : "false", (unsigned)rngFailures,
-        (unsigned)now, (unsigned)persisted, flashOk ? "true" : "false");
+        (unsigned)now, (unsigned)persisted, flashOk ? "true" : "false",
+        peerStats);
 }
 
 static void handle_wg_status(struct netconn *conn)
@@ -1321,6 +1341,51 @@ static void handle_wg_config_reset(struct netconn *conn)
     }
     TRice("WG: stored config erased\n");
     wg_status_json(resp_buf, sizeof(resp_buf));
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* Trice health, for when the log stream itself is what is broken.
+ *
+ * Everything deferred — UART, USB CDC and UDP alike — is flushed by
+ * TriceTransfer() in triceTask, which only runs while USART3's DMA reports
+ * ready.  So a stuck UART state silences every sink at once, and that is
+ * indistinguishable from "nothing is being logged" unless the counters are
+ * exposed somewhere that does not itself depend on Trice. */
+static void handle_trice_status(struct netconn *conn)
+{
+    uint32_t udpSent = 0u, udpFailed = 0u;
+    unsigned usbTxState = 255u;
+
+    Trice_UdpGetStats(&udpSent, &udpFailed);
+    {
+        extern USBD_HandleTypeDef hUsbDeviceFS;
+        USBD_CDC_HandleTypeDef *cdc =
+            (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+        if (cdc != NULL) {
+            usbTxState = (unsigned)cdc->TxState;
+        }
+    }
+
+    /* huart3 and the Trice counters are declared by usart.h / trice.h. */
+    snprintf(resp_buf, sizeof(resp_buf),
+        "{\"uart3_gstate\":%u,\"uart3_ready\":%s,"
+        "\"aux_fn_registered\":%s,\"consumer_pending\":%u,"
+        "\"udp_consumer_registered\":%s,\"udp_pcb_ok\":%s,"
+        "\"udp_sent\":%u,\"udp_failed\":%u,\"usb_tx_state\":%u,"
+        "\"free_heap\":%u,"
+        "\"trice_errors\":%u,\"deferred_overflow\":%u,"
+        "\"half_buffer_depth_max\":%u}",
+        (unsigned)huart3.gState,
+        MX_USART3_Ready() ? "true" : "false",
+        (UserNonBlockingDeferredWrite8AuxiliaryFn != NULL) ? "true" : "false",
+        (unsigned)TriceConsumer_Pending(),
+        TriceConsumer_IsRegistered(TRICE_CONSUMER_UDP) ? "true" : "false",
+        Trice_UdpIsReady() ? "true" : "false",
+        (unsigned)udpSent, (unsigned)udpFailed, usbTxState,
+        (unsigned)xPortGetFreeHeapSize(),
+        (unsigned)TriceErrorCount,
+        (unsigned)TriceDeferredOverflowCount,
+        (unsigned)TriceHalfBufferDepthMax);
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -1443,6 +1508,8 @@ static void handle_connection(struct netconn *conn)
         handle_wg_config(conn, &stream);
     } else if (route_is("DELETE /api/wg/config")) {
         handle_wg_config_reset(conn);
+    } else if (route_is("GET /api/trice/status")) {
+        handle_trice_status(conn);
     } else if (route_is("POST /api/trice/dest")) {
         handle_trice_dest(conn, &stream);
     } else if (route_is("POST /api/wg/keygen")) {

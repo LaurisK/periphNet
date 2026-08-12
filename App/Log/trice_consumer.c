@@ -52,6 +52,14 @@ unsigned TriceConsumer_Pending(void)
     return s_mgr.pending_mask;
 }
 
+int TriceConsumer_IsRegistered(int id)
+{
+    if (id < 0 || id >= TRICE_CONSUMER_COUNT) {
+        return 0;
+    }
+    return (s_mgr.tasks[id] != NULL) ? 1 : 0;
+}
+
 const void *TriceConsumer_GetData(void)
 {
     return s_mgr.data;

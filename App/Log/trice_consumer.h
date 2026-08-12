@@ -17,5 +17,14 @@ void TriceConsumer_ResetAll(void);
 
 unsigned TriceConsumer_Pending(void);
 
+/**
+ * @brief  1 if a consumer task registered for @p id, 0 otherwise.
+ *
+ * A consumer whose task failed to start is indistinguishable from one that is
+ * merely idle unless this is exposed: dispatch silently does nothing, and the
+ * sink looks dead for no visible reason.
+ */
+int TriceConsumer_IsRegistered(int id);
+
 const void *TriceConsumer_GetData(void);
 size_t      TriceConsumer_GetLen(void);

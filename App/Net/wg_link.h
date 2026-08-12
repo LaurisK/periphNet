@@ -53,6 +53,26 @@ typedef struct {
     uint8_t    allowedCount;
 } sWgLinkCfg;
 
+/**
+ * Live peer state, read straight out of the port's peer struct.
+ *
+ * This exists because "the tunnel is up" is not observable from either end on
+ * its own: the hub reports a peer as active on the strength of handshakes
+ * alone, and handshakes succeed regardless of whether a single data packet
+ * ever crosses.  @c lastRx_ms is the field that actually settles it — if it
+ * never advances while the far end is sending, the loss is before us; if it
+ * advances and nothing comes back, the loss is ours.
+ */
+typedef struct {
+    uint8_t  sessionValid;    /* a current keypair exists                   */
+    uint32_t lastRx_ms;       /* sys_now() of the last DATA packet in, 0=never */
+    uint32_t lastTx_ms;       /* sys_now() of the last DATA packet out      */
+    uint32_t txPackets;       /* encrypted packets sent on this session     */
+    uint32_t rxCounter;       /* highest received counter (replay window)   */
+    uint8_t  endpointIp[4];   /* where the port currently thinks the hub is */
+    uint16_t endpointPort;
+} sWgPeerStats;
+
 /* Opaque to callers that do not want lwIP headers. */
 struct netif;
 struct ip4_addr;
@@ -90,6 +110,12 @@ int WgLink_IsUp(void);
 
 /** @brief  1 once both keys are present, i.e. the tunnel can be started. */
 int WgLink_HasIdentity(void);
+
+/**
+ * @brief  Snapshot the live peer state (see sWgPeerStats).
+ * @return 0 on success, negative if the tunnel is not running.
+ */
+int WgLink_GetPeerStats(sWgPeerStats *out);
 
 /** @brief  The configuration the link is running with (or would start
  *          with).  Never NULL. */

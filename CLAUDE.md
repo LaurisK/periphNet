@@ -608,6 +608,10 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
 Hub facts, address plan and the WGDashboard gotchas:
 `docs/task_board_as_wireguard_peer.md`.
 
+Provisioning, the `.conf` upload path and the still-open "handshake succeeds
+but the tunnel carries no data" problem:
+`docs/status_wg_provisioning_2026-08-12.md`.
+
 ## Coding Standards
 
 **[`C coding standard.md`](C%20coding%20standard.md) in the repo root is
