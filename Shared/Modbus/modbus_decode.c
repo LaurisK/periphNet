@@ -197,3 +197,63 @@ int MbParse_Scaled(const char *text, int8_t pow10, int32_t *scaled)
     *scaled = (int32_t)v;
     return 0;
 }
+
+int MbEncode_Scaled(const sModbusPointRecord *p, int32_t scaled,
+                    uint16_t *regs)
+{
+    uint32_t u;
+
+    if (p == NULL || regs == NULL) {
+        return -1;
+    }
+
+    switch (p->decodeType) {
+    case mbDecode_u16:
+    case mbDecode_bitfield:
+        if (scaled < 0 || scaled > (int32_t)UINT16_MAX) {
+            return -1;
+        }
+        regs[0] = (uint16_t)scaled;
+        return 1;
+
+    case mbDecode_s16:
+        if (scaled < INT16_MIN || scaled > INT16_MAX) {
+            return -1;
+        }
+        regs[0] = (uint16_t)(int16_t)scaled;
+        return 1;
+
+    case mbDecode_u32Be:
+    case mbDecode_u32Le:
+        if (scaled < 0) {
+            return -1;
+        }
+        u = (uint32_t)scaled;
+        if (p->decodeType == mbDecode_u32Be) {
+            regs[0] = (uint16_t)(u >> 16);
+            regs[1] = (uint16_t)(u & 0xFFFFu);
+        } else {
+            regs[0] = (uint16_t)(u & 0xFFFFu);
+            regs[1] = (uint16_t)(u >> 16);
+        }
+        return 2;
+
+    case mbDecode_s32Be:
+    case mbDecode_s32Le:
+        u = (uint32_t)scaled;
+        if (p->decodeType == mbDecode_s32Be) {
+            regs[0] = (uint16_t)(u >> 16);
+            regs[1] = (uint16_t)(u & 0xFFFFu);
+        } else {
+            regs[0] = (uint16_t)(u & 0xFFFFu);
+            regs[1] = (uint16_t)(u >> 16);
+        }
+        return 2;
+
+    default:
+        /* ascii has no numeric inverse, and a float32 point's scaled value has
+         * already lost its exponent — neither is writable, and the compiler
+         * has no reason to allow one to be. */
+        return -1;
+    }
+}

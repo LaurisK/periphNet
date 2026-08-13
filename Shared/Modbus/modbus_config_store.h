@@ -9,8 +9,10 @@
  * erase.
  *
  * Invariant: a region is never erased while it may still be walked — the
- * retiring region is only overwritten by the NEXT upload, so a reader that
- * races a swap still sees coherent (old) data.
+ * retiring region is only overwritten by the NEXT upload or plan edit, so a
+ * reader that races a swap still sees coherent (old) data.  The corollary is
+ * what motivates verify (docs/modbus.md §4.9): the retiring region IS the
+ * previous config, and any upload destroys it.
  *
  * Shared-layer module: depends only on libc + the W25Q128 driver, so it is
  * host-testable over the NOR-faithful flash mock.
@@ -62,8 +64,15 @@ int      MbCfgStore_Init(void);
 uint32_t MbCfgStore_ActiveBase(void);
 uint32_t MbCfgStore_InactiveBase(void);
 
-/* Header magic/version/streamLen sanity + CRC32 over the record stream. */
+/* Header magic/version/streamLen sanity + CRC32 over the record stream.
+ * The version test is strict equality, which is what makes the v1 -> v2 move
+ * a wipe rather than a migration (docs/modbus.md §11.2). */
 bool     MbCfgStore_RegionValid(uint32_t base);
+
+/* Erase a region's header page so it stops validating.  "Invalid is erased,
+ * not repaired" (§4.2): one observable state instead of a spectrum of
+ * partially-readable ones, and the region is immediately reusable. */
+int      MbCfgStore_EraseRegion(uint32_t base);
 
 /* Arm the swap flag (NOR bit-clear, no erase). Refuses (-1) if the inactive
  * region does not hold a valid config. */
@@ -71,16 +80,17 @@ int      MbCfgStore_SetSwapPending(void);
 bool     MbCfgStore_IsSwapPending(void);
 
 /* Flip the active region and clear the pending flag (sector erase+rewrite).
- * Called by the walker at a lap boundary only. Never erases LUT regions. */
+ * Called by the engine at a safe point only. Never erases LUT regions. */
 int      MbCfgStore_CommitSwap(void);
 
 /* ==========================================================================
  * Record cursor — sequential walk of a region's record stream
  *
- * Call discipline: NextDevice, then per device loop NextTransaction, then
- * per transaction loop NextPoint until it returns 0. Points must always be
- * drained before the next NextTransaction call (the cursor is a plain
- * offset — records are not indexed).
+ * Call discipline follows the stream's own order (modbus_records.h): for each
+ * capability, read its blocks, then drain its points; then devices; then, per
+ * plan, its time tables, each followed by its point-id array.  Records must
+ * always be drained before moving to the next level — the cursor is a plain
+ * offset, records are not indexed.
  *
  * Return convention: 1 = record read, 0 = sentinel consumed (end of that
  * level), -1 = malformed stream / read error.
@@ -93,33 +103,83 @@ typedef struct {
 } sMbCfgCursor;
 
 int MbCfg_Open(uint32_t base, sMbCfgCursor *c);   /* -1 if header invalid */
-int MbCfg_NextDevice(sMbCfgCursor *c, sModbusDeviceRecord *d);
-int MbCfg_NextTransaction(sMbCfgCursor *c, sModbusTransactionRecord *t);
+
+int MbCfg_NextCapability(sMbCfgCursor *c, sModbusCapabilityRecord *cap);
 int MbCfg_NextPoint(sMbCfgCursor *c, sModbusPointRecord *p);
+int MbCfg_NextDevice(sMbCfgCursor *c, sModbusDeviceRecord *d);
+int MbCfg_NextPlan(sMbCfgCursor *c, sModbusPlanRecord *p);
+int MbCfg_NextTimeTable(sMbCfgCursor *c, sModbusTimeTableRecord *t);
+
+/* Payload arrays, not records: nothing refers to "block 2 of capability 1" or
+ * to a time table's third id, so they are plain arrays behind a count on the
+ * record that owns them (§7.2).  Pass out = NULL to skip. 0 = ok, -1 = error. */
+int MbCfg_ReadBlocks(sMbCfgCursor *c, sModbusBlockRecord *out, uint8_t count);
+int MbCfg_ReadPointIds(sMbCfgCursor *c, uint16_t *out, uint16_t count);
 
 /* ==========================================================================
  * Whole-region helpers
  * ========================================================================== */
 
-typedef struct {
-    uint8_t  devices;
-    uint8_t  transactions;
-    uint16_t points;
-} sMbCfgCounts;
-
 /* Full structural walk; -1 if the stream is malformed. */
-int MbCfg_Count(uint32_t base, sMbCfgCounts *out);
+int MbCfg_Count(uint32_t base, sModbusConfigCounts *out);
+
+/* Position a cursor at the first device / first plan record. */
+int MbCfg_SeekDevices(uint32_t base, sMbCfgCursor *c);
+int MbCfg_SeekPlans(uint32_t base, sMbCfgCursor *c);
+
+/* Load one capability and its blocks, leaving the cursor at its first point.
+ * `blocks` may be NULL; it is filled with at most maxBlocks entries.
+ * 0 = found, -1 = no such capability / malformed. */
+int MbCfg_OpenCapability(uint32_t base, uint16_t capId, sMbCfgCursor *c,
+                         sModbusCapabilityRecord *cap,
+                         sModbusBlockRecord *blocks, uint8_t maxBlocks);
+
+int MbCfg_FindDevice(uint32_t base, uint8_t devOrd, sModbusDeviceRecord *out);
+
+/* One point of one capability, by its dense ordinal. */
+int MbCfg_FindPoint(uint32_t base, uint16_t capId, uint16_t ptOrd,
+                    sModbusPointRecord *out);
+
+/* Plan headers are the ONE deliberate exception to "no record is RAM-resident"
+ * (§3.5): ~160 B for all 8 slots, so PlanList/PlanGet can be synchronous and a
+ * critical section can answer "is this plan active" without touching flash. */
+typedef struct {
+    sModbusPlanRecord rec;
+    uint8_t           tableCount;
+    uint8_t           used;      /* 0 = free slot: no record in the stream  */
+} sMbPlanHeader;
+
+/* Fills out[0..MB_MAX_PLANS-1] by slot, marking the free ones.
+ * Returns the number of plans present, or -1. */
+int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out);
 
 typedef struct {
     uint8_t            slaveAddr;
-    uint16_t           regAddr;   /* absolute: txn.startAddr + point.offset */
+    uint8_t            functionCode;
+    uint16_t           regAddr;   /* the point's wire address, VERBATIM —
+                                     a write needs no stride arithmetic     */
+    uint16_t           capId;
+    uint8_t            addrStride;
+    uint8_t            writeFc;   /* the capability's dialect (§3.3)        */
+    uint8_t            portId;    /* where the device lives — config, never
+                                     an API choice (§3.4)                   */
+    uint8_t            baudCode;
+    uint8_t            format;
     sModbusPointRecord point;
 } sMbPointLookup;
 
-/* Find a writable point by device topicPrefix + point name in the ACTIVE
- * region (MQTT set-topic resolution). 0 = found, -1 = no match. */
-int MbCfg_FindWritablePoint(const char *topicPrefix, const char *name,
-                            sMbPointLookup *out);
+/* There is no lookup BY NAME: a reading is addressed by {devOrd, ptOrd} and
+ * nothing else (docs/modbus.md §4.10).  A consumer that starts from a string
+ * — an MQTT set-topic, a CLI argument — resolves it against the catalogue it
+ * was given, once, in the consumer, and never on a data path. */
+
+/* Resolve {devOrd, ptOrd} in the ACTIVE region — the ordinal addressing the
+ * module's API uses.  ptOrd indexes the DEVICE'S CAPABILITY, so several
+ * devices sharing one capability answer the same ptOrd with the same point
+ * and different slave addresses (§4.4).
+ *
+ * 0 = found, -1 = no such device or point. */
+int MbCfg_ResolvePoint(uint8_t devOrd, uint16_t ptOrd, sMbPointLookup *out);
 
 #ifdef __cplusplus
 }

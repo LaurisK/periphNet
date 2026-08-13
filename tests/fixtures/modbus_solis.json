@@ -1,0 +1,29 @@
+{
+  "capabilities": [
+    { "id": 0, "name": "solis",
+      "addrStride": 1, "writeFc": 6, "maxReadRegs": 125,
+      "blocks": [ { "base": 3009, "regs": 2 }, { "base": 3132, "regs": 20 } ],
+      "points": [
+        { "id": 0, "addr": 3132, "fc": "input", "decodeType": "u16",
+          "scale": 0.1, "unit": "V", "name": "battery_voltage" },
+        { "id": 1, "addr": 3133, "fc": "input", "decodeType": "s16",
+          "scale": 0.1, "unit": "A", "name": "battery_current" },
+        { "id": 2, "addr": 3138, "fc": "input", "decodeType": "u16",
+          "scale": 1, "unit": "%", "name": "battery_soc" },
+        { "id": 3, "addr": 3009, "fc": "holding", "decodeType": "u16",
+          "scale": 1, "unit": "%", "name": "max_charge_soc",
+          "access": "rw", "writeMin": 70, "writeMax": 100 },
+        { "id": 4, "addr": 3010, "fc": "holding", "decodeType": "u16",
+          "scale": 1, "unit": "%", "name": "overdischarge_soc",
+          "access": "rw", "writeMin": 5, "writeMax": 40 }
+      ] }
+  ],
+  "devices": [
+    { "id": 0, "slaveAddr": 1, "capability": 0, "baud": 9600,
+      "port": "test", "topicPrefix": "periphnet" }
+  ],
+  "plans": [
+    { "id": 0, "name": "inverter", "capability": 0, "devices": [0],
+      "timeTables": [ { "id": 0, "everySec": 3600, "points": [0, 1, 2] } ] }
+  ]
+}

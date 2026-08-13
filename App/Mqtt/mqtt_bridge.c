@@ -5,16 +5,20 @@
  * Uses the lwIP built-in MQTT client (mqtt.h).  All lwIP MQTT callbacks
  * run in tcpip_thread context — no Trice calls and no flash access in
  * callbacks; everything is deferred to mqttTask.  All raw lwIP MQTT calls
- * go through the tcpip core lock because MqttBridge_Publish is also called
- * from the Modbus walker task.
+ * go through the tcpip core lock.  Since docs/modbus.md §10 step 5 every
+ * publish happens on mqttTask, so the lock is off the Modbus sequence path
+ * entirely.
  */
 
 #include "App/Mqtt/mqtt_bridge.h"
-#include "App/Modbus/modbus_walker.h"
+#include "App/Modbus/modbus.h"
 #include "cmsis_os.h"
 #include "trice.h"
 
-#include "modbus_config_store.h"
+/* Shared/Modbus TYPES and pure functions only: decode/format is translation
+ * and stays there for consumers to call (docs/modbus.md §5.3).  The flash
+ * accessors (MbCfg_*, MbCfgStore_*) are gone from this file — everything the
+ * bridge knows about the config now arrives as a catalogue. */
 #include "modbus_decode.h"
 #include "modbus_units.h"
 
@@ -163,9 +167,8 @@ static void mqtt_inject_cb(void *ctx)
 }
 
 /* --------------------------------------------------------------------------
- * Publish core — the single path to the raw lwIP publish API.
- * Called from mqttTask and the Modbus walker task; the tcpip core lock
- * serializes both against tcpip_thread and each other.
+ * Publish core — the single path to the raw lwIP publish API, reached only
+ * from mqttTask; the tcpip core lock serializes it against tcpip_thread.
  * -------------------------------------------------------------------------- */
 
 static int do_publish(const char *topic, const char *payload, uint16_t len,
@@ -199,7 +202,7 @@ int MqttBridge_Publish(const char *topic, const char *payload,
     return do_publish(topic, payload, payloadLen, retain, 1);
 }
 
-void MqttBridge_PublishDeviceStatus(const char *topicPrefix, int online)
+static void publish_device_status(const char *topicPrefix, int online)
 {
     char topic[48];
     snprintf(topic, sizeof(topic), "%s/availability", topicPrefix);
@@ -207,30 +210,310 @@ void MqttBridge_PublishDeviceStatus(const char *topicPrefix, int online)
                online ? 6 : 7, 1 /* retain */, 1);
 }
 
-/* --------------------------------------------------------------------------
- * Config walking helpers (mqttTask only)
- * -------------------------------------------------------------------------- */
+/* ==========================================================================
+ * The Modbus subscriber (docs/modbus.md §4.10)
+ *
+ * The bridge is a CONSUMER of the Modbus module: it gets every decoded reading
+ * through Modbus_Subscribe and decides for itself what to publish.  It has no
+ * access to the config at all — the catalogue is how it learns what exists.
+ *
+ * THE CALLBACK RUNS ON THE MODBUS TASK AND MUST NOT BLOCK, so it does the one
+ * thing §4.7 prescribes for a consumer that does real work: allocate, copy the
+ * fields it needs, post the pointer to its own queue, return.  Formatting,
+ * LOCK_TCPIP_CORE and mqtt_publish all happen on mqttTask, which is what keeps
+ * the tcpip core lock off the Modbus sequence path.
+ *
+ * Three things the module used to own and no longer does:
+ *
+ *   - Publish policy.  Every read is published; there is no threshold and no
+ *     heartbeat anywhere.  Behaviour-neutral for the shipped config, which
+ *     authors no publish block on any of its points.
+ *   - HA AVAILABILITY, which is MQTT's semantic and is computed where it is
+ *     published.  A device answering EXCEPTIONS is answering, so an exception
+ *     reply must not count towards being offline (§8.3) — three misconfigured
+ *     reads used to mark a healthy device offline.
+ *   - Write range checking.  The capability states the bounds and the module
+ *     enforces them (§4.6); the bridge stays the source of the HA number
+ *     entity's min/max, which is rendering, not policy.
+ * ========================================================================== */
 
-/* Consume the remaining transactions/points of the current device. */
-static int skip_device_body(sMbCfgCursor *c)
+#define DEVICE_OFFLINE_FAILS   3u
+#define BRIDGE_QUEUE_DEPTH    24u
+#define BRIDGE_MAX_WRITABLE   16u
+
+typedef enum {
+    bmsg_sample = 0,
+    bmsg_desc,
+} eBridgeMsgKind;
+
+/* One borrowed event, copied.  ~120 B, freed by mqttTask after publishing;
+ * heap_4 coalesces adjacent free blocks, so cycling equal-sized copies
+ * recycles cleanly (§4.7). */
+typedef struct {
+    uint8_t  kind;
+    uint8_t  last;                          /* desc: end of the burst      */
+    uint8_t  isText;
+    uint8_t  devOrd, decodeType, unit, flags;
+    int8_t   scalePow10;
+    uint16_t ptOrd;
+    uint32_t period_sec;
+    int32_t  value;
+    int32_t  writeMin, writeMax;
+    char     prefix[MB_TOPIC_PREFIX_LEN];
+    char     name[MB_POINT_NAME_LEN];
+    char     text[52];
+} sBridgeMsg;
+
+static int                s_modbusSub = -1;
+static osMessageQueueId_t s_pubQueue;
+static uint32_t           s_droppedMsgs;
+static volatile int       s_catalogueLost;  /* a desc did not fit the queue */
+
+/* A catalogue burst is the heaviest thing the dispatcher does (§4.5) — 27
+ * back-to-back callbacks, and mqttTask is a priority below the modbus task, so
+ * it cannot drain while the burst runs.  A burst is therefore always bigger
+ * than any queue worth paying for, and simply re-asking would replay from
+ * entry 0 and overflow at the same place forever.
+ *
+ * So a re-ask RESUMES: entries already published are skipped by ordinal, and
+ * each round gets further.  s_discoveryDone counts what mqttTask has actually
+ * published in this generation; s_burstIdx is the modbus task's position in
+ * the burst it is dispatching.  A generation restarts (0) on connect, on a
+ * config swap and on `mqtt publish now`.  The two tasks share a 16-bit
+ * counter, so the worst a lost update can do is republish a retained
+ * discovery message, which is idempotent. */
+static volatile uint16_t  s_discoveryDone;
+static uint16_t           s_burstIdx;
+
+/* A burst replaces everything the previous one said, and the only marker of a
+ * new burst is the entry after a `last`.  Modbus task only. */
+static int                s_catFresh = 1;
+
+/* Availability is counted in the callback (cheap) and published by mqttTask
+ * (not cheap: it needs the core lock). */
+static uint8_t s_devFails[MB_MAX_DEVICES];
+static uint8_t s_devOffline;      /* bitmask */
+static uint8_t s_devAnnounced;    /* bitmask */
+static uint8_t s_devAvailDirty;   /* bitmask: publish pending */
+static char    s_devPrefix[MB_MAX_DEVICES][MB_TOPIC_PREFIX_LEN];
+
+static sBridgeMsg *msg_alloc(uint8_t kind)
 {
-    sModbusTransactionRecord txn;
-    sModbusPointRecord       pt;
-    int rt, rp;
+    sBridgeMsg *m = (sBridgeMsg *)pvPortMalloc(sizeof(*m));
 
-    while ((rt = MbCfg_NextTransaction(c, &txn)) == 1) {
-        while ((rp = MbCfg_NextPoint(c, &pt)) == 1) { }
-        if (rp != 0) {
-            return -1;
-        }
+    if (m == NULL) {
+        s_droppedMsgs++;
+        return NULL;
     }
-    return (rt == 0) ? 0 : -1;
+    memset(m, 0, sizeof(*m));
+    m->kind = kind;
+    return m;
+}
+
+static int msg_post(sBridgeMsg *m)
+{
+    /* Never block: this is the modbus task, and a consumer may not stall the
+     * engine (§4.7).  A full queue drops, and says so. */
+    if (s_pubQueue == NULL ||
+        osMessageQueuePut(s_pubQueue, &m, 0, 0) != osOK) {
+        vPortFree(m);
+        s_droppedMsgs++;
+        return -1;
+    }
+    return 0;
+}
+
+static void msg_fill_desc(sBridgeMsg *m, const sModbusPointDesc *pt)
+{
+    snprintf(m->prefix, sizeof(m->prefix), "%s", pt->topicPrefix);
+    snprintf(m->name, sizeof(m->name), "%s", pt->name);
+    m->devOrd     = pt->devOrd;
+    m->ptOrd      = pt->ptOrd;
+    m->decodeType = pt->decodeType;
+    m->unit       = pt->unit;
+    m->flags      = pt->flags;
+    m->scalePow10 = pt->scalePow10;
+    m->period_sec = pt->period_sec;
+    m->writeMin   = pt->writeMin;
+    m->writeMax   = pt->writeMax;
+}
+
+static void device_mark_result(uint8_t devOrd, int16_t err)
+{
+    if (devOrd >= MB_MAX_DEVICES) {
+        return;
+    }
+
+    uint8_t bit = (uint8_t)(1u << devOrd);
+
+    /* An exception reply is an answer: the slave is there and talking. */
+    int answering = (err == mbErr_ok) ||
+                    (err <= mbErr_excIllegalFunction && err >= mbErr_excOther);
+
+    if (answering) {
+        s_devFails[devOrd] = 0;
+        if ((s_devOffline & bit) || !(s_devAnnounced & bit)) {
+            s_devOffline    &= (uint8_t)~bit;
+            s_devAnnounced  |= bit;
+            s_devAvailDirty |= bit;
+        }
+        return;
+    }
+
+    if (s_devFails[devOrd] < 255u) {
+        s_devFails[devOrd]++;
+    }
+    if (s_devFails[devOrd] >= DEVICE_OFFLINE_FAILS && !(s_devOffline & bit)) {
+        s_devOffline    |= bit;
+        s_devAnnounced  |= bit;
+        s_devAvailDirty |= bit;
+    }
+}
+
+/* Runs in the MODBUS task, synchronously (§4.7). */
+static void modbus_event_cb(const sModbusEvent *ev, void *ctx)
+{
+    (void)ctx;
+
+    switch (ev->type) {
+    case mbEvt_sample: {
+        sBridgeMsg *m = msg_alloc(bmsg_sample);
+        if (m == NULL) {
+            return;
+        }
+        msg_fill_desc(m, ev->u.sample.pt);
+        if (ev->u.sample.text != NULL) {
+            snprintf(m->text, sizeof(m->text), "%s", ev->u.sample.text);
+            m->isText = 1u;
+        } else {
+            m->value = ev->u.sample.value;
+        }
+        msg_post(m);
+        break;
+    }
+
+    case mbEvt_pointDesc: {
+        int skip;
+
+        if (s_catFresh) {
+            s_burstIdx = 0;
+            s_catFresh = 0;
+        }
+        skip = (ev->u.desc.pt == NULL) ||
+               (s_burstIdx < s_discoveryDone) || s_catalogueLost;
+        if (ev->u.desc.pt != NULL) {
+            s_burstIdx++;
+        }
+        if (ev->u.desc.last) {
+            s_catFresh = 1;
+        }
+
+        /* The end of the burst is always announced, even when its last entry
+         * is one this round had no work for. */
+        if (skip && !ev->u.desc.last) {
+            break;
+        }
+
+        sBridgeMsg *m = msg_alloc(bmsg_desc);
+        if (m == NULL) {
+            s_catalogueLost = 1;
+            break;
+        }
+        if (!skip) {
+            msg_fill_desc(m, ev->u.desc.pt);
+        }
+        m->last = ev->u.desc.last;
+
+        /* A dropped catalogue entry is a missing HA entity, so it is not just
+         * counted: the burst is asked for again once the queue has drained,
+         * and resumes where this round stopped (§4.5). */
+        if (msg_post(m) != 0) {
+            s_catalogueLost = 1;
+        }
+        break;
+    }
+
+    case mbEvt_txn:
+        device_mark_result(ev->u.txn.devOrd, ev->u.txn.err);
+        break;
+
+    case mbEvt_config:
+        /* Ordinals may mean something else now.  A fresh catalogue follows on
+         * its own, and it is what rebuilds everything below. */
+        memset(s_devFails, 0, sizeof(s_devFails));
+        s_devOffline    = 0;
+        s_devAnnounced  = 0;
+        s_devAvailDirty = 0;
+        s_discoveryDone = 0;      /* a new generation: publish it all again */
+        s_catalogueLost = 0;
+        s_catFresh      = 1;
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* --------------------------------------------------------------------------
- * Set-topic resolution — "<topicPrefix>/<name>/set" against the active
- * config's writable points (design §11). Runs in mqttTask.
+ * What the bridge remembers, and it is all built from the catalogue
+ *
+ * Writable points only.  A sample carries its own prefix and name, so
+ * publishing needs no map at all; what does need one is the inbound
+ * "<prefix>/<name>/set" topic, which has to become a {devOrd, ptOrd} pair
+ * because that is the only way to address a reading (§4.10).
  * -------------------------------------------------------------------------- */
+
+typedef struct {
+    char     prefix[MB_TOPIC_PREFIX_LEN];
+    char     name[MB_POINT_NAME_LEN];
+    uint16_t ptOrd;
+    uint8_t  devOrd;
+    int8_t   scalePow10;
+} sWritablePoint;
+
+static sWritablePoint s_writable[BRIDGE_MAX_WRITABLE];
+static uint8_t        s_writableCount;
+
+/* Prefixes seen in this catalogue, so "<prefix>/+/set" is subscribed once. */
+static char    s_subPrefix[MB_MAX_DEVICES][MB_TOPIC_PREFIX_LEN];
+static uint8_t s_subPrefixCount;
+
+static void catalogue_reset(void)
+{
+    s_writableCount  = 0;
+    s_subPrefixCount = 0;
+    memset(s_subPrefix, 0, sizeof(s_subPrefix));
+    memset(s_devPrefix, 0, sizeof(s_devPrefix));
+}
+
+/* --------------------------------------------------------------------------
+ * Set-topic resolution — "<prefix>/<name>/set" against the catalogue's
+ * writable points, then Modbus_Request.  Runs in mqttTask.
+ *
+ * The bridge does NOT publish the read-back itself: an rw point is read back
+ * by the module and arrives as an ordinary sample, so there is one publish
+ * path and no dedupe question.  The completion callback is only a
+ * success/failure line — which is why the item array may be static and never
+ * has to be read.
+ * -------------------------------------------------------------------------- */
+
+static sModbusReqItem s_setItem;
+static char           s_setTopic[TOPIC_MAX];
+static volatile int   s_setBusy;
+
+static void set_request_done(const sModbusReqReply *rep, void *ctx)
+{
+    (void)ctx;
+
+    /* The array is ours again exactly here, and not one moment earlier. */
+    if (rep->count > 0 && rep->items[0].result != mbErr_ok) {
+        char buf[110];
+        snprintf(buf, sizeof(buf), "%s rejected (%d)",
+                 s_setTopic, (int)rep->items[0].result);
+        TRiceS("MQTT: set %s\n", buf);
+    }
+    s_setBusy = 0;
+}
 
 static void handle_set_message(const char *topic, const char *payload)
 {
@@ -258,47 +541,78 @@ static void handle_set_message(const char *topic, const char *payload)
     memcpy(name, slash1 + 1, nlen);
     name[nlen] = '\0';
 
-    sMbPointLookup lk;
-    if (MbCfg_FindWritablePoint(prefix, name, &lk) != 0) {
-        TRiceS("MQTT set: no writable point: %s\n", (char *)topic);
+    const sWritablePoint *wp = NULL;
+    for (uint8_t i = 0; i < s_writableCount; i++) {
+        if (strcmp(s_writable[i].prefix, prefix) == 0 &&
+            strcmp(s_writable[i].name, name) == 0) {
+            wp = &s_writable[i];
+            break;
+        }
+    }
+
+    char line[110];
+    if (wp == NULL) {
+        snprintf(line, sizeof(line), "%s/%s rejected (no writable point)",
+                 prefix, name);
+        TRiceS("MQTT: set %s\n", line);
         return;
     }
 
-    /* Parse the payload in the point's scaled-int domain (= raw register
-     * value) and enforce the config's write range — this preserves the
-     * safety behaviour of the old hardcoded Solis set-topic map. */
+    /* Parse in the point's scaled-integer domain (= the raw register domain).
+     * The RANGE is the module's business, not this file's (§4.6). */
     int32_t scaled;
-    if (MbParse_Scaled(payload, lk.point.scalePow10, &scaled) != 0 ||
-        scaled < lk.point.writeMin || scaled > lk.point.writeMax ||
-        scaled < 0 || scaled > UINT16_MAX) {
-        TRice("Modbus write: reg %u rejected\n", lk.regAddr);
+    if (MbParse_Scaled(payload, wp->scalePow10, &scaled) != 0) {
+        snprintf(line, sizeof(line), "%s/%s rejected (bad value)",
+                 prefix, name);
+        TRiceS("MQTT: set %s\n", line);
         return;
     }
 
-    if (ModbusWalker_WriteRegister(lk.slaveAddr, lk.regAddr,
-                                   (uint16_t)scaled) == 0) {
-        TRice("Modbus write: reg %u = %u\n", lk.regAddr, (unsigned)scaled);
-    } else {
-        TRice("Modbus write: reg %u rejected\n", lk.regAddr);
+    if (s_setBusy) {
+        snprintf(line, sizeof(line), "%s/%s rejected (busy)", prefix, name);
+        TRiceS("MQTT: set %s\n", line);
+        return;
     }
+
+    s_setItem.id     = wp->ptOrd;
+    s_setItem.value  = scaled;
+    s_setItem.result = mbErr_pending;
+    snprintf(s_setTopic, sizeof(s_setTopic), "%s/%s", prefix, name);
+    s_setBusy = 1;
+
+    int r = Modbus_Request(wp->devOrd, &s_setItem, 1, 5000u,
+                           set_request_done, NULL);
+    if (r != 0) {
+        s_setBusy = 0;
+        snprintf(line, sizeof(line), "%s rejected (%d)", s_setTopic, r);
+        TRiceS("MQTT: set %s\n", line);
+        return;
+    }
+
+    /* §8.4: "MQTT: set periphnet/max_charge_soc = 95 -> req 1 item" */
+    snprintf(line, sizeof(line), "%s = %s -> req 1 item", s_setTopic, payload);
+    TRiceS("MQTT: set %s\n", line);
 }
 
 /* --------------------------------------------------------------------------
- * Home Assistant MQTT auto-discovery — generated from the active config
- * (design §12): sensors for every point, an additional number entity for
- * writable points. Grouped per device by topicPrefix.
+ * Home Assistant MQTT auto-discovery — generated from the CATALOGUE, one
+ * message per entry as it arrives (design §8.3).  A sensor for every
+ * monitored point, plus a number entity for writable ones.
+ *
+ * The rule the bridge publishes a sample by is "did I create an entity for
+ * this point": sensors for period_sec > 0, numbers for writable points
+ * regardless.  That is why a set's read-back on an unmonitored setpoint still
+ * updates its number entity, while a diagnostic read of a point nothing
+ * listens to is not published to a topic with no discovery behind it.
  * -------------------------------------------------------------------------- */
 
-static void ha_publish_entity(const char *devPrefix,
-                              const sModbusPointRecord *pt,
-                              uint16_t regAddr, int asNumber)
+static void ha_publish_entity(const sBridgeMsg *m, int asNumber)
 {
-    (void)regAddr;
-    const sMbUnitInfo *unit = MbUnits_FromCode(pt->unit);
+    const sMbUnitInfo *unit = MbUnits_FromCode(m->unit);
     int n;
 
     snprintf(s_topic, sizeof(s_topic), "homeassistant/%s/%s/%s%s/config",
-             asNumber ? "number" : "sensor", devPrefix, pt->name,
+             asNumber ? "number" : "sensor", m->prefix, m->name,
              asNumber ? "_set" : "");
 
     n = snprintf(s_payload, sizeof(s_payload),
@@ -306,25 +620,25 @@ static void ha_publish_entity(const char *devPrefix,
         "\"name\":\"%s\","
         "\"state_topic\":\"%s/%s\","
         "\"unique_id\":\"%s_%s%s\",",
-        pt->name,
-        devPrefix, pt->name,
-        devPrefix, pt->name, asNumber ? "_set" : "");
+        m->name,
+        m->prefix, m->name,
+        m->prefix, m->name, asNumber ? "_set" : "");
 
     if (asNumber) {
         char minBuf[16], maxBuf[16], stepBuf[16];
-        MbFormat_Scaled(minBuf, sizeof(minBuf), pt->writeMin, pt->scalePow10);
-        MbFormat_Scaled(maxBuf, sizeof(maxBuf), pt->writeMax, pt->scalePow10);
-        MbFormat_Scaled(stepBuf, sizeof(stepBuf), 1, pt->scalePow10);
+        MbFormat_Scaled(minBuf, sizeof(minBuf), m->writeMin, m->scalePow10);
+        MbFormat_Scaled(maxBuf, sizeof(maxBuf), m->writeMax, m->scalePow10);
+        MbFormat_Scaled(stepBuf, sizeof(stepBuf), 1, m->scalePow10);
         n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
             "\"command_topic\":\"%s/%s/set\","
             "\"min\":%s,\"max\":%s,\"step\":%s,",
-            devPrefix, pt->name, minBuf, maxBuf, stepBuf);
+            m->prefix, m->name, minBuf, maxBuf, stepBuf);
     } else {
         if (unit != NULL && unit->haDeviceClass != NULL) {
             n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
                 "\"device_class\":\"%s\",", unit->haDeviceClass);
         }
-        if (pt->decodeType != mbDecode_ascii && unit != NULL) {
+        if (m->decodeType != mbDecode_ascii && unit != NULL) {
             n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
                 "\"state_class\":\"%s\",", unit->haStateClass);
         }
@@ -346,8 +660,8 @@ static void ha_publish_entity(const char *devPrefix,
           "\"via_device\":\"%s\""
         "}"
         "}",
-        s_cfg.prefix, devPrefix,
-        devPrefix, devPrefix, s_cfg.prefix);
+        s_cfg.prefix, m->prefix,
+        m->prefix, m->prefix, s_cfg.prefix);
 
     if (n > 0 && n < (int)sizeof(s_payload)) {
         do_publish(s_topic, s_payload, (uint16_t)n, 1 /* retain */, 0);
@@ -357,68 +671,125 @@ static void ha_publish_entity(const char *devPrefix,
     }
 }
 
-static void publish_ha_discovery(void)
+/* One "<prefix>/+/set" subscription per device, first time that prefix is
+ * seen in a catalogue burst. */
+static void subscribe_set_prefix(const char *prefix)
 {
-    sMbCfgCursor             c;
-    sModbusDeviceRecord      dev;
-    sModbusTransactionRecord txn;
-    sModbusPointRecord       pt;
-
-    if (MbCfg_Open(MbCfgStore_ActiveBase(), &c) != 0) {
-        TRice("MQTT: no valid Modbus config for HA discovery\n");
-        return;
-    }
-
-    while (MbCfg_NextDevice(&c, &dev) == 1 && !s_stopReq) {
-        int rt;
-        while ((rt = MbCfg_NextTransaction(&c, &txn)) == 1) {
-            int rp;
-            while ((rp = MbCfg_NextPoint(&c, &pt)) == 1) {
-                uint16_t regAddr = (uint16_t)(txn.startAddr + pt.offset);
-                ha_publish_entity(dev.topicPrefix, &pt, regAddr, 0);
-                if (pt.flags & MB_POINT_FLAG_WRITABLE) {
-                    ha_publish_entity(dev.topicPrefix, &pt, regAddr, 1);
-                }
-            }
-            if (rp != 0) {
-                return;
-            }
-        }
-        if (rt != 0) {
+    for (uint8_t i = 0; i < s_subPrefixCount; i++) {
+        if (strcmp(s_subPrefix[i], prefix) == 0) {
             return;
         }
     }
+    if (s_subPrefixCount >= MB_MAX_DEVICES || !s_connected) {
+        return;
+    }
+
+    snprintf(s_subPrefix[s_subPrefixCount], MB_TOPIC_PREFIX_LEN, "%s", prefix);
+    s_subPrefixCount++;
+
+    snprintf(s_topic, sizeof(s_topic), "%s/+/set", prefix);
+    LOCK_TCPIP_CORE();
+    mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
+    UNLOCK_TCPIP_CORE();
 }
 
 /* --------------------------------------------------------------------------
- * Per-device set-topic subscriptions (walked from the active config)
+ * Queue drain — everything the bridge publishes goes through here, on
+ * mqttTask.  This is the only place mqtt_publish is reached from.
  * -------------------------------------------------------------------------- */
 
-static void subscribe_set_topics(void)
+static void handle_desc(const sBridgeMsg *m)
 {
-    sMbCfgCursor        c;
-    sModbusDeviceRecord dev;
-    int                 any = 0;
+    if (s_discoveryDone == 0u) {
+        catalogue_reset();        /* the start of a discovery generation */
+    }
 
-    if (MbCfg_Open(MbCfgStore_ActiveBase(), &c) == 0) {
-        while (MbCfg_NextDevice(&c, &dev) == 1) {
-            snprintf(s_topic, sizeof(s_topic), "%s/+/set", dev.topicPrefix);
-            LOCK_TCPIP_CORE();
-            mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
-            UNLOCK_TCPIP_CORE();
-            any = 1;
-            if (skip_device_body(&c) != 0) {
-                break;
+    /* An empty catalogue — and a skipped burst tail — is last = 1 with no
+     * point (§4.5). */
+    if (m->name[0] != '\0') {
+        if (m->devOrd < MB_MAX_DEVICES) {
+            snprintf(s_devPrefix[m->devOrd], MB_TOPIC_PREFIX_LEN, "%s",
+                     m->prefix);
+        }
+        subscribe_set_prefix(m->prefix);
+
+        if (m->period_sec > 0u) {
+            ha_publish_entity(m, 0);
+        }
+        if ((m->flags & MB_PT_WRITE) != 0u) {
+            ha_publish_entity(m, 1);
+            if (s_writableCount < BRIDGE_MAX_WRITABLE) {
+                sWritablePoint *w = &s_writable[s_writableCount++];
+                snprintf(w->prefix, sizeof(w->prefix), "%s", m->prefix);
+                snprintf(w->name, sizeof(w->name), "%s", m->name);
+                w->devOrd     = m->devOrd;
+                w->ptOrd      = m->ptOrd;
+                w->scalePow10 = m->scalePow10;
             }
+        }
+        s_discoveryDone++;
+    }
+
+    if (m->last && !s_catalogueLost) {
+        TRice("MQTT: catalogue done, %u points %u writable\n",
+              (unsigned)s_discoveryDone, s_writableCount);
+    }
+}
+
+static void handle_sample(const sBridgeMsg *m)
+{
+    char topic[TOPIC_MAX];
+    char payload[52];
+
+    if (m->isText) {
+        snprintf(payload, sizeof(payload), "%s", m->text);
+    } else if (m->decodeType == mbDecode_bitfield) {
+        snprintf(payload, sizeof(payload), "%u", (unsigned)(uint16_t)m->value);
+    } else {
+        MbFormat_Scaled(payload, sizeof(payload), m->value, m->scalePow10);
+    }
+
+    snprintf(topic, sizeof(topic), "%s/%s", m->prefix, m->name);
+    do_publish(topic, payload, (uint16_t)strlen(payload), 1, 1);
+}
+
+static void drain_publish_queue(void)
+{
+    sBridgeMsg *m;
+
+    while (s_pubQueue != NULL &&
+           osMessageQueueGet(s_pubQueue, &m, NULL, 0) == osOK) {
+        if (m->kind == bmsg_desc) {
+            handle_desc(m);
+        } else {
+            handle_sample(m);
+        }
+        vPortFree(m);
+    }
+
+    /* Per-device availability, published where it is computed (§8.3). */
+    if (s_devAvailDirty != 0u) {
+        uint8_t dirty = s_devAvailDirty;
+        s_devAvailDirty = 0;
+        for (uint8_t d = 0; d < MB_MAX_DEVICES; d++) {
+            uint8_t bit = (uint8_t)(1u << d);
+            if (!(dirty & bit) || s_devPrefix[d][0] == '\0') {
+                continue;
+            }
+            int online = (s_devOffline & bit) ? 0 : 1;
+            publish_device_status(s_devPrefix[d], online);
+            TRiceS(online ? "MQTT: device online: %s\n"
+                          : "MQTT: device offline: %s\n",
+                   (char *)s_devPrefix[d]);
         }
     }
 
-    if (!any) {
-        /* No valid config — keep the old bridge-prefix subscription */
-        snprintf(s_topic, sizeof(s_topic), "%s/+/set", s_cfg.prefix);
-        LOCK_TCPIP_CORE();
-        mqtt_subscribe(s_client, s_topic, 0, NULL, NULL);
-        UNLOCK_TCPIP_CORE();
+    /* A catalogue entry that did not fit is a missing entity, so ask again
+     * now that the queue has room (§4.5). */
+    if (s_catalogueLost && s_modbusSub >= 0 &&
+        osMessageQueueGetCount(s_pubQueue) == 0u) {
+        s_catalogueLost = 0;
+        Modbus_RequestCatalogue(s_modbusSub);
     }
 }
 
@@ -471,8 +842,10 @@ static int mqtt_do_connect(void)
     ci.client_id   = s_cfg.prefix;
     ci.keep_alive  = 60;
 
-    /* Last Will: prefix/status = "offline" (bridge-wide; per-device
-     * availability is walker-driven, see MqttBridge_PublishDeviceStatus) */
+    /* Last Will: prefix/status = "offline".  Bridge-wide, and deliberately
+     * NOT the per-device availability topic: an LWT is a property of this one
+     * TCP session and cannot express "this slave stopped answering while the
+     * bridge is fine" (§8.3). */
     snprintf(s_topic, sizeof(s_topic), "%s/status", s_cfg.prefix);
     ci.will_topic  = s_topic;
     ci.will_msg    = "offline";
@@ -507,15 +880,13 @@ static void mqttTask(void *arg)
           s_cfg.brokerPort, s_cfg.prefix);
 
     uint32_t reconnectDelay = 2000;
-    int      discoveryDone = 0;
-    uint32_t discoveryBase = 0;
 
     while (!s_stopReq) {
         service_test_hooks();
+        drain_publish_queue();
 
         /* Connect / reconnect */
         if (!s_connected) {
-            discoveryDone = 0;
             if (mqtt_do_connect() != 0) {
                 TRice("MQTT: connect failed, retry in %us\n",
                       reconnectDelay / 1000);
@@ -527,6 +898,9 @@ static void mqttTask(void *arg)
                  w += 100) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 service_test_hooks();
+                /* Keep draining with no broker: monitor lines are how the
+                 * bridge stays observable in broker-less CI (§9). */
+                drain_publish_queue();
             }
 
             if (!s_connected) {
@@ -543,22 +917,16 @@ static void mqttTask(void *arg)
             snprintf(statusTopic, sizeof(statusTopic), "%s/status", s_cfg.prefix);
             do_publish(statusTopic, "online", 6, 1 /* retain */, 0);
 
-            /* Subscribe to writable-point set topics per config device */
-            subscribe_set_topics();
-        }
-
-        /* Publish HA discovery once per connection — and again after a
-         * config hot-swap (active region flipped) so new devices/points
-         * appear without a reconnect */
-        if (s_connected &&
-            (!discoveryDone || discoveryBase != MbCfgStore_ActiveBase())) {
-            TRice("MQTT: publishing HA discovery\n");
-            discoveryBase = MbCfgStore_ActiveBase();
-            publish_ha_discovery();
-            if (discoveryDone) {
-                subscribe_set_topics();   /* config changed: re-subscribe */
+            /* Discovery and the set-topic subscriptions are both functions
+             * of the catalogue, so asking for it is the whole of "set this
+             * connection up".  After a config swap the module sends a fresh
+             * one unasked, which is what deletes the old active-region poll. */
+            if (s_modbusSub >= 0) {
+                TRice("MQTT: publishing HA discovery\n");
+                s_discoveryDone = 0;
+                s_catalogueLost = 0;
+                Modbus_RequestCatalogue(s_modbusSub);
             }
-            discoveryDone = 1;
         }
 
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -618,6 +986,41 @@ void MqttBridge_Start(const sMqttBridgeCfg *cfg)
         .priority   = (osPriority_t)(osPriorityNormal - 1),
     };
 
+    memset(s_devFails, 0, sizeof(s_devFails));
+    memset(s_devPrefix, 0, sizeof(s_devPrefix));
+    s_devOffline    = 0;
+    s_devAnnounced  = 0;
+    s_devAvailDirty = 0;
+    s_droppedMsgs   = 0;
+    s_catalogueLost = 0;
+    s_catFresh      = 1;
+    s_discoveryDone = 0;
+    s_burstIdx      = 0;
+    s_setBusy       = 0;
+    catalogue_reset();
+
+    if (s_pubQueue == NULL) {
+        s_pubQueue = osMessageQueueNew(BRIDGE_QUEUE_DEPTH,
+                                       sizeof(sBridgeMsg *), NULL);
+        if (s_pubQueue == NULL) {
+            TRice("MQTT: publish queue create failed\n");
+            return;
+        }
+    }
+
+    /* A consumer controls the bus by subscribing (§4.3): with the bridge down
+     * nothing asks for these devices, so nothing polls them.  The catalogue
+     * that follows is what teaches the bridge what exists. */
+    if (s_modbusSub < 0) {
+        s_modbusSub = Modbus_Subscribe(MB_PLAN_ALL,
+                                       mbEvt_sample | mbEvt_pointDesc |
+                                       mbEvt_txn | mbEvt_config,
+                                       modbus_event_cb, NULL);
+        if (s_modbusSub < 0) {
+            TRice("MQTT: Modbus subscribe failed (%d)\n", s_modbusSub);
+        }
+    }
+
     s_running = 1;
     s_taskHandle = osThreadNew(mqttTask, NULL, &attr);
     if (s_taskHandle == NULL) {
@@ -633,6 +1036,20 @@ void MqttBridge_Stop(void)
 
     for (int i = 0; i < 30 && s_running; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (s_modbusSub >= 0) {
+        Modbus_Unsubscribe(s_modbusSub);
+        s_modbusSub = -1;
+    }
+
+    /* The subscription is released asynchronously (mbEvt_released, §4.3), so
+     * anything already posted is drained and freed rather than leaked. */
+    if (s_pubQueue != NULL) {
+        sBridgeMsg *m;
+        while (osMessageQueueGet(s_pubQueue, &m, NULL, 0) == osOK) {
+            vPortFree(m);
+        }
     }
 }
 
@@ -658,13 +1075,13 @@ void MqttBridge_LogStatus(void)
 {
     char buf[100];
     snprintf(buf, sizeof(buf),
-             "%s broker=%u.%u.%u.%u:%u pub=%u reconn=%u monitor=%s",
+             "%s broker=%u.%u.%u.%u:%u pub=%u reconn=%u drop=%u monitor=%s",
              s_connected ? "connected" : (s_running ? "connecting" : "stopped"),
              (unsigned)s_cfg.brokerIp[0], (unsigned)s_cfg.brokerIp[1],
              (unsigned)s_cfg.brokerIp[2], (unsigned)s_cfg.brokerIp[3],
              (unsigned)s_cfg.brokerPort,
              (unsigned)s_publishCount, (unsigned)s_reconnectCount,
-             s_monitorEnabled ? "on" : "off");
+             (unsigned)s_droppedMsgs, s_monitorEnabled ? "on" : "off");
     TRiceS("MQTT: %s\n", buf);
 }
 
@@ -703,5 +1120,15 @@ int MqttBridge_Inject(const char *topic, const char *payload,
 
 void MqttBridge_PublishNow(void)
 {
-    ModbusWalker_ForceRepublish();
+    /* There is no way to force a re-read, and deliberately so: a value arrives
+     * at its plan's period and nothing outside the module steers that (§4.3 —
+     * "values lag a reconnect by up to one period").  What CAN be redone is
+     * the catalogue, so an operator who thinks HA is missing entities gets the
+     * discovery burst republished. */
+    if (s_modbusSub >= 0) {
+        s_discoveryDone = 0;
+        s_catalogueLost = 0;
+        Modbus_RequestCatalogue(s_modbusSub);
+        TRice("MQTT: catalogue requested\n");
+    }
 }

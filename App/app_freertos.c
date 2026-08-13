@@ -18,6 +18,9 @@
 #include "App/system.h"
 #include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
+#include "App/Modbus/modbus.h"
+#include "App/Rs485/rs485_port.h"
+#include "App/Test/modbus_test_port.h"
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
@@ -152,6 +155,27 @@ void App_DefaultTaskEntry(void)
     }
     if (gnetif.ip_addr.addr == 0U) {
         TRice("DHCP timeout – no IP (flags=0x%02X)\n", gnetif.flags);
+    }
+
+    /* Register the Modbus peripherals.  The module knows nothing about any of
+     * them: a driver claims a port slot, and a device names the port it lives
+     * on — which is config (docs/modbus.md §5.1, §3.4).  Registration is
+     * independent of Modbus_Init and may follow it; a device on a slot with no
+     * driver is simply not polled.
+     *
+     * The test peripheral is registered unconditionally because whether a
+     * board HAS one is a CONFIGURATION question, not a build question: one
+     * image serves a bench board and a real one. */
+    (void)MbRtu_Register();
+    (void)ModbusTestPort_Register();
+
+    /* Set it and forget it (docs/modbus.md §4.2): the store comes up, invalid
+     * regions are erased, and the engine runs.  Timers are NOT started here —
+     * they come and go with subscriptions — so a board that boots with a valid
+     * config and no subscribers puts nothing on the wire.  It needs
+     * W25Q128_Init, which ran above. */
+    if (Modbus_Init() != 0) {
+        TRice("Modbus: init failed\n");
     }
 
     /* Start HTTP server (upload/download/status) */

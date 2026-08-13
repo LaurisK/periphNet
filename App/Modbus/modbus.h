@@ -1,53 +1,50 @@
 /**
  * @file    modbus.h
- * @brief   PeriphNet Modbus module — THE public API.  Nothing outside
- *          App/Modbus may include any other header from this directory.
+ * @brief   PeriphNet Modbus module — THE public API.
  *
  * The module polls Modbus RTU slaves described by an uploadable flash-resident
- * config, decodes their registers, and delivers the results to subscribers.
- * It knows nothing about MQTT, Home Assistant or CAN — those are consumers
- * that attach through Modbus_Subscribe().
+ * config, decodes their registers, and hands every reading to whoever
+ * subscribed to it.  It knows nothing about MQTT, Home Assistant or CAN.
  *
- * Boundary rules (docs/modbus.md §1.2):
+ *     Know what to read and how to read it, translate registers to values and
+ *     values back to registers, and hand the result on.
+ *
+ * Design: docs/modbus.md — §1 the pattern, §4 this surface.  Where this header
+ * and that document disagree, the document wins.
+ *
+ * BOUNDARY (§2.2):
+ *   - A consumer includes only this header.  modbus_rtu.h, modbus_walker.h and
+ *     modbus_internal.h are module-internal; Shared/Modbus *types*
+ *     (modbus_records.h) are fair game, its flash accessors (MbCfg_*,
+ *     MbCfgStore_*) are not.
  *   - Files in App/Modbus must not include App/Mqtt, App/Http, App/Can,
  *     App/Data or any lwIP header.
- *   - No device-specific code lives in this module.  A device is described by
- *     config, not by a driver (docs/modbus.md §1.3).
- *   - Consumers include only this header.  Shared/Modbus *types* are fair game
- *     (modbus_records.h is a layer below everyone); Shared/Modbus flash
- *     accessors (MbCfg_*, MbCfgStore_*) are not — going through them is the
- *     coupling this API exists to remove.
+ *   - A device is a config, not a driver (§2.3).  There is no device-specific
+ *     code in this module and no way to add any.
  *
- * THE RULE (docs/modbus.md §2.2): the module emits EVERYTHING it reads, to
- * whoever subscribed to that device, as soon as it is decoded.  It keeps no
- * copy of any value, and it carries no notion of what is worth forwarding —
- * that judgement, and the config that expresses it, belong to the consumer
- * making it.  What the module keeps is scheduling and bus state, which no
- * consumer could own.
+ * WHAT THIS MODULE WILL NOT DO, so nobody proposes it again (§1.2): carry
+ * publish policy, remember a previous value, judge whether a slave is alive,
+ * offer a raw bus write, or take a start/stop/baud/port knob.  Each of those
+ * is either config or the consumer's judgement.
  *
- * SCOPE: FC03/04 reads and single-register FC06 writes, which is what the
- * module does today.  Nothing here anticipates a reworked write path or
- * dialects beyond an address stride — those are limits listed in
- * docs/modbus.md §7.  Note this surface is deliberately indifferent to what is
- * BEHIND it: peripherals, per-device timers and sequences (docs/modbus.md
- * §2.5-§2.7) are all internal, which is why the engine can be rebuilt without
- * touching a consumer.
+ * SURFACE MAP — the whole of §4 lands across §10's steps; this file grows with
+ * them and never shrinks:
  *
- * STATUS: PROPOSED.  Not yet implemented; nothing includes this file.  Revised
- * 2026-08-10 after four review rounds (docs/modbus.md §8): baud and port are
- * config, not API; Start/Stop/SetPort/InjectResponse removed; no in-module
- * change detection and no publish policy in the config.  A later pass settled
- * the config model behind this surface — a register map is SHARED by the
- * devices using it, and a port is an enum indexing the module's static port
- * table — which changes nothing here except the meaning of ptOrd (see
- * sModbusPointDesc).  Items marked "OPEN Qn" are decisions still to make —
- * collected at the end.
+ *   step 1  (here)  eModbusErr · Modbus_Init · Modbus_Request · Config
+ *                   Compile/Apply/Export/Status · diagnostics
+ *   step 2          Subscribe/Unsubscribe, the event structs, sModbusPointDesc
+ *   step 4          Modbus_RequestCatalogue
+ *   step 7          Modbus_ConfigVerify · Modbus_PlanList/Get/Create/Modify/
+ *                   Delete
+ *   step 6a         the v2 record format, and with it Modbus_ConfigErase —
+ *                   the version bump invalidates every region anyway, so the
+ *                   built-in default died in the same move
  */
 
 #ifndef MODBUS_H_
 #define MODBUS_H_
 
-#include "modbus_records.h"      /* eModbusDecodeType, MB_MAX_*, unit codes */
+#include "modbus_records.h"   /* eModbusDecodeType, unit codes, config data */
 
 #include <stdint.h>
 
@@ -56,509 +53,534 @@ extern "C" {
 #endif
 
 /* ==========================================================================
- * Bounds
+ * Bounds (docs/modbus.md §4.6)
  * ========================================================================== */
 
-#define MB_MAX_SUBS              8   /* subscription table (OPEN Q3)         */
+#define MB_REQ_MAX_ITEMS       100u   /* items in one Modbus_Request         */
+#define MB_REQ_TIMEOUT_MIN_MS    1u
+#define MB_REQ_TIMEOUT_MAX_MS 60000u  /* longer than this is a plan, not a
+                                         request                             */
 
 /* ==========================================================================
- * Errors and ports
+ * Error codes (docs/modbus.md §4.1)
  *
- * eModbusErr moves here from modbus_rtu.h — it appears in events, so it is part
- * of the public surface.  modbus_rtu.h then includes this header instead of
- * declaring it.
- *
- * eModbusPortId does NOT live here.  Ports are internal: a device names the
- * peripheral it lives on, which is config, so nothing outside the module ever
- * selects or configures one.  docs/modbus.md §2.5.
+ * mbErr_ok is 0, so `if (items[i].result)` is the idiom.  APPEND-ONLY: not
+ * persisted, but it crosses into consumers and the HTTP surface.  No _last
+ * sentinel — the values are negative and sparse.
  * ========================================================================== */
 
 typedef enum {
-    mbErr_ok             =  0,
-    mbErr_timeout    = -1,  /* no response within the deadline          */
-    mbErr_crc        = -2,  /* CRC mismatch in the response             */
-    mbErr_exception  = -3,  /* slave returned an exception              */
-    mbErr_short      = -4,  /* response too short / truncated           */
-    mbErr_busy       = -5,  /* port busy, not initialised, or refused   */
-    mbErr_notFound   = -6,  /* no such device / point in the config     */
-    mbErr_range      = -7,  /* value outside writeMin..writeMax         */
-    mbErr_full       = -8,  /* write slot or subscription table full    */
-    mbErr_config     = -9,  /* no valid config / malformed record stream*/
+    mbErr_ok                 =   0,
+    mbErr_pending            =  -1,  /* request item, not yet decided       */
+    mbErr_notAttempted       =  -2,  /* the deadline arrived first          */
+    mbErr_timedOut           =  -3,  /* the request's own deadline expired  */
+    mbErr_timeout            =  -4,  /* no reply within the port's timeout  */
+    mbErr_crc                =  -5,
+    mbErr_short              =  -6,  /* reply too short / truncated         */
+    mbErr_lineError          =  -7,  /* overrun, framing, parity, overflow  */
+    mbErr_txFailed           =  -8,  /* the frame never went out            */
+    mbErr_badArg             =  -9,
+    mbErr_full               = -10,  /* no slot: subscription, plan, FIFO   */
+    mbErr_busy               = -11,  /* plan subscribed, or swap pending    */
+    mbErr_idNotFound         = -12,  /* no such device or point             */
+    mbErr_outOfRange         = -13,  /* outside writeMin..writeMax          */
+    mbErr_config             = -14,  /* no valid config                     */
+    mbErr_excIllegalFunction = -20,  /* the slave's own exception codes,    */
+    mbErr_excIllegalAddress  = -21,  /*   folded in so a per-item result    */
+    mbErr_excIllegalValue    = -22,  /*   says which item got which         */
+    mbErr_excDeviceFailure   = -23,
+    mbErr_excOther           = -24,
 } eModbusErr;
 
 /* ==========================================================================
- * Point descriptor
- *
- * The identity and metadata of one configured point.  Handed out by pointer
- * in events; BORROWED — see "Contracts" below.
+ * Lifecycle — set it and forget it (docs/modbus.md §4.2)
  * ========================================================================== */
 
-#define MB_PT_WRITABLE    (1u << 0)  /* config declares the point writable  */
-
-/* IDENTITY IS {devOrd, ptOrd}, NOT ptOrd ALONE.  A register map is shared by
- * every device using it (docs/modbus.md §2.6), so ptOrd is relative to that
- * MAP: four battery packs on one map produce four samples carrying the same
- * ptOrd and different devOrd.  A consumer keying on ptOrd by itself collapses
- * them.  Both ordinals are valid only within one config generation
- * (contract 6); deviceId and name are the identities that survive a swap. */
-typedef struct {
-    uint16_t    ptOrd;          /* ordinal within the device's map          */
-    uint8_t     devOrd;
-    const char *deviceId;       /* device identity (OPEN Q1)                */
-    const char *name;           /* point name, unique within the device     */
-    uint8_t     decodeType;     /* eModbusDecodeType                        */
-    uint8_t     unit;           /* DLMS/COSEM physical-unit code            */
-    int8_t      scalePow10;     /* real value = scaled * 10^scalePow10      */
-    uint8_t     flags;          /* MB_PT_*                                  */
-    int16_t     writeMin;       /* scaled-int domain; valid if WRITABLE     */
-    int16_t     writeMax;
-} sModbusPointDesc;
-
-/* NOTE: there is no publish threshold / heartbeat here, and none in the config
- * either.  How often a reading is worth forwarding is a property of the thing
- * doing the forwarding, not of the register — the module has no way to judge
- * it and nothing to do with the answer.  A consumer that wants to throttle
- * owns that policy and the memory it costs.  docs/modbus.md §2.4. */
+/**
+ * @brief  Bring the module up: flash store init, A/B region recovery,
+ *         erasure of anything that fails validation, and construction of
+ *         whatever devices the config describes.
+ *
+ *         Timers are NOT started here — they come and go with subscriptions,
+ *         so a board that boots with a valid config and no subscribers puts
+ *         nothing on the wire.  Zero devices is a valid, first-class state
+ *         (reported as *unprovisioned*, not as an error).
+ *
+ *         Requires W25Q128_Init() to have run.  Idempotent.  There is no
+ *         Start/Stop pair, no port selection and no baud accessor: the module
+ *         owns its peripherals and the config says what to do with them.
+ *
+ * @return 0, or a negative eModbusErr
+ */
+int Modbus_Init(void);
 
 /* ==========================================================================
- * Events
+ * Subscriptions (docs/modbus.md §4.3)
+ *
+ * A consumer subscribes to a kind of thing, not to a position: `planMask` is a
+ * set of plan slots, and a plan names one capability, so every device it covers
+ * is the same type of hardware read at the same cadence.
+ *
+ * A plan nobody subscribes to is not polled at all — the config says what MAY
+ * be read, a subscription says what IS read.  What follows: a consumer controls
+ * the bus by subscribing and unsubscribing; values lag a reconnect by up to one
+ * period; and "why is this device not polled" is a question about subscribers.
+ *
+ * Scoping is ROUTING, not suppression: dispatch is a bit test, it stores
+ * nothing, and within its scope a subscription gets EVERY read.
+ *
+ * UNTIL §10 STEP 6 there are no plan records, so every subscriber passes
+ * MB_PLAN_ALL and scoping is a no-op.  Nothing may hardcode a slot before
+ * Modbus_PlanList exists to say which bit is which.
  * ========================================================================== */
 
-typedef enum {
-    mbEvt_sample       = 1u << 0,  /* a point was read and decoded         */
-    mbEvt_pointDesc   = 1u << 1,  /* catalogue entry (see Modbus_Subscribe)*/
-    mbEvt_deviceState = 1u << 2,  /* device went online / offline         */
-    mbEvt_writeResult = 1u << 3,  /* a submitted write finished           */
-    mbEvt_config       = 1u << 4,  /* config swapped / reset               */
-    mbEvt_txn          = 1u << 5,  /* transaction outcome — diagnostics    */
-    mbEvt_all          = 0x3Fu,
-} eModbusEventType;
+#define MB_MAX_SUBS       8u    /* subscription table                        */
+#define MB_PLAN_ALL    0xFFu    /* every plan; pins none of them (§3.5)      */
+#define MB_PLAN_REQUEST 0xFFu   /* mbEvt_txn.planId: traffic a request
+                                   caused, not a timer (§4.4)                */
 
-#define MB_WRITE_NO_POINT  0xFFFFu   /* .ptOrd for a raw (unresolved) write */
+/* MB_MAX_PLANS (8, because planMask is a uint8_t) and the MB_PT_* access
+ * flags come from modbus_records.h: they are properties of the RECORD, and
+ * the compiler enforces them there. */
+
+/* The identity and metadata of one point of one device.  Handed out by pointer
+ * in events and BORROWED: the engine holds the record it is servicing, so
+ * handing it over costs nothing and stores nothing.  It dies when the callback
+ * returns.
+ *
+ * IDENTITY IS {devOrd, ptOrd}, NOT ptOrd ALONE — several devices share one
+ * capability, so four battery packs produce four samples with the same ptOrd
+ * and different devOrd.  A consumer keying on ptOrd alone collapses them. */
+typedef struct {
+    const char *topicPrefix;   /* MQTT's display string for the device      */
+    const char *name;          /* topic suffix; links nothing, not unique   */
+    int32_t     writeMin, writeMax;   /* scaled-int; valid if MB_PT_BOUNDED */
+    uint32_t    period_sec;    /* shortest live period; 0 = unwatched       */
+    uint16_t    ptOrd;         /* point id within the device's capability   */
+    uint8_t     devOrd;        /* device id (position in devices[])         */
+    uint8_t     decodeType;    /* eModbusDecodeType                         */
+    uint8_t     unit;          /* DLMS/COSEM physical-unit code             */
+    int8_t      scalePow10;    /* real value = scaled * 10^scalePow10       */
+    uint8_t     flags;         /* MB_PT_READ|WRITE|BOUNDED                  */
+} sModbusPointDesc;
+
+typedef enum {
+    mbEvt_sample    = 1u << 0,  /* a point was read and decoded            */
+    mbEvt_pointDesc = 1u << 1,  /* catalogue entry (§4.5)                  */
+    mbEvt_config    = 1u << 2,  /* a new config went live                  */
+    mbEvt_txn       = 1u << 3,  /* transaction outcome — diagnostics       */
+    mbEvt_released  = 1u << 4,  /* Unsubscribe complete; ctx may be freed  */
+    mbEvt_all       = 0x1Fu,
+} eModbusEventType;
 
 typedef struct {
     eModbusEventType type;
-    uint32_t         tick;          /* HAL_GetTick() when the event was made*/
-
+    uint32_t         tick;              /* HAL_GetTick() when made         */
     union {
-        /* ---- mbEvt_sample ---------------------------------------------
+        /* ---- mbEvt_sample ------------------------------------------------
          * Raised once per point per SUCCESSFUL READ — not per change.  The
-         * module has no memory of previous values and does not deduplicate;
-         * a consumer that wants change detection does it itself, on its own
-         * terms.
-         *
-         * Carries the decoded value only — raw registers never leave the
-         * module (the config already says what every register means; a
-         * second, raw data path would invite consumers to re-implement
-         * decoding and get word order, scaling or ASCII subtly wrong).
-         *
-         * For mbDecode_ascii points, `text` is the decoded string and
-         * `value` is UNSPECIFIED — nothing in the module computes one.  A
-         * consumer that needs change detection hashes `text`.  For every
-         * other type, `value` is the scaled integer and `text` is NULL. */
+         * module keeps no previous value and does not deduplicate; a consumer
+         * wanting change detection does it on its own terms.  Only the decoded
+         * value leaves: raw registers never do, because a second raw path
+         * would invite consumers to re-implement decoding and get word order,
+         * scaling or ASCII subtly wrong.  For ASCII points `text` is the
+         * decoded string and `value` is UNSPECIFIED. */
         struct {
             const sModbusPointDesc *pt;
-            int32_t     value;
-            const char *text;
+            int32_t     value;          /* scaled integer                  */
+            const char *text;           /* ascii points only, else NULL    */
         } sample;
 
-        /* ---- mbEvt_pointDesc -----------------------------------------
-         * One per point in the subscription's scope, delivered as a burst
-         * ("the catalogue").  `last` marks the final entry, including when
-         * the catalogue is empty (pt == NULL in that case). */
+        /* ---- mbEvt_pointDesc ---------------------------------------------
+         * The catalogue: one per point of every device in scope, `last` on
+         * the final entry.  An empty catalogue is last = 1 with pt == NULL. */
         struct {
             const sModbusPointDesc *pt;
             uint8_t     last;
         } desc;
 
-        /* ---- mbEvt_deviceState ---------------------------------------- */
+        /* ---- mbEvt_config ------------------------------------------------
+         * A new config went live.  Every cached ordinal is now suspect; a
+         * fresh catalogue follows. */
         struct {
-            uint8_t     devOrd;
-            const char *deviceId;
-            uint8_t     online;
-        } device;
-
-        /* ---- mbEvt_writeResult ---------------------------------------- */
-        struct {
-            uint32_t    id;         /* as returned by Modbus_Submit*Write   */
-            uint16_t    ptOrd;      /* MB_WRITE_NO_POINT for a raw write    */
-            int16_t     err;        /* eModbusErr                           */
-            uint8_t     exc;        /* Modbus exception code, 0 = none      */
-        } write;
-
-        /* ---- mbEvt_config ----------------------------------------------
-         * A new config went live.  Every cached ptOrd/devOrd is now invalid;
-         * a fresh catalogue follows for every subscription. */
-        struct {
+            sModbusConfigCounts counts;
             uint8_t     activeRegion;
-            uint8_t     devices;
-            uint8_t     transactions;
-            uint16_t    points;
         } config;
 
-        /* ---- mbEvt_txn -------------------------------------------------
-         * Transaction outcome, for health/diagnostics consumers.  Deliberately
-         * carries NO register payload; values arrive as mbEvt_sample. */
+        /* ---- mbEvt_txn ---------------------------------------------------
+         * Keyed by {devOrd, planId, timeTableId} — the identity a timer, a
+         * sequence and the missed counter all use.  Carries no register
+         * payload; values arrive as mbEvt_sample.  A subscriber wanting
+         * device availability counts failures here: the module has no basis
+         * to judge it, and a device answering EXCEPTIONS is answering. */
         struct {
-            uint8_t     devOrd, slave;
-            uint16_t    txnOrd, startAddr, count;
-            int16_t     err;        /* eModbusErr                           */
-            uint8_t     exc;        /* Modbus exception code, 0 = none      */
-            uint16_t    elapsedMs;
+            uint16_t    addr;           /* first wire address of the block */
+            uint16_t    regs;           /* registers requested             */
+            uint16_t    elapsed_ms;
+            int16_t     err;            /* eModbusErr                      */
+            uint8_t     devOrd, slaveAddr;
+            uint8_t     planId;         /* MB_PLAN_REQUEST if asked for    */
+            uint8_t     timeTableId;
         } txn;
     } u;
 } sModbusEvent;
 
 /* ==========================================================================
- * Lifecycle
+ * Plans (docs/modbus.md §3.5, §4.3)
+ *
+ * A plan is the ONE config object the system may change about itself while it
+ * runs.  Capabilities and devices state what is physically present and move
+ * only by upload; a plan states what is being watched, which is a decision.
+ *
+ * A CONSUMER FINDS ITS PLANS RATHER THAN ASSUMING THEM: PlanList is what turns
+ * a name into a mask bit, so nothing hardcodes a slot against a config it does
+ * not author.  A consumer that finds nothing it recognises may CREATE the plan
+ * it wants — that is the honest form of "I need this data this often", and it
+ * is the same object the operator sees in `modbus plan list`.
+ *
+ * A PLAN WITH SUBSCRIBERS CANNOT BE MODIFIED OR DELETED (mbErr_busy).  It
+ * needs no stored state: "active" is the OR of the plan masks of live
+ * subscriptions EXCLUDING wildcards, recomputed on the spot.  Retuning a live
+ * plan therefore means unsubscribing, or creating a second plan and moving to
+ * it — which is honest, because a consumer's timers and derived blocks were
+ * built from the plan it subscribed to and cannot silently change underneath
+ * it.  MB_PLAN_ALL pins nothing: a subscriber that asked for every plan
+ * expressed no dependency on which plans exist.
  * ========================================================================== */
+
+/* Entries a plan edit may carry across all its time tables. */
+#define MB_MAX_TT_ENTRIES_PER_PLAN  128u
+
+typedef struct {
+    char     name[MB_NAME_LEN];
+    uint16_t capId;
+    uint8_t  planId;          /* slot, 0..7                                */
+    uint8_t  devices;         /* device set, one bit per deviceId          */
+    uint8_t  timeTables;      /* how many this plan holds                  */
+    uint8_t  subscribers;     /* 0 = editable; non-zero = mbErr_busy       */
+} sModbusPlanInfo;
+
+/* sModbusPlanSpec / sModbusTimeTableSpec come from modbus_records.h: an edit
+ * is validated against exactly the rules the compiler applies to an uploaded
+ * plan, so there is one validator reached two ways (§7.4). */
+
+/** @brief  Every slot that holds a plan.  Synchronous: plan headers are
+ *          resident (§3.5).  Returns the count, or a negative eModbusErr. */
+int Modbus_PlanList(sModbusPlanInfo *out, uint8_t max);
+
+/** @brief  One slot.  `subscribers` is counted from the subscription table on
+ *          the spot, so it is a live answer rather than a stored one. */
+int Modbus_PlanGet(uint8_t planId, sModbusPlanInfo *out);
 
 /**
- * @brief  Bring the module up and start polling: flash store init, A/B region
- *         recovery, provisioning of the built-in default config if none is
- *         valid, then the modbus task, the ports and the devices' timers.
+ * @brief  One plan's time tables, read from flash.
  *
- *         Requires W25Q128_Init() to have run.  Idempotent.  Belongs in
- *         App_DefaultTaskEntry after the flash driver — NOT in
- *         http_server_init(), where the config store lives today.
+ *         A plan's time tables are NOT in the resident header table (§4.3): a
+ *         caller wanting them asks, and the module reads the records like any
+ *         other.  `tables[].points` point into `idBuf`.
  *
- *         Set it and forget it.  There is no Start/Stop pair, no port
- *         selection and no baud accessor: the module owns its peripherals,
- *         reads what the config tells it to, and services a write at the first
- *         opening between reads.  Nothing outside steers it.
- *
- * @return 0 on success, negative eModbusErr otherwise
+ * @return table count, or a negative eModbusErr
  */
-int  Modbus_Init(void);
+int Modbus_PlanTables(uint8_t planId, sModbusTimeTableSpec *tables,
+                      uint8_t maxTables, uint16_t *idBuf, uint16_t maxIds);
 
-/*
- * There is deliberately no baud accessor.  Baud is a property of the DEVICE,
- * carried in its config record, because one bus can serve devices at different
- * rates by time-multiplexing (Solis 9600 + JK BMS 115200 is the motivating
- * case).  Line parameters travel with each frame, and the RTU framing gaps
- * derive from the rate in force — both inside the port.  docs/modbus.md §2.6.
+/**
+ * @brief  Create a plan in the lowest free slot.
+ *
+ *         The claim is synchronous, so the call keeps a real error return; the
+ *         flash rewrite and the swap that follow are posted.  The plan is
+ *         visible in its new form only once they have run, announced by
+ *         mbEvt_config plus a fresh catalogue.
+ *
+ * @return 0 with *outPlanId set, or mbErr_full / mbErr_badArg / mbErr_busy /
+ *         mbErr_config
  */
+int Modbus_PlanCreate(const sModbusPlanSpec *spec, uint8_t *outPlanId);
 
-/* ==========================================================================
- * Subscriptions — the data path out
- * ========================================================================== */
+/** @brief  Replace a plan.  mbErr_busy if any subscription named it. */
+int Modbus_PlanModify(uint8_t planId, const sModbusPlanSpec *spec);
+
+/** @brief  Free a slot.  mbErr_busy if any subscription named it.  Deleting
+ *          moves no other plan — that is what makes a slot a slot. */
+int Modbus_PlanDelete(uint8_t planId);
+
+/**
+ * @brief  Parse one plan object — the same JSON a config's plans[] holds.
+ *
+ *         Exists so an HTTP surface can take a plan body without reaching past
+ *         this header: one schema, one validator (§8.1).  `spec` points into
+ *         module storage and is valid until the next call, which is long
+ *         enough to hand straight to PlanCreate/PlanModify.
+ *
+ *         `*outId` is the authored slot, or -1 if the body did not name one
+ *         (a PUT takes it from the URL instead).
+ */
+int Modbus_PlanParse(fModbusByteSource src, void *srcCtx,
+                     sModbusPlanSpec *spec, int *outId,
+                     sModbusCompileResult *err);
 
 typedef void (*fModbusSubscriber)(const sModbusEvent *ev, void *ctx);
 
 /**
- * @brief  Subscribe to one device, or to all of them.
+ * @brief  Attach a consumer.  Legal at any time, including before
+ *         Modbus_Init.
  *
- * @param  deviceId   device identity; NULL = every device
- * @param  eventMask  bitwise-OR of eModbusEventType
- * @param  cb         callback; see "Contracts" below — it runs in the poll
- *                    task and must not block
- * @param  ctx        opaque, passed back to cb
- * @return handle >= 0, or mbErr_full
+ *         Does NOT post, deliberately: a posted subscribe cannot return "table
+ *         full", which is a real init-time error.  A brief critical section
+ *         claims a slot and publishes it last, so the dispatcher sees either a
+ *         complete entry or no entry.
  *
- * Within that scope the subscription gets EVERY read — no thresholding, no
- * deduplication.  Device scope is routing, not filtering: it resolves to a
- * devOrd once per config generation, stores nothing, and is the same answer
- * for every consumer of that device.  A bus carries devices with unrelated
- * consumers, and a CAN-fusion path that wants one BMS should not be handed
- * an inverter's registers on every sequence.
- *
- * Naming a device that is not in the active config is legal: the subscription
- * receives nothing until a config containing it goes live.  This is what makes
- * hot config swaps survivable — consumers never re-register.
- *
- * A catalogue (a burst of mbEvt_pointDesc) is delivered for the new
- * subscription if mbEvt_pointDesc is in the mask.  It arrives from the poll
- * task, so it is NOT synchronous with this call.
- *
- * Safe to call from any task, and the module is always running by then
- * (Modbus_Init polls); see contract 8 on late registration.
+ * @param  planMask   plan slots to scope to, or MB_PLAN_ALL
+ * @param  eventMask  eModbusEventType bits; mbEvt_released is always
+ *                    delivered regardless
+ * @return handle >= 0, or mbErr_full / mbErr_badArg
  */
-int  Modbus_Subscribe(const char *deviceId, uint32_t eventMask,
-                      fModbusSubscriber cb, void *ctx);
-
-int  Modbus_Unsubscribe(int handle);
+int Modbus_Subscribe(uint8_t planMask, uint32_t eventMask,
+                     fModbusSubscriber cb, void *ctx);
 
 /**
- * @brief  Re-deliver this subscription's catalogue.
+ * @brief  Detach.  Posts and returns; legal from inside a callback.
  *
- *         Callers that need the point list at a moment unrelated to config
- *         load — MQTT publishing HA discovery on broker connect is the
- *         motivating case — ask for it here rather than walking the config.
- *         Costs one flash walk; delivered from the modbus task like everything
- *         else.
+ *         A BORROW ENDS WHEN THE MODULE SAYS IT ENDED.  Clearing the entry
+ *         from another task is unsafe for a reason no shared flag can fix — a
+ *         dispatcher that has already read the entry is committed to calling
+ *         it.  So release is notified: the module makes one final call with
+ *         mbEvt_released, and THAT CALL IS THE RELEASE POINT.  After it
+ *         returns the module never calls again and `ctx` may be freed.
  */
-int  Modbus_RequestCatalogue(int handle);
+int Modbus_Unsubscribe(int handle);
+
+/**
+ * @brief  Ask for the catalogue again — a burst of mbEvt_pointDesc, one per
+ *         point in this subscription's scope, `last` set on the final entry
+ *         (pt == NULL with last = 1 when there is nothing to describe).
+ *
+ *         It is delivered automatically after Subscribe and after every config
+ *         swap, so this call is for the case where a consumer's "I need the
+ *         point list" moment does not coincide with its "I want the data"
+ *         moment.  Re-subscribing to force a replay would stop polling in the
+ *         gap and use teardown as a query.
+ *
+ *         Posted: the replay is a flash walk and it fires callbacks, so it
+ *         runs on the modbus task, never inline in the caller's.
+ */
+int Modbus_RequestCatalogue(int handle);
 
 /* ==========================================================================
- * Commands
+ * Contracts — read before writing a subscriber (docs/modbus.md §4.7)
  *
- * Write submission is safe from any task and returns WITHOUT touching the bus:
- * it queues, and the engine drains it at the first opening between reads —
- * between transactions within a sequence.  That is what lets
- * the mqtt, http and cmd tasks all submit writes without knowing about each
- * other.  Modbus_Probe() blocks the caller while the engine keeps running.
+ * 1. Callbacks run IN THE MODBUS TASK, synchronously.  Delivery is the call:
+ *    there is no queue, no per-subscriber buffer and no drop counter.
+ * 2. They MUST NOT BLOCK.  Stricter than it looks: samples arrive per read
+ *    rather than per change, so a consumer's cost is multiplied by config
+ *    size, not by how much the plant is moving.
+ * 3. EVERY POINTER IN AN EVENT IS BORROWED and dies when the callback returns.
+ * 4. A consumer cannot fail a sequence; there is no way to report back.
+ * 5. Modbus_Request and Modbus_RequestCatalogue are legal from inside a
+ *    callback.
+ * 6. Both ordinals are authored identities and survive a config swap only for
+ *    as long as the author leaves the array order alone — which is why
+ *    mbEvt_config is followed by a fresh catalogue.
+ * 7. Borrowing runs both ways: the request array until the completion
+ *    callback, the subscriber ctx until mbEvt_released.
+ * 8. Subscribe at any time, including before Modbus_Init.
  *
- * NOTE: only ONE write may be pending (the current single-slot queue).  A
- * second submission returns mbErr_full until the first completes.
+ * The pattern for a consumer that does real work: allocate, copy the fields it
+ * needs, post the pointer to its own queue, return — and do the work on its
+ * own task.  None of that is a contract; a consumer that only counts does it
+ * inline and allocates nothing.
+ * ========================================================================== */
+
+/* ==========================================================================
+ * Requests — one array of items, in and out (docs/modbus.md §4.6)
+ *
+ * It is Modbus_Request, not Modbus_Write, because THE CONFIG decides what each
+ * item means:
+ *
+ *   access  r   reads the point; the supplied value is ignored
+ *           w   writes the supplied value; no read-back is possible
+ *           rw  writes, THEN reads the register back
+ *
+ * That is the protection: a requester cannot reach a read-only register by
+ * asking differently, because asking is not how the decision is made.  The
+ * module also enforces the point's write bounds — an item outside them fails
+ * with mbErr_outOfRange before a frame is formed, and every other item still
+ * runs.  There is no clamping.
  * ========================================================================== */
 
 typedef struct {
-    const char *deviceId;
-    const char *pointName;
-    int32_t     value;          /* scaled-int domain (= raw register domain)*/
-} sModbusWriteReq;
-
-/**
- * @brief  Resolve a point by device + name, range-check against its
- *         writeMin/writeMax, and queue an FC06 write.
- *
- *         The outcome arrives later as mbEvt_writeResult carrying *outId.
- *
- * @return 0, or mbErr_notFound / _RANGE / _FULL
- */
-int  Modbus_SubmitWrite(const sModbusWriteReq *req, uint32_t *outId);
-
-/**
- * @brief  Bring-up / CLI escape hatch (`modbus write <slave> <reg> <value>`):
- *         no config lookup, no range check, address used verbatim.
- */
-int  Modbus_SubmitRawWrite(uint8_t slave, uint16_t reg, uint16_t value,
-                           uint32_t *outId);
+    int32_t  value;    /* in: value to write · out: read or read-back        */
+    uint16_t id;       /* in: pointId within the device's capability         */
+    int16_t  result;   /* out: eModbusErr; mbErr_pending until decided       */
+} sModbusReqItem;      /* exactly 8 bytes, no padding                        */
 
 typedef struct {
-    uint8_t  slave;
-    uint8_t  fc;                /* 3 or 4                                   */
-    uint16_t addr;              /* wire address, verbatim                   */
-    uint16_t count;
-    uint32_t baud;              /* MANDATORY — there is no single configured
-                                   baud any more (see Modbus_Init)          */
-    uint32_t timeoutMs;         /* 0 = default                              */
-} sModbusProbeReq;
+    sModbusReqItem *items;      /* the array as submitted, now filled in     */
+    uint16_t        count;
+    uint8_t         devOrd;
+} sModbusReqReply;
+
+typedef void (*fModbusReqDone)(const sModbusReqReply *rep, void *ctx);
 
 /**
- * @brief  Synchronous one-shot read, independent of the active config.
+ * @brief  Submit one batch of items against one device.
  *
- *         The ONLY API that hands out raw registers — deliberately, because it
- *         exists for addresses that are in no config, which is what bring-up
- *         on an unknown slave means.  Runs as an ordinary one-shot transaction
- *         whose parameters come from the caller instead of a device record;
- *         the engine keeps servicing everything else meanwhile.  BLOCKS the
- *         calling task until it completes.  Backs `modbus probe`.
+ *         item.id is a ptOrd; item.value is in the scaled-integer domain —
+ *         the same domain samples arrive in and writeMin/writeMax are authored
+ *         in.  Repeated ids are legal; items run in order and each slot gets
+ *         its own result.  Every item is attempted: a failure on item 3 does
+ *         not stop items 4-8, and there is no rollback because the wire
+ *         cannot offer one.
  *
- *         On mbErr_exception, *outExc carries the Modbus exception code
- *         (1 Illegal Function, 2 Illegal Data Address, 3 Illegal Data Value) —
- *         telling those apart is the whole diagnosis on an unfamiliar slave.
+ *         THE CONTRACT:
+ *
+ *           The completion callback always fires, within timeout_ms, and it is
+ *           the only moment at which the caller may free or reuse the item
+ *           array.
+ *
+ *         The deadline runs from SUBMISSION, not from first service, so a
+ *         request that waits behind others spends its own timeout waiting and
+ *         may complete with every item mbErr_notAttempted.  A timed-out
+ *         request is abandoned, not merely reported: a reply arriving
+ *         afterwards is discarded and never written into memory the caller has
+ *         been told it may reclaim.  A config swap completes outstanding
+ *         requests, it never drops them.
+ *
+ *         `cb` runs in the modbus task under the same non-blocking rule as a
+ *         subscriber, and is required — without it a caller cannot know when
+ *         its array is its own again.
+ *
+ *         A request reaches the whole capability, not just what some plan
+ *         watches, and it is unaffected by whether anything is subscribed.
+ *
+ * @param  devOrd      device id (its position in the config's devices[])
+ * @param  items       borrowed by the module until `cb` fires
+ * @param  count       1..MB_REQ_MAX_ITEMS
+ * @param  timeout_ms  1..MB_REQ_TIMEOUT_MAX_MS; 0 is rejected
+ * @return 0 on acceptance (every item set to mbErr_pending), or a negative
+ *         eModbusErr — mbErr_badArg / mbErr_full / mbErr_config.  On a
+ *         negative return `cb` does NOT fire and the array was never borrowed.
  */
-int  Modbus_Probe(const sModbusProbeReq *req, uint16_t *out, uint16_t maxOut,
-                  uint16_t *outCount, uint8_t *outExc);
-
-/* There is no injection hook.  Test frames arrive through a TEST PORT whose
- * peer is the host-side harness — it answers the request the engine actually
- * formed, rather than being fed a response below the port, so framing,
- * timeouts and the state machine are all exercised for real.  Which port a
- * device lives on is config.  docs/modbus.md §2.5. */
-
-/**
- * @brief  Mark every transaction due so the next sequences re-read everything
- *         regardless of its period.  Backs `mqtt publish now`, which
- *         needs nothing else now that a read always produces a publish.
- */
-void Modbus_ForceRefresh(void);
+int Modbus_Request(uint8_t devOrd, sModbusReqItem *items, uint16_t count,
+                   uint32_t timeout_ms, fModbusReqDone cb, void *ctx);
 
 /* ==========================================================================
- * Configuration
+ * Configuration (docs/modbus.md §4.9)
+ *
+ * The record stream in flash is the config; JSON is its outward translation,
+ * so an export re-serialises whatever the records now say.
  * ========================================================================== */
-
-/** Byte source for a streaming upload: >0 = bytes read, 0 = EOF, <0 = error */
-typedef int (*fModbusByteSource)(void *ctx, uint8_t *buf, uint32_t maxLen);
-
-/** Byte sink for a streaming export: 0 = ok, <0 = error */
-typedef int (*fModbusByteSink)(void *ctx, const uint8_t *buf, uint32_t len);
-
-/**
- * Compile outcome.  Mirrors the compiler's internal result so the compiler API
- * stays private; the indices and strings are what an HTTP 422 renders.
- * (OPEN Q2)
- */
-typedef struct {
-    uint8_t  ok;
-    int16_t  deviceIdx;         /* -1 when not applicable                   */
-    int16_t  txnIdx;
-    int16_t  pointIdx;
-    char     field[24];
-    char     reason[64];
-    uint8_t  devices;
-    uint8_t  transactions;
-    uint16_t points;
-} sModbusCompileError;
-
-/**
- * @brief  Validate a JSON config stream WITHOUT writing anything.
- *
- *         Same compiler, same single pass, same *err — the records go to a
- *         counting sink instead of flash, so there is no second validator to
- *         keep in sync.  Use it before an upload: Modbus_ConfigCompile()
- *         consumes the inactive region whether it succeeds or fails, and that
- *         region holds the previous config.
- *
- *         Touches no flash and no live state, so it is never refused.
- */
-int  Modbus_ConfigVerify(fModbusByteSource src, void *srcCtx,
-                         sModbusCompileError *err);
 
 /**
  * @brief  Compile a JSON config stream into the INACTIVE flash region.
  *
  *         Compiling IS validating — the pass that writes records is the pass
  *         that checks them.  On failure *err pinpoints the offending
- *         device/transaction/point plus field and reason.  Nothing LIVE is
- *         affected either way, but the inactive region is overwritten
- *         regardless of outcome — see Modbus_ConfigVerify().
+ *         device/transaction/point plus field and reason.  Nothing live is
+ *         affected either way, but the inactive region is consumed regardless
+ *         of outcome, and that region holds the previous config — which is
+ *         what Modbus_ConfigVerify (§10 step 7) exists for.
  *
- *         Refused (mbErr_busy) while a swap is pending: the inactive
- *         region is about to go live.
+ *         Runs on the CALLER's task: the byte source is the HTTP socket and an
+ *         upload takes seconds, so posting it would stall the engine for the
+ *         whole transfer.  Safe without locking because the region being
+ *         written is the one nobody is walking and the header is written last.
+ *
+ *         Refused with mbErr_busy while an apply is pending.
  */
-int  Modbus_ConfigCompile(fModbusByteSource src, void *srcCtx,
-                          sModbusCompileError *err);
+int Modbus_ConfigCompile(fModbusByteSource src, void *srcCtx,
+                         sModbusCompileResult *err);
 
-/** @brief  Arm the swap.  The engine stops the current devices' timers, lets
- *          anything in flight land, and constructs the new devices; a
- *          completion arriving for a torn-down device is discarded on its
- *          generation counter.  docs/modbus.md §2.7. */
-int  Modbus_ConfigApply(void);
+/**
+ * @brief  Arm the config swap.  Committed by the engine at its next safe
+ *         point, hot, with no reboot; outstanding requests are completed
+ *         rather than dropped.  mbErr_config if nothing valid is staged.
+ */
+int Modbus_ConfigApply(void);
 
-/** @brief  Stage the built-in default config and arm the swap (hot reset). */
-int  Modbus_ConfigReset(void);
+/**
+ * @brief  Validate a JSON config stream WITHOUT writing anything.
+ *
+ *         Same compiler, same single pass, same *err — the records go to a
+ *         counting sink instead of flash, so there is never a second validator
+ *         to keep in sync.  Use it before an upload: Modbus_ConfigCompile
+ *         consumes the inactive region whether it succeeds or fails, and that
+ *         region holds the previous config.
+ *
+ *         Touches no flash and no live state, so it is never refused.
+ */
+int Modbus_ConfigVerify(fModbusByteSource src, void *srcCtx,
+                        sModbusCompileResult *err);
 
-/** @brief  Re-serialize the ACTIVE config to JSON (data-faithful, not
- *          byte-identical).  Pure function of the region, so a caller may run
- *          it twice — once to count for Content-Length, once to send. */
-int  Modbus_ConfigExport(fModbusByteSink sink, void *ctx);
+/**
+ * @brief  Erase the stored config: the board becomes UNPROVISIONED.
+ *
+ *         It is Erase, not Reset — with no built-in default there is nothing
+ *         to reset TO, so "reset" named the wrong operation (§4.9).
+ */
+int Modbus_ConfigErase(void);
+
+/**
+ * @brief  Re-serialize the ACTIVE config to JSON (data-faithful, not
+ *         byte-identical; recompiling a download yields the same records).
+ *         A pure function of the region, so a caller may run it twice — once
+ *         to count for Content-Length, once to send.
+ */
+int Modbus_ConfigExport(fModbusByteSink sink, void *ctx);
 
 typedef struct {
     uint8_t  activeRegion;      /* 0 = A, 1 = B                             */
-    uint8_t  valid;
+    uint8_t  valid;             /* the active region holds a usable config  */
+    uint8_t  stagedValid;       /* so does the inactive one                 */
     uint8_t  swapPending;
-    uint8_t  stagedValid;
-    uint8_t  devices;
-    uint8_t  transactions;
-    uint16_t points;
-    sModbusCompileError lastUpload;
+    sModbusConfigCounts counts; /* of the active region; all-zero if !valid */
 } sModbusConfigStatus;
 
-int  Modbus_ConfigStatus(sModbusConfigStatus *out);
+int Modbus_ConfigStatus(sModbusConfigStatus *out);
+
+/* Per-device state, because "why is this device not polled" is a question
+ * about SUBSCRIBERS and about the port, and both `modbus status` and the
+ * config status JSON have to be able to answer it (§4.3, §4.2). */
+typedef struct {
+    char     topicPrefix[MB_TOPIC_PREFIX_LEN];
+    uint32_t baud;
+    uint8_t  devOrd;
+    uint8_t  slaveAddr;
+    uint8_t  capId;
+    uint8_t  portId;
+    uint8_t  format;
+    uint8_t  portUp;         /* a driver is registered on that slot        */
+    uint8_t  coveringPlans;  /* plan slots naming this device              */
+    uint8_t  polled;         /* covered by a LIVE plan, on a port that is up */
+} sModbusDeviceInfo;
+
+/** @return device count written, or a negative eModbusErr */
+int Modbus_DeviceList(sModbusDeviceInfo *out, uint8_t max);
 
 /* ==========================================================================
- * Diagnostics
+ * Diagnostics (docs/modbus.md §4.1, §5.2)
  * ========================================================================== */
 
 typedef struct {
-    uint32_t polls;             /* successful transactions                  */
-    uint32_t errors;            /* failed transactions                      */
-    uint32_t writesDone;
-    uint32_t missed;            /* scheduled sequences dropped because the
-                                   previous one was still unserviced — the
-                                   capacity signal, docs/modbus.md §2.7      */
+    uint32_t polls;      /* transactions that completed                     */
+    uint32_t errors;     /* transactions that did not                       */
+    uint32_t requests;   /* request batches completed                       */
+    uint32_t missed;     /* scheduled sequences dropped because the previous
+                            one was still unserviced — the capacity signal:
+                            non-zero means the config asks for more than the
+                            wire can deliver (§5.2)                          */
     uint8_t  monitor;
 } sModbusStats;
 
-int  Modbus_Stats(sModbusStats *out);
+int Modbus_Stats(sModbusStats *out);
 
-/** @brief  Trice dump of engine + config + per-device state, including each
- *          device's port and its missed count (`modbus status`).            */
+/** @brief  Trice dump of engine + config + per-device state (`modbus status`). */
 void Modbus_LogStatus(void);
 
 /** @brief  Raw TX/RX frame monitoring via Trice.  This is BELOW decode — for
  *          decoded values, subscribe instead. */
 void Modbus_SetMonitor(int enable);
 int  Modbus_GetMonitor(void);
-
-/* ==========================================================================
- * CONTRACTS — read before writing a subscriber
- *
- * 1. Callbacks run in the MODBUS TASK, synchronously.  They extend the time
- *    the engine takes to service a sequence, directly.
- *
- * 1b. NOTHING DISPATCHES FROM ISR OR TIMER CONTEXT.  Port completion callbacks
- *    and scheduler timer callbacks post an event and return — they never
- *    decode and never call a subscriber.  That is what keeps
- *    MqttBridge_Publish (and its LOCK_TCPIP_CORE) legal in a subscriber and
- *    Trice legal in a callback.
- *
- * 2. Callbacks MUST NOT BLOCK.  No unbounded waits, no flash erase, no
- *    connect().  A consumer that needs to block copies the event into its own
- *    queue and returns.  (MqttBridge_Publish() taking LOCK_TCPIP_CORE is
- *    acceptable: bounded, and exactly what the engine already does today.)
- *    Stricter than it looks: samples now arrive per READ, not per change, so
- *    a subscriber's cost is multiplied by config size, not by how much the
- *    plant is moving.
- *
- * 3. EVERY POINTER IN AN EVENT IS BORROWED and dies when the callback
- *    returns — deviceId, name, text and the sModbusPointDesc itself point
- *    into poll-task stack/scratch.  Copy what you keep.
- *
- * 4. Callbacks must not call blocking module APIs.  Safe from a callback:
- *    Modbus_SubmitWrite, Modbus_SubmitRawWrite, Modbus_RequestCatalogue,
- *    Modbus_ForceRefresh, Modbus_Stats.  NOT safe: Modbus_ConfigVerify,
- *    Modbus_ConfigVerify, Modbus_ConfigCompile, Modbus_ConfigExport and
- *    Modbus_Probe (which blocks the calling task until its transaction
- *    completes — from a callback that is the modbus task itself).
- *
- * 5. A subscriber cannot fail a sequence.  No return value; nothing it does is
- *    checked.
- *
- * 6. ptOrd and devOrd are stable only WITHIN ONE CONFIG GENERATION.  A swap
- *    raises mbEvt_config, invalidates every cached ordinal, and is followed
- *    by a fresh catalogue.  deviceId and point name are the identities that
- *    survive a config change.
- *
- * 7. Trice is legal inside a subscriber (modbus task context).  It is NOT legal
- *    in anything a consumer defers into tcpip_thread — the existing rule.
- *
- * 8. Subscribe as early as the consumer's own init allows.  The module is
- *    already polling by then (Modbus_Init), and the table is fixed and not
- *    lock-free; late subscription works but is not hot-plug-safe under load.
- * ========================================================================== */
-
-/* ==========================================================================
- * OPEN QUESTIONS — decide before implementing the marked item
- *
- * Q1  deviceId naming.  The config field is "topicPrefix" — the module's
- *     device identity named after one consumer's transport.  The API says
- *     deviceId, which for now simply IS that value.  Whether the JSON gains a
- *     neutral spelling is a config-schema question, deferred.
- *
- * Q2  sModbusCompileError as a mirror, or re-export sMbCompileResult?
- *     The mirror keeps modbus_config_compiler.h private at the cost of one
- *     struct copy per upload and ~30 lines of translation.  Re-exporting is
- *     free but puts MbCfgCompile() in every consumer's view.  Mirror proposed;
- *     weakest of the calls made here.
- *
- * Q3  MB_MAX_SUBS = 8.  ~16 bytes each.
- *
- * Q4  Synchronous dispatch vs an event queue.  Synchronous preserves today's
- *     behaviour exactly and costs no RAM (CCM has ~6 KB free).  The cost is
- *     that a slow subscriber lengthens sequences — sharper now that every read
- *     dispatches.  Revisit when a real consumer needs to block.
- *
- * Q5  Who owns device availability?  Kept here: the >=30 s throttle on an
- *     offline device is a bus decision only this module can make, and two
- *     consumers deriving "offline" from mbEvt_txn would disagree with each
- *     other.  The strict reading of THE RULE would push it out.
- *
- * Q6  How many built-in default configs?  Solis today; JK BMS now wants one
- *     too, which is either Modbus_ConfigReset(name) over a named set (~1-2 KB
- *     .rodata each) or a repo file to upload (free, needs a network).
- *
- * RESOLVED by the 2026-08-09 review, kept here so they are not re-opened:
- *   - Baud accessors: removed; baud is per-device config.
- *   - Start/Stop/IsRunning, SetPort/GetPort, InjectResponse: removed.  A port
- *     is where a device lives, which is config; "stopped" says nothing that
- *     "no devices configured" does not.
- *   - Writes while stopped: moot — there is no stopped state.
- *   - Catalogue before the first sequence: moot — the module is always running.
- *   - ASCII `value`: unspecified, because nothing here computes a hash.
- * ========================================================================== */
 
 #ifdef __cplusplus
 }

@@ -1,11 +1,11 @@
 /**
- * Helpers for hand-assembling Modbus config record streams into the NOR
- * flash mock — shared by test_modbus_store.c and test_modbus_compiler.c.
+ * Helpers for hand-assembling Modbus config record streams (v2) into the NOR
+ * flash mock — shared by test_modbus_store.c, test_modbus_compiler.c and
+ * test_modbus_export.c.
  *
- * The worked-example builder mirrors the SHIPPED config schema, including the
- * publish threshold/heartbeat fields.  docs/modbus.md §4 documents the target
- * schema, which drops them (§2.4) and adds a per-device baud (§2.6); this
- * builder and the record layout change together at §2.16 step 6/8.
+ * Stream order is the one the format forces (docs/modbus.md §7.1):
+ * capabilities (each with its blocks then its points), devices, plans (each
+ * with its time tables, every table followed by its point-id array).
  */
 #ifndef MODBUS_TEST_STREAM_H
 #define MODBUS_TEST_STREAM_H
@@ -19,7 +19,7 @@
 #include <string.h>
 
 typedef struct {
-    uint8_t  buf[4096];
+    uint8_t  buf[8192];
     uint32_t len;
 } sTestStream;
 
@@ -29,28 +29,46 @@ static inline void ts_append(sTestStream *s, const void *rec, uint32_t size)
     s->len += size;
 }
 
-static inline void ts_device(sTestStream *s, uint8_t slaveAddr,
-                             const char *topicPrefix)
+/* ---- capabilities ------------------------------------------------------ */
+
+static inline void ts_capability(sTestStream *s, const char *name,
+                                 uint8_t addrStride, uint8_t writeFc,
+                                 uint16_t maxReadRegs, uint8_t blockCount)
 {
-    sModbusDeviceRecord d;
-    memset(&d, 0, sizeof(d));
-    d.slaveAddr = slaveAddr;
-    if (topicPrefix) {
-        strncpy(d.topicPrefix, topicPrefix, MB_TOPIC_PREFIX_LEN - 1);
+    sModbusCapabilityRecord c;
+    memset(&c, 0, sizeof(c));
+    if (name) {
+        strncpy(c.name, name, MB_NAME_LEN - 1);
     }
-    ts_append(s, &d, sizeof(d));
+    c.addrStride  = addrStride;
+    c.writeFc     = writeFc;
+    c.maxReadRegs = maxReadRegs;
+    c.blockCount  = blockCount;
+    ts_append(s, &c, sizeof(c));
 }
 
-static inline void ts_txn(sTestStream *s, uint8_t count, uint8_t fc,
-                          uint16_t startAddr, uint16_t readPeriodS)
+static inline void ts_block(sTestStream *s, uint16_t base, uint16_t regs)
 {
-    sModbusTransactionRecord t;
-    memset(&t, 0, sizeof(t));
-    t.count        = count;
-    t.functionCode = fc;
-    t.startAddr    = startAddr;
-    t.readPeriodS  = readPeriodS;
-    ts_append(s, &t, sizeof(t));
+    sModbusBlockRecord b = { base, regs };
+    ts_append(s, &b, sizeof(b));
+}
+
+static inline sModbusPointRecord ts_mkpoint(uint8_t decodeType, uint16_t addr,
+                                            uint8_t fc, int8_t scalePow10,
+                                            uint8_t unit, const char *name)
+{
+    sModbusPointRecord p;
+    memset(&p, 0, sizeof(p));
+    p.decodeType   = decodeType;
+    p.flags        = MB_PT_READ;
+    p.functionCode = fc;
+    p.addr         = addr;
+    p.scalePow10   = scalePow10;
+    p.unit         = unit;
+    if (name) {
+        strncpy(p.name, name, MB_POINT_NAME_LEN - 1);
+    }
+    return p;
 }
 
 static inline void ts_point(sTestStream *s, const sModbusPointRecord *p)
@@ -58,44 +76,63 @@ static inline void ts_point(sTestStream *s, const sModbusPointRecord *p)
     ts_append(s, p, sizeof(*p));
 }
 
-static inline sModbusPointRecord ts_mkpoint(uint8_t decodeType,
-                                            uint16_t offset,
-                                            int8_t scalePow10, uint8_t unit,
-                                            const char *name)
-{
-    sModbusPointRecord p;
-    memset(&p, 0, sizeof(p));
-    p.decodeType = decodeType;
-    p.offset     = offset;
-    p.scalePow10 = scalePow10;
-    p.unit       = unit;
-    if (name) {
-        strncpy(p.name, name, MB_POINT_NAME_LEN - 1);
-    }
-    return p;
-}
+/* ---- devices ----------------------------------------------------------- */
 
-/* Sentinels are full-size all-zero records. */
-static inline void ts_end_points(sTestStream *s)
-{
-    sModbusPointRecord p;
-    memset(&p, 0, sizeof(p));
-    ts_append(s, &p, sizeof(p));
-}
-
-static inline void ts_end_txns(sTestStream *s)
-{
-    sModbusTransactionRecord t;
-    memset(&t, 0, sizeof(t));
-    ts_append(s, &t, sizeof(t));
-}
-
-static inline void ts_end_devices(sTestStream *s)
+static inline void ts_device(sTestStream *s, uint8_t slaveAddr, uint16_t capId,
+                             const char *topicPrefix)
 {
     sModbusDeviceRecord d;
     memset(&d, 0, sizeof(d));
+    d.slaveAddr = slaveAddr;
+    d.capId     = capId;
+    if (topicPrefix) {
+        strncpy(d.topicPrefix, topicPrefix, MB_TOPIC_PREFIX_LEN - 1);
+    }
     ts_append(s, &d, sizeof(d));
 }
+
+/* ---- plans ------------------------------------------------------------- */
+
+static inline void ts_plan(sTestStream *s, uint8_t planId, const char *name,
+                           uint16_t capId, uint8_t devices)
+{
+    sModbusPlanRecord p;
+    memset(&p, 0, sizeof(p));
+    if (name) {
+        strncpy(p.name, name, MB_NAME_LEN - 1);
+    }
+    p.capId   = capId;
+    p.planId  = planId;
+    p.devices = devices;
+    ts_append(s, &p, sizeof(p));
+}
+
+static inline void ts_time_table(sTestStream *s, uint32_t period_sec,
+                                 const uint16_t *ids, uint16_t count)
+{
+    sModbusTimeTableRecord t;
+    memset(&t, 0, sizeof(t));
+    t.period_sec = period_sec;
+    t.entryCount = count;
+    ts_append(s, &t, sizeof(t));
+    ts_append(s, ids, (uint32_t)count * sizeof(uint16_t));
+}
+
+/* ---- sentinels: full-size all-zero records ----------------------------- */
+
+#define TS_END(fn, type)                          \
+    static inline void fn(sTestStream *s)         \
+    {                                             \
+        type r;                                   \
+        memset(&r, 0, sizeof(r));                 \
+        ts_append(s, &r, sizeof(r));              \
+    }
+
+TS_END(ts_end_points,      sModbusPointRecord)
+TS_END(ts_end_capabilities, sModbusCapabilityRecord)
+TS_END(ts_end_devices,     sModbusDeviceRecord)
+TS_END(ts_end_time_tables, sModbusTimeTableRecord)
+TS_END(ts_end_plans,       sModbusPlanRecord)
 
 /* Program a finished stream + valid header into a LUT region of the mock. */
 static inline void ts_write_region(const sTestStream *s, uint32_t base)
@@ -129,41 +166,68 @@ static inline void ts_write_region(const sTestStream *s, uint32_t base)
 #define TS_UNIT_W    27u
 #define TS_UNIT_PCT  56u
 
-/* The design-doc §2 worked example: 2 devices, 2 transactions, 5 points. */
+/**
+ * The §6 worked example, v2: two capabilities, three devices (two of them
+ * SHARING one capability, which is the whole point of the split), and two
+ * plans over the shared capability — one fast over both devices, one lazy over
+ * the spare.  Capability 0 has one writable point.
+ */
 static inline void ts_build_worked_example(sTestStream *s)
 {
     sModbusPointRecord p;
+    static const uint16_t fast[]  = { 0, 1, 2 };
+    static const uint16_t slow[]  = { 3 };
+    static const uint16_t lazy[]  = { 0 };
+    static const uint16_t meter[] = { 0 };
 
     s->len = 0;
 
-    ts_device(s, 1, "periphnet");
-    /* count derived: max(offset + width) = 7 + 1 = 8 */
-    ts_txn(s, 8, mbFc_input, 3132, 5);
-
-    p = ts_mkpoint(mbDecode_u16, 0, -1, TS_UNIT_V, "battery_voltage");
+    /* capability 0: "solis", stride 1, FC06 writes, one block */
+    ts_capability(s, "solis", 1, 6, 125, 1);
+    ts_block(s, 3132, 16);
+    p = ts_mkpoint(mbDecode_u16, 3132, mbFc_input, -1, TS_UNIT_V,
+                   "battery_voltage");
     ts_point(s, &p);
-    p = ts_mkpoint(mbDecode_s16, 1, -1, TS_UNIT_A, "battery_current");
+    p = ts_mkpoint(mbDecode_s16, 3133, mbFc_input, -1, TS_UNIT_A,
+                   "battery_current");
     ts_point(s, &p);
-    p = ts_mkpoint(mbDecode_u16, 6, 0, TS_UNIT_PCT, "battery_soc");
-    p.publishThreshold  = 1;
-    p.publishHeartbeatS = 300;
+    p = ts_mkpoint(mbDecode_u16, 3138, mbFc_input, 0, TS_UNIT_PCT,
+                   "battery_soc");
     ts_point(s, &p);
-    p = ts_mkpoint(mbDecode_u16, 7, 0, TS_UNIT_PCT, "overdischarge_soc_set");
-    p.flags    = MB_POINT_FLAG_WRITABLE;
+    p = ts_mkpoint(mbDecode_u16, 3139, mbFc_holding, 0, TS_UNIT_PCT,
+                   "overdischarge_soc_set");
+    p.flags    = MB_PT_READ | MB_PT_WRITE | MB_PT_BOUNDED;
     p.writeMin = 5;
     p.writeMax = 40;
     ts_point(s, &p);
     ts_end_points(s);
-    ts_end_txns(s);
 
-    ts_device(s, 2, "periphnet_meter");
-    ts_txn(s, 2, mbFc_input, 0, 5);
-    p = ts_mkpoint(mbDecode_float32Be, 0, 0, TS_UNIT_W, "power");
+    /* capability 1: "meter" */
+    ts_capability(s, "meter", 1, 6, 125, 1);
+    ts_block(s, 0, 8);
+    p = ts_mkpoint(mbDecode_float32Be, 0, mbFc_input, 0, TS_UNIT_W, "power");
     ts_point(s, &p);
     ts_end_points(s);
-    ts_end_txns(s);
+    ts_end_capabilities(s);
 
+    ts_device(s, 1, 0, "periphnet");
+    ts_device(s, 3, 0, "spare");
+    ts_device(s, 2, 1, "periphnet_meter");
     ts_end_devices(s);
+
+    ts_plan(s, 0, "inv_fast", 0, 0x01);          /* device 0 only */
+    ts_time_table(s, 5, fast, 3);
+    ts_time_table(s, 60, slow, 1);
+    ts_end_time_tables(s);
+
+    ts_plan(s, 2, "inv_lazy", 0, 0x02);          /* slot 2: gaps are legal */
+    ts_time_table(s, 300, lazy, 1);
+    ts_end_time_tables(s);
+
+    ts_plan(s, 3, "meter_plan", 1, 0x04);
+    ts_time_table(s, 10, meter, 1);
+    ts_end_time_tables(s);
+    ts_end_plans(s);
 }
 
 #endif /* MODBUS_TEST_STREAM_H */

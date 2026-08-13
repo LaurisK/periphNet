@@ -4,7 +4,7 @@
 
 **PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet/MQTT bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader.
 
-**Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: the uploadable multi-device Modbus register config (`Shared/Modbus/` + walker + generic MQTT/HA discovery).
+**Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic MQTT/HA bridge that is now an ordinary consumer. **Not yet run on hardware.**
 
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
 
@@ -222,9 +222,17 @@ PeriphNet/
                                   #   RNG-backed DRBG, TAI64N), wg_time
                                   #   (reboot-surviving monotonic seconds),
                                   #   wg_cfg (per-device net config in flash)
-    Modbus/                       # modbus_rtu (RTU master), modbus_walker
-                                  #   (config-driven poll task), default
-                                  #   Solis JSON config + provisioning
+    Modbus/                       # THE module: modbus.h (the only consumer
+                                  #   header), modbus.c (surface: subscriptions,
+                                  #   requests, plans, config), modbus_engine
+                                  #   (timers + sequences), modbus_port
+                                  #   (the frame-level driver contract),
+                                  #   modbus_trice_sink
+    Rs485/rs485_port.c/h          # RS485 port driver (USART2 + DE) — a
+                                  #   peripheral, so OUTSIDE the module
+    Test/modbus_test_port.c/h     # test peripheral in port slot 1, fed by
+                                  #   `modbus inject`; a config binding, not a
+                                  #   build flag
     Mqtt/mqtt_bridge.c/h          # MQTT bridge + HA discovery (generated
                                   #   from the active Modbus config)
   Shared/                         # First-party code compiled into BOTH targets
@@ -475,7 +483,7 @@ Shared code compiled into both bootloader and application.
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
-| modbus | 512 words | osPriorityNormal (24) | Config walker: one traversal per 100ms tick, reads due transactions from the flash config, decodes + publishes, drains the write queue, commits config swaps at traversal boundaries. Started/stopped at runtime (`modbus start`). **This is the shipped engine; docs/modbus.md §2.5-§2.7 replaces it with ports + per-device timers and no poll loop** |
+| modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
 | mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`) |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
@@ -504,7 +512,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
 | `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
-| `/api/modbus/config/apply` | POST | Arm the config swap; the walker commits at its next lap boundary (hot reload, no reboot) |
+| `/api/modbus/config/apply` | POST | Arm the config swap; the engine commits it at its next safe point (hot reload, no reboot) |
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
 | `/api/modbus/config` | DELETE | Stage the built-in Solis default + arm swap (hot factory reset) |
@@ -670,6 +678,6 @@ TRice("Message: %d\n", value);
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)
 - **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
 - **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. It holds **two** NOLOAD sections with different lifecycles:
-  - `.ccmram` (~11KB) — Modbus walker/compiler state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
+  - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
-- **MQTT publishes go through `MqttBridge_Publish`** — it wraps `mqtt_publish` in `LOCK_TCPIP_CORE()` because the Modbus walker task publishes concurrently with mqttTask; never call the raw lwIP MQTT API from app tasks without the core lock
+- **MQTT publishes happen on `mqttTask` only** — the bridge's Modbus callback copies and posts, so `LOCK_TCPIP_CORE` is off the Modbus sequence path entirely (docs/modbus.md §4.10); never call the raw lwIP MQTT API from app tasks without the core lock

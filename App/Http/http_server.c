@@ -22,7 +22,7 @@
 #include "usart.h"
 #include "usbd_cdc_if.h"
 #include "usbd_cdc.h"
-#include "App/Modbus/modbus_default_config.h"
+#include "App/Modbus/modbus.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -30,9 +30,8 @@
 #include "bl_app_contract.h"
 #include "version.h"
 #include "boot_status.h"
-#include "modbus_config_store.h"
-#include "modbus_config_compiler.h"
-#include "modbus_config_export.h"
+/* The Modbus module is reached through its ONE public header: a consumer may
+ * name Shared/Modbus TYPES but must not call its flash accessors (§2.2). */
 #include "lwip/api.h"
 #include "cmsis_os.h"
 #include "FreeRTOS.h"
@@ -854,10 +853,10 @@ static void handle_crash_delete(struct netconn *conn)
  * -------------------------------------------------------------------------- */
 
 /* Last upload compile outcome, for /api/modbus/config/status */
-static sMbCompileResult s_lastCompile;
+static sModbusCompileResult s_lastCompile;
 static bool             s_haveCompile;
 
-/* Byte source feeding MbCfgCompile from the connection body */
+/* Byte source feeding the config compiler from the connection body */
 typedef struct {
     sConnStream *s;
     uint32_t     remaining;
@@ -884,40 +883,23 @@ static int body_source(void *ctx, uint8_t *buf, uint32_t maxLen)
     return (int)n;
 }
 
-/* Memory byte source (factory-reset compiles the built-in JSON) */
-typedef struct {
-    const char *data;
-    uint32_t    len;
-    uint32_t    pos;
-} sMemSource;
-
-static int mem_source(void *ctx, uint8_t *buf, uint32_t maxLen)
-{
-    sMemSource *m = (sMemSource *)ctx;
-    uint32_t    n = m->len - m->pos;
-
-    if (n > maxLen) n = maxLen;
-    memcpy(buf, &m->data[m->pos], n);
-    m->pos += n;
-    return (int)n;
-}
-
 static void send_compile_result(struct netconn *conn,
-                                const sMbCompileResult *res)
+                                const sModbusCompileResult *res)
 {
     if (res->ok) {
         snprintf(resp_buf, sizeof(resp_buf),
-                 "{\"status\":\"compiled\",\"devices\":%u,"
-                 "\"transactions\":%u,\"points\":%u}",
-                 res->counts.devices, res->counts.transactions,
-                 res->counts.points);
+                 "{\"status\":\"compiled\",\"capabilities\":%u,"
+                 "\"devices\":%u,\"plans\":%u,\"points\":%u}",
+                 res->counts.capabilities, res->counts.devices,
+                 res->counts.plans, res->counts.points);
         send_json(conn, "200 OK", resp_buf);
     } else {
         snprintf(resp_buf, sizeof(resp_buf),
                  "{\"error\":\"%s\",\"field\":\"%s\","
-                 "\"device\":%d,\"transaction\":%d,\"point\":%d}",
+                 "\"capability\":%d,\"device\":%d,\"plan\":%d,"
+                 "\"index\":%d}",
                  res->reason, res->field,
-                 res->deviceIdx, res->txnIdx, res->pointIdx);
+                 res->capIdx, res->devIdx, res->planIdx, res->subIdx);
         send_json(conn, "422 Unprocessable Entity", resp_buf);
     }
 }
@@ -931,25 +913,24 @@ static void handle_modbus_cfg_upload(struct netconn *conn, sConnStream *s)
                   "{\"error\":\"Content-Length required (max 64 KB)\"}");
         return;
     }
-    if (MbCfgStore_IsSwapPending()) {
-        send_json(conn, "409 Conflict",
-                  "{\"error\":\"apply pending; config swap not yet committed\"}");
-        return;
-    }
-
     if (header_expects_continue(req_buf)) {
         send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
     }
 
     sBodySource src = { s, content_length };
-    MbCfgCompile(body_source, &src, MbCfgStore_InactiveBase(),
-                 KickIwdg, &s_lastCompile);
+    if (Modbus_ConfigCompile(body_source, &src, &s_lastCompile) == mbErr_busy) {
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"apply pending; config swap not yet committed\"}");
+        return;
+    }
     s_haveCompile = true;
 
     if (s_lastCompile.ok) {
-        TRice("Modbus config: staged %u devices %u txns %u points\n",
-              s_lastCompile.counts.devices, s_lastCompile.counts.transactions,
-              s_lastCompile.counts.points);
+        /* §8.4's landmark, in its field order: capabilities, plans, devices,
+         * points. */
+        TRice("Modbus config: staged %u capability %u plan %u device %u points\n",
+              s_lastCompile.counts.capabilities, s_lastCompile.counts.plans,
+              s_lastCompile.counts.devices, s_lastCompile.counts.points);
     } else {
         TRiceS("Modbus config: rejected: %s\n", s_lastCompile.reason);
     }
@@ -958,43 +939,71 @@ static void handle_modbus_cfg_upload(struct netconn *conn, sConnStream *s)
 
 static void handle_modbus_cfg_apply(struct netconn *conn)
 {
-    if (MbCfgStore_SetSwapPending() != 0) {
+    if (Modbus_ConfigApply() != 0) {
         send_json(conn, "409 Conflict",
                   "{\"error\":\"no valid staged config to apply\"}");
         return;
     }
-    TRice("Modbus config: apply armed (walker swaps at lap boundary)\n");
+    TRice("Modbus config: apply armed\n");
     send_json(conn, "200 OK", "{\"status\":\"pending\"}");
 }
 
 static void handle_modbus_cfg_status(struct netconn *conn)
 {
-    sMbCfgCounts counts = {0};
-    uint32_t     active = MbCfgStore_ActiveBase();
-    bool         valid  = MbCfgStore_RegionValid(active);
+    sModbusConfigStatus st;
 
-    if (valid) {
-        (void)MbCfg_Count(active, &counts);
+    if (Modbus_ConfigStatus(&st) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"status failed\"}");
+        return;
     }
 
+    sModbusConfigCounts counts = st.counts;
+    bool                valid  = (st.valid != 0u);
+
     int n = snprintf(resp_buf, sizeof(resp_buf),
-        "{\"active_region\":%u,\"valid\":%s,"
-        "\"devices\":%u,\"transactions\":%u,\"points\":%u,"
+        "{\"active_region\":%u,\"valid\":%s,\"state\":\"%s\","
+        "\"capabilities\":%u,\"devices\":%u,\"plans\":%u,\"points\":%u,"
         "\"staged_valid\":%s,\"swap_pending\":%s",
-        (unsigned)(active == EXT_FLASH_MODBUS_LUT_B_ADDR),
+        st.activeRegion,
         valid ? "true" : "false",
-        counts.devices, counts.transactions, counts.points,
-        MbCfgStore_RegionValid(MbCfgStore_InactiveBase()) ? "true" : "false",
-        MbCfgStore_IsSwapPending() ? "true" : "false");
+        valid ? "provisioned" : "unprovisioned",
+        counts.capabilities, counts.devices, counts.plans, counts.points,
+        st.stagedValid ? "true" : "false",
+        st.swapPending ? "true" : "false");
+
+    /* Per device: its port, whether that port has a driver, which plans cover
+     * it and whether anything is actually polling it — "why is this device not
+     * polled" is a question about SUBSCRIBERS (§4.3). */
+    {
+        sModbusDeviceInfo devs[MB_MAX_DEVICES];
+        int               dn = Modbus_DeviceList(devs, MB_MAX_DEVICES);
+
+        n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+                      ",\"devices_state\":[");
+        for (int i = 0; i < dn; i++) {
+            n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+                "%s{\"id\":%u,\"prefix\":\"%s\",\"slave\":%u,"
+                "\"capability\":%u,\"port\":\"%s\",\"port_up\":%s,"
+                "\"baud\":%lu,\"plans\":%u,\"polled\":%s}",
+                i ? "," : "", devs[i].devOrd, devs[i].topicPrefix,
+                devs[i].slaveAddr, devs[i].capId,
+                (devs[i].portId == mbPort_test) ? "test" : "rs485",
+                devs[i].portUp ? "true" : "false",
+                (unsigned long)devs[i].baud, devs[i].coveringPlans,
+                devs[i].polled ? "true" : "false");
+        }
+        n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n, "]");
+    }
 
     if (s_haveCompile) {
         n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
             ",\"last_upload\":{\"ok\":%s,\"error\":\"%s\",\"field\":\"%s\","
-            "\"device\":%d,\"transaction\":%d,\"point\":%d}",
+            "\"capability\":%d,\"device\":%d,\"plan\":%d,\"index\":%d}",
             s_lastCompile.ok ? "true" : "false",
             s_lastCompile.reason, s_lastCompile.field,
-            s_lastCompile.deviceIdx, s_lastCompile.txnIdx,
-            s_lastCompile.pointIdx);
+            s_lastCompile.capIdx, s_lastCompile.devIdx,
+            s_lastCompile.planIdx, s_lastCompile.subIdx);
     }
     snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n, "}");
     send_json(conn, "200 OK", resp_buf);
@@ -1017,7 +1026,7 @@ static void handle_modbus_cfg_download(struct netconn *conn)
     /* Pass 1: measure for Content-Length (export is a pure function of the
      * region; the walker never modifies regions, so two passes agree) */
     uint32_t total = 0;
-    if (MbCfgExport(MbCfgStore_ActiveBase(), export_count_sink, &total) != 0) {
+    if (Modbus_ConfigExport(export_count_sink, &total) != 0) {
         send_json(conn, "404 Not Found", "{\"error\":\"no valid config\"}");
         return;
     }
@@ -1033,33 +1042,172 @@ static void handle_modbus_cfg_download(struct netconn *conn)
     send_all(conn, hdr, hlen);
 
     /* Pass 2: stream it out */
-    (void)MbCfgExport(MbCfgStore_ActiveBase(), export_conn_sink, conn);
+    (void)Modbus_ConfigExport(export_conn_sink, conn);
 }
 
-static void handle_modbus_cfg_reset(struct netconn *conn)
+/* POST /api/modbus/config/verify — validate without writing anything.
+ * The upload path consumes the inactive region on success AND on failure, and
+ * that region holds the previous config, so this is how an operator checks a
+ * config without destroying the fallback (docs/modbus.md §4.9). */
+static void handle_modbus_cfg_verify(struct netconn *conn, sConnStream *s)
 {
-    if (MbCfgStore_IsSwapPending()) {
-        send_json(conn, "409 Conflict",
-                  "{\"error\":\"apply pending; config swap not yet committed\"}");
+    uint32_t content_length = parse_content_length(req_buf);
+
+    if (content_length == 0u || content_length > 64u * 1024u) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required (max 64 KB)\"}");
         return;
     }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
 
-    sMemSource src = {
-        g_modbusDefaultConfigJson,
-        (uint32_t)strlen(g_modbusDefaultConfigJson),
-        0,
-    };
-    sMbCompileResult res;
-    if (MbCfgCompile(mem_source, &src, MbCfgStore_InactiveBase(),
-                     KickIwdg, &res) != 0 ||
-        MbCfgStore_SetSwapPending() != 0) {
+    sModbusCompileResult res;
+    sBodySource          src = { s, content_length };
+
+    Modbus_ConfigVerify(body_source, &src, &res);
+    send_compile_result(conn, &res);
+}
+
+/* --------------------------------------------------------------------------
+ * Plans (/api/modbus/plans) — the one config object that changes at runtime
+ *
+ * A plan body is one element of the config's plans[] array, so the same JSON
+ * an operator would paste into a config is what these take: one schema, one
+ * validator (§8.1).  409 means the plan has a subscriber that NAMED it —
+ * MB_PLAN_ALL subscribers do not lock a plan — and the body reports the
+ * subscriber count so an operator can tell "something holds this" from "the
+ * region is busy", which is the other 409.
+ * -------------------------------------------------------------------------- */
+
+static void handle_modbus_plans_list(struct netconn *conn)
+{
+    sModbusPlanInfo plans[MB_MAX_PLANS];
+    int             n = Modbus_PlanList(plans, MB_MAX_PLANS);
+    int             at;
+
+    if (n < 0) {
         send_json(conn, "500 Internal Server Error",
-                  "{\"error\":\"default config compile failed\"}");
+                  "{\"error\":\"plan list failed\"}");
         return;
     }
 
-    TRice("Modbus config: factory default staged + apply armed\n");
-    send_json(conn, "200 OK", "{\"status\":\"pending\"}");
+    at = snprintf(resp_buf, sizeof(resp_buf), "{\"plans\":[");
+    for (int i = 0; i < n; i++) {
+        at += snprintf(resp_buf + at, sizeof(resp_buf) - (size_t)at,
+            "%s{\"id\":%u,\"name\":\"%s\",\"capability\":%u,"
+            "\"devices\":%u,\"timeTables\":%u,\"subscribers\":%u}",
+            i ? "," : "", plans[i].planId, plans[i].name, plans[i].capId,
+            plans[i].devices, plans[i].timeTables, plans[i].subscribers);
+    }
+    snprintf(resp_buf + at, sizeof(resp_buf) - (size_t)at, "]}");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* Map a plan API return onto the status an operator should see. */
+static void send_plan_result(struct netconn *conn, int r, int planId,
+                             const char *okStatus)
+{
+    if (r == 0) {
+        if (planId >= 0) {
+            snprintf(resp_buf, sizeof(resp_buf),
+                     "{\"status\":\"pending\",\"id\":%d}", planId);
+        } else {
+            snprintf(resp_buf, sizeof(resp_buf), "{\"status\":\"pending\"}");
+        }
+        send_json(conn, okStatus, resp_buf);
+        return;
+    }
+
+    if (r == mbErr_busy) {
+        sModbusPlanInfo info;
+        unsigned subs = 0;
+        if (planId >= 0 && Modbus_PlanGet((uint8_t)planId, &info) == 0) {
+            subs = info.subscribers;
+        }
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"error\":\"plan busy\",\"subscribers\":%u}", subs);
+        send_json(conn, "409 Conflict", resp_buf);
+        return;
+    }
+
+    snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"rejected\",\"code\":%d}",
+             r);
+    send_json(conn, (r == mbErr_full) ? "507 Insufficient Storage"
+                                      : "422 Unprocessable Entity", resp_buf);
+}
+
+/* Body -> spec, shared by POST (create) and PUT (modify). */
+static int read_plan_body(struct netconn *conn, sConnStream *s,
+                          sModbusPlanSpec *spec, int *authoredId)
+{
+    uint32_t content_length = parse_content_length(req_buf);
+
+    if (content_length == 0u || content_length > 8u * 1024u) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required (max 8 KB)\"}");
+        return -1;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    sModbusCompileResult res;
+    sBodySource          src = { s, content_length };
+
+    if (Modbus_PlanParse(body_source, &src, spec, authoredId, &res) != 0) {
+        send_compile_result(conn, &res);
+        return -1;
+    }
+    return 0;
+}
+
+static void handle_modbus_plan_create(struct netconn *conn, sConnStream *s)
+{
+    sModbusPlanSpec spec;
+    int             authoredId = -1;
+
+    if (read_plan_body(conn, s, &spec, &authoredId) != 0) {
+        return;
+    }
+
+    uint8_t slot = 0;
+    int     r    = Modbus_PlanCreate(&spec, &slot);
+    send_plan_result(conn, r, (r == 0) ? (int)slot : authoredId,
+                     "201 Created");
+}
+
+static void handle_modbus_plan_modify(struct netconn *conn, sConnStream *s,
+                                      uint8_t planId)
+{
+    sModbusPlanSpec spec;
+    int             authoredId = -1;
+
+    if (read_plan_body(conn, s, &spec, &authoredId) != 0) {
+        return;
+    }
+    send_plan_result(conn, Modbus_PlanModify(planId, &spec), (int)planId,
+                     "200 OK");
+}
+
+static void handle_modbus_plan_delete(struct netconn *conn, uint8_t planId)
+{
+    send_plan_result(conn, Modbus_PlanDelete(planId), (int)planId, "200 OK");
+}
+
+/* DELETE /api/modbus/config — erase, not reset.  With no built-in default
+ * there is nothing to reset TO (docs/modbus.md §4.9), so this makes the board
+ * unprovisioned: no devices, no timers, no bus traffic, an empty catalogue. */
+static void handle_modbus_cfg_erase(struct netconn *conn)
+{
+    if (Modbus_ConfigErase() != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"erase failed\"}");
+        return;
+    }
+
+    TRice("Modbus config: erased, board is unprovisioned\n");
+    send_json(conn, "200 OK", "{\"status\":\"unprovisioned\"}");
 }
 
 /* --------------------------------------------------------------------------
@@ -1494,6 +1642,17 @@ static void handle_connection(struct netconn *conn)
         handle_crash_delete(conn);
     } else if (route_is("POST /api/modbus/config/upload")) {
         handle_modbus_cfg_upload(conn, &stream);
+    } else if (route_is("POST /api/modbus/config/verify")) {
+        handle_modbus_cfg_verify(conn, &stream);
+    } else if (route_is("GET /api/modbus/plans")) {
+        handle_modbus_plans_list(conn);
+    } else if (route_is("POST /api/modbus/plans")) {
+        handle_modbus_plan_create(conn, &stream);
+    } else if (route_is("PUT /api/modbus/plans/")) {
+        handle_modbus_plan_modify(conn, &stream,
+                                  (uint8_t)atoi(req_buf + 22));
+    } else if (route_is("DELETE /api/modbus/plans/")) {
+        handle_modbus_plan_delete(conn, (uint8_t)atoi(req_buf + 25));
     } else if (route_is("POST /api/modbus/config/apply")) {
         handle_modbus_cfg_apply(conn);
     } else if (route_is("GET /api/modbus/config/status")) {
@@ -1501,7 +1660,7 @@ static void handle_connection(struct netconn *conn)
     } else if (route_is("GET /api/modbus/config/download")) {
         handle_modbus_cfg_download(conn);
     } else if (route_is("DELETE /api/modbus/config ")) {
-        handle_modbus_cfg_reset(conn);
+        handle_modbus_cfg_erase(conn);
     } else if (route_is("GET /api/wg/status")) {
         handle_wg_status(conn);
     } else if (route_is("POST /api/wg/config")) {
@@ -1579,10 +1738,6 @@ void http_server_init(void)
 {
     ImgStore_Init();
     FwuCtl_Init();
-
-    /* Provision the built-in Solis Modbus config on a blank device so the
-     * walker and the config endpoints always have a valid active region */
-    (void)ModbusConfig_EnsureDefault();
 
     osThreadNew(http_task, NULL, &s_httpAttr);
 }

@@ -201,6 +201,17 @@ int MbCfgStore_CommitSwap(void)
 }
 
 /* ==========================================================================
+ * Region erase — "invalid is erased, not repaired" (docs/modbus.md §4.2)
+ * ========================================================================== */
+
+int MbCfgStore_EraseRegion(uint32_t base)
+{
+    /* Only the header page has to go: without a valid header nothing opens a
+     * cursor on the region, and the next upload overwrites the rest. */
+    return (W25Q128_EraseSector(base) == w25q_ok) ? 0 : -1;
+}
+
+/* ==========================================================================
  * Record cursor
  * ========================================================================== */
 
@@ -226,78 +237,189 @@ int MbCfg_Open(uint32_t base, sMbCfgCursor *c)
     return 0;
 }
 
-/* Read one whole record of `size` bytes; 1 = ok, -1 = stream overrun/error. */
-static int cursor_read(sMbCfgCursor *c, void *rec, uint32_t size)
+/* Read `size` bytes of stream; 1 = ok, -1 = stream overrun/read error. */
+static int cursor_read(sMbCfgCursor *c, void *dst, uint32_t size)
 {
     if (c->off + size > c->streamLen) {
         return -1;
     }
-    if (W25Q128_Read(c->base + MODBUS_LUT_HEADER_SIZE + c->off,
-                     (uint8_t *)rec, size) != w25q_ok) {
+    if (dst != NULL &&
+        W25Q128_Read(c->base + MODBUS_LUT_HEADER_SIZE + c->off,
+                     (uint8_t *)dst, size) != w25q_ok) {
         return -1;
     }
     c->off += size;
     return 1;
 }
 
-int MbCfg_NextDevice(sMbCfgCursor *c, sModbusDeviceRecord *d)
+int MbCfg_NextCapability(sMbCfgCursor *c, sModbusCapabilityRecord *cap)
 {
-    int r = cursor_read(c, d, sizeof(*d));
-    if (r != 1) {
+    if (cursor_read(c, cap, sizeof(*cap)) != 1) {
         return -1;
     }
-    return (d->slaveAddr == 0u) ? 0 : 1;
-}
-
-int MbCfg_NextTransaction(sMbCfgCursor *c, sModbusTransactionRecord *t)
-{
-    int r = cursor_read(c, t, sizeof(*t));
-    if (r != 1) {
-        return -1;
-    }
-    return (t->count == 0u) ? 0 : 1;
+    return (cap->name[0] == '\0') ? 0 : 1;
 }
 
 int MbCfg_NextPoint(sMbCfgCursor *c, sModbusPointRecord *p)
 {
-    int r = cursor_read(c, p, sizeof(*p));
-    if (r != 1) {
+    if (cursor_read(c, p, sizeof(*p)) != 1) {
         return -1;
     }
     return (p->decodeType == mbDecode_end) ? 0 : 1;
 }
 
+int MbCfg_NextDevice(sMbCfgCursor *c, sModbusDeviceRecord *d)
+{
+    if (cursor_read(c, d, sizeof(*d)) != 1) {
+        return -1;
+    }
+    return (d->slaveAddr == 0u) ? 0 : 1;
+}
+
+int MbCfg_NextPlan(sMbCfgCursor *c, sModbusPlanRecord *p)
+{
+    if (cursor_read(c, p, sizeof(*p)) != 1) {
+        return -1;
+    }
+    return (p->name[0] == '\0') ? 0 : 1;
+}
+
+int MbCfg_NextTimeTable(sMbCfgCursor *c, sModbusTimeTableRecord *t)
+{
+    if (cursor_read(c, t, sizeof(*t)) != 1) {
+        return -1;
+    }
+    return (t->entryCount == 0u) ? 0 : 1;
+}
+
+int MbCfg_ReadBlocks(sMbCfgCursor *c, sModbusBlockRecord *out, uint8_t count)
+{
+    uint32_t bytes = (uint32_t)count * sizeof(sModbusBlockRecord);
+
+    if (count == 0u) {
+        return 0;
+    }
+    return (cursor_read(c, out, bytes) == 1) ? 0 : -1;
+}
+
+int MbCfg_ReadPointIds(sMbCfgCursor *c, uint16_t *out, uint16_t count)
+{
+    uint32_t bytes = (uint32_t)count * sizeof(uint16_t);
+
+    if (count == 0u) {
+        return 0;
+    }
+    return (cursor_read(c, out, bytes) == 1) ? 0 : -1;
+}
+
 /* ==========================================================================
- * Whole-region helpers
+ * Section navigation
+ *
+ * Every one of these is a linear scan from the top of the stream.  That is the
+ * cost of a self-describing format with no index, and it is deliberate: the
+ * alternative is stored offsets, which are a second thing that can disagree
+ * with the records (docs/modbus.md §7.2).
  * ========================================================================== */
 
-int MbCfg_Count(uint32_t base, sMbCfgCounts *out)
+/* Consume one capability's blocks and points; the capability record itself has
+ * already been read.  Counts points into *points if non-NULL. */
+static int skip_capability_body(sMbCfgCursor *c,
+                                const sModbusCapabilityRecord *cap,
+                                uint16_t *points)
+{
+    sModbusPointRecord pt;
+    int r;
+
+    if (MbCfg_ReadBlocks(c, NULL, cap->blockCount) != 0) {
+        return -1;
+    }
+    while ((r = MbCfg_NextPoint(c, &pt)) == 1) {
+        if (points != NULL) {
+            (*points)++;
+        }
+    }
+    return (r == 0) ? 0 : -1;
+}
+
+/* Consume one plan's time tables and their id arrays; the plan record itself
+ * has already been read.  Counts tables into *tables if non-NULL. */
+static int skip_plan_body(sMbCfgCursor *c, uint8_t *tables)
+{
+    sModbusTimeTableRecord tt;
+    int r;
+
+    while ((r = MbCfg_NextTimeTable(c, &tt)) == 1) {
+        if (MbCfg_ReadPointIds(c, NULL, tt.entryCount) != 0) {
+            return -1;
+        }
+        if (tables != NULL) {
+            (*tables)++;
+        }
+    }
+    return (r == 0) ? 0 : -1;
+}
+
+int MbCfg_SeekDevices(uint32_t base, sMbCfgCursor *c)
+{
+    sModbusCapabilityRecord cap;
+    int r;
+
+    if (MbCfg_Open(base, c) != 0) {
+        return -1;
+    }
+    while ((r = MbCfg_NextCapability(c, &cap)) == 1) {
+        if (skip_capability_body(c, &cap, NULL) != 0) {
+            return -1;
+        }
+    }
+    return (r == 0) ? 0 : -1;
+}
+
+int MbCfg_SeekPlans(uint32_t base, sMbCfgCursor *c)
+{
+    sModbusDeviceRecord dev;
+    int r;
+
+    if (MbCfg_SeekDevices(base, c) != 0) {
+        return -1;
+    }
+    while ((r = MbCfg_NextDevice(c, &dev)) == 1) { }
+    return (r == 0) ? 0 : -1;
+}
+
+int MbCfg_Count(uint32_t base, sModbusConfigCounts *out)
 {
     sMbCfgCursor            c;
+    sModbusCapabilityRecord cap;
     sModbusDeviceRecord     dev;
-    sModbusTransactionRecord txn;
-    sModbusPointRecord      pt;
-    sMbCfgCounts            counts = {0};
+    sModbusPlanRecord       plan;
+    sModbusConfigCounts     counts = { 0, 0, 0, 0 };
+    int                     r;
 
     if (!out || MbCfg_Open(base, &c) != 0) {
         return -1;
     }
 
-    int r;
+    while ((r = MbCfg_NextCapability(&c, &cap)) == 1) {
+        counts.capabilities++;
+        if (skip_capability_body(&c, &cap, &counts.points) != 0) {
+            return -1;
+        }
+    }
+    if (r != 0) {
+        return -1;
+    }
+
     while ((r = MbCfg_NextDevice(&c, &dev)) == 1) {
         counts.devices++;
-        int rt;
-        while ((rt = MbCfg_NextTransaction(&c, &txn)) == 1) {
-            counts.transactions++;
-            int rp;
-            while ((rp = MbCfg_NextPoint(&c, &pt)) == 1) {
-                counts.points++;
-            }
-            if (rp != 0) {
-                return -1;
-            }
-        }
-        if (rt != 0) {
+    }
+    if (r != 0) {
+        return -1;
+    }
+
+    while ((r = MbCfg_NextPlan(&c, &plan)) == 1) {
+        counts.plans++;
+        if (skip_plan_body(&c, NULL) != 0) {
             return -1;
         }
     }
@@ -309,35 +431,141 @@ int MbCfg_Count(uint32_t base, sMbCfgCounts *out)
     return 0;
 }
 
-int MbCfg_FindWritablePoint(const char *topicPrefix, const char *name,
-                            sMbPointLookup *out)
+int MbCfg_OpenCapability(uint32_t base, uint16_t capId, sMbCfgCursor *c,
+                         sModbusCapabilityRecord *cap,
+                         sModbusBlockRecord *blocks, uint8_t maxBlocks)
 {
-    sMbCfgCursor            c;
-    sModbusDeviceRecord     dev;
-    sModbusTransactionRecord txn;
-    sModbusPointRecord      pt;
+    uint16_t ord = 0;
+    int      r;
 
-    if (!topicPrefix || !name || !out ||
-        MbCfg_Open(MbCfgStore_ActiveBase(), &c) != 0) {
+    if (!c || !cap || MbCfg_Open(base, c) != 0) {
         return -1;
     }
 
-    while (MbCfg_NextDevice(&c, &dev) == 1) {
-        int devMatch = (strncmp(dev.topicPrefix, topicPrefix,
-                                MB_TOPIC_PREFIX_LEN) == 0);
-        while (MbCfg_NextTransaction(&c, &txn) == 1) {
-            while (MbCfg_NextPoint(&c, &pt) == 1) {
-                if (devMatch &&
-                    (pt.flags & MB_POINT_FLAG_WRITABLE) != 0u &&
-                    strncmp(pt.name, name, MB_POINT_NAME_LEN) == 0) {
-                    out->slaveAddr = dev.slaveAddr;
-                    out->regAddr   = (uint16_t)(txn.startAddr + pt.offset);
-                    out->point     = pt;
-                    return 0;
+    while ((r = MbCfg_NextCapability(c, cap)) == 1) {
+        if (ord == capId) {
+            uint8_t n = cap->blockCount;
+
+            if (blocks != NULL && n > 0u) {
+                /* Read what fits, skip the rest — a caller that sized its
+                 * array to MB_MAX_BLOCKS_PER_CAP never hits this. */
+                uint8_t take = (n > maxBlocks) ? maxBlocks : n;
+                if (MbCfg_ReadBlocks(c, blocks, take) != 0 ||
+                    MbCfg_ReadBlocks(c, NULL, (uint8_t)(n - take)) != 0) {
+                    return -1;
                 }
+            } else if (MbCfg_ReadBlocks(c, NULL, n) != 0) {
+                return -1;
             }
+            return 0;                    /* cursor is at the first point */
         }
+        if (skip_capability_body(c, cap, NULL) != 0) {
+            return -1;
+        }
+        ord++;
+    }
+    return -1;
+}
+
+int MbCfg_FindDevice(uint32_t base, uint8_t devOrd, sModbusDeviceRecord *out)
+{
+    sMbCfgCursor c;
+    uint8_t      ord = 0;
+
+    if (!out || MbCfg_SeekDevices(base, &c) != 0) {
+        return -1;
+    }
+    while (MbCfg_NextDevice(&c, out) == 1) {
+        if (ord == devOrd) {
+            return 0;
+        }
+        ord++;
+    }
+    return -1;
+}
+
+int MbCfg_FindPoint(uint32_t base, uint16_t capId, uint16_t ptOrd,
+                    sModbusPointRecord *out)
+{
+    sMbCfgCursor            c;
+    sModbusCapabilityRecord cap;
+    uint16_t                ord = 0;
+
+    if (!out || MbCfg_OpenCapability(base, capId, &c, &cap, NULL, 0) != 0) {
+        return -1;
+    }
+    while (MbCfg_NextPoint(&c, out) == 1) {
+        if (ord == ptOrd) {
+            return 0;
+        }
+        ord++;
+    }
+    return -1;
+}
+
+int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out)
+{
+    sMbCfgCursor      c;
+    sModbusPlanRecord plan;
+    int               count = 0;
+    int               r;
+
+    if (!out) {
+        return -1;
+    }
+    memset(out, 0, sizeof(sMbPlanHeader) * MB_MAX_PLANS);
+
+    if (MbCfg_SeekPlans(base, &c) != 0) {
+        return -1;
     }
 
+    while ((r = MbCfg_NextPlan(&c, &plan)) == 1) {
+        uint8_t tables = 0;
+
+        if (skip_plan_body(&c, &tables) != 0) {
+            return -1;
+        }
+        /* A stored slot outside the table is a corrupt stream, not a plan. */
+        if (plan.planId >= MB_MAX_PLANS) {
+            return -1;
+        }
+        out[plan.planId].rec        = plan;
+        out[plan.planId].tableCount = tables;
+        out[plan.planId].used       = 1u;
+        count++;
+    }
+    return (r == 0) ? count : -1;
+}
+
+int MbCfg_ResolvePoint(uint8_t devOrd, uint16_t ptOrd, sMbPointLookup *out)
+{
+    uint32_t                base = MbCfgStore_ActiveBase();
+    sModbusDeviceRecord     dev;
+    sMbCfgCursor            c;
+    sModbusCapabilityRecord cap;
+    uint16_t                ord = 0;
+
+    if (!out || MbCfg_FindDevice(base, devOrd, &dev) != 0) {
+        return -1;
+    }
+    if (MbCfg_OpenCapability(base, dev.capId, &c, &cap, NULL, 0) != 0) {
+        return -1;
+    }
+
+    while (MbCfg_NextPoint(&c, &out->point) == 1) {
+        if (ord == ptOrd) {
+            out->slaveAddr    = dev.slaveAddr;
+            out->functionCode = out->point.functionCode;
+            out->regAddr      = out->point.addr;
+            out->capId        = dev.capId;
+            out->addrStride   = MbRecords_Stride(&cap);
+            out->writeFc      = cap.writeFc;
+            out->portId       = dev.portId;
+            out->baudCode     = dev.baudCode;
+            out->format       = dev.format;
+            return 0;
+        }
+        ord++;
+    }
     return -1;
 }

@@ -1,8 +1,12 @@
 #include "core/ModbusTests.h"
 #include "core/TestRunner.h"
 #include "core/Device.h"
+#include "core/HttpClient.h"
+#include "core/Config.h"
 
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <thread>
 
 /* ----------------------------------------------------------------------------
@@ -12,17 +16,23 @@
  * setup → tests → teardown (contract: docs/modbus.md §6).
  *
  * No physical RS485 bus and no MQTT broker are required:
- *   - modbus port disabled          → transactions time out instantly
- *   - modbus inject <addr> <hex>    → frame decoded, then fed to the config
- *     walker's {frame slave, startAddr} transaction; points run the normal
- *     decode/threshold/publish pipeline synchronously
+ *   - the fixture binds its device to the TEST PORT, an App-layer driver the
+ *     module cannot distinguish from a UART (docs/modbus.md §5.1).  Whether a
+ *     board has one is a CONFIGURATION question, not a build question.
+ *   - modbus inject <hex>           → stage the reply the next frame gets
+ *   - modbus silence                → stage silence instead
  *   - mqtt inject <t> <p>           → message processed as if from the broker
  *   - monitors make publishes observable via Trice without a broker
  *
- * The device polls the generic flash-resident Modbus config; these tests
- * assume the built-in default (Solis) config is active: battery transaction
- * at input 3132 x20, writable overdischarge_soc (3010, 5..40) and
- * max_charge_soc (3009, 70..100).
+ * THE SUITE PROVISIONS ITS OWN CONFIG.  Since docs/modbus.md §4.2 there is no
+ * built-in default and none is provisioned — "the board is told what it is
+ * for; until then it is not for anything" — so `modbus_provision` uploads the
+ * fixture below over HTTP and applies it.  Everything after that depends on
+ * it, and skips if the board could not be reached.
+ *
+ * The fixture deliberately polls at 3600 s: these tests drive data by
+ * INJECTION, and a fast plan would put timeout traffic and availability
+ * transitions in the middle of every assertion.
  * -------------------------------------------------------------------------- */
 
 namespace {
@@ -50,176 +60,285 @@ bool linesContain(const std::vector<std::string>& lines, const std::string& sub)
     return false;
 }
 
-/* Valid 45-byte FC04 battery+load response (20 regs @ wire 3132):
- * batVoltage=51.2V, batCurrent=-5.0A, SOC=85%, SOH=99%.
- * CRC 0x6886 verified against Modbus_CRC16 (bytes: 86 68). */
-const char* kValidBatteryFrame =
-    "0104280200ffce00000000000000000055006300000000000000000000"
-    "00000000000000000000000000008668";
+/* Replies the ENGINE will actually accept: a request reads exactly the
+ * registers it asked for, so a staged frame has to answer THAT request.  A
+ * `modbus get 0 <pt>` reads one register of one point.
+ *
+ * CRCs computed with the poly-0xA001 algorithm the module and the host test
+ * modbus_frame both implement. */
+const char* kReplyVoltage = "0104020200b850";   /* 1 reg = 512  -> 51.2 V   */
+const char* kReplySoc     = "0104020055790f";   /* 1 reg = 85   -> 85 %     */
+const char* kReplyExc2    = "018402c2c1";       /* exception 2              */
+const char* kEchoOverdis  = "01060bc2000f6a16"; /* FC06 echo 3010 = 15      */
+const char* kEchoMaxChg   = "01060bc1005f9a2a"; /* FC06 echo 3009 = 95      */
 
-/* Same structure, 2-register frame with corrupted CRC (valid would be 3a58) */
-const char* kBadCrcFrame = "0104040200ffcedead";
+/* Same shape, corrupted CRC (valid would end b850) */
+const char* kBadCrcFrame  = "0104020200dead";
+
+/* The fixture config lives in tests/fixtures/modbus_solis.json so that
+ * test_modbus_compiler can prove it compiles WITHOUT a board: a config the
+ * board would reject is a broken fixture, and finding that out over HTTP is
+ * the slow way.  Its blocks cover exactly the two address ranges these tests
+ * touch, and its plan polls at 3600 s so scheduled traffic stays out of the
+ * way of injection. */
+std::string loadFixtureConfig()
+{
+    std::string path = Config::projectRoot() + "/tests/fixtures/modbus_solis.json";
+    std::ifstream f(path);
+    if (!f) {
+        return "";
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+/* Set by modbus_provision; everything downstream needs it. */
+bool s_provisioned = false;
+
+TestOutcome needsConfig(const std::string& name)
+{
+    return makeSkip(name, "board not provisioned (see modbus_provision)");
+}
 
 } // namespace
 
-void registerModbusTests(TestRunner& runner)
+void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
 {
     runner.addTest("modbus_setup",
-        "Configure software-only test mode: port=disabled, monitors on, start both",
+        "Software-only test mode: monitors on, engine + bridge running",
         [](Device& dev) -> TestOutcome {
             dev.drain(500);
 
-            /* Stop anything a previous run left active (silent if stopped) */
-            dev.sendCommand("modbus stop");
-            dev.drain(1000);
+            /* The engine has no start/stop: Modbus_Init is the entire
+             * lifecycle, and what gets polled is decided by SUBSCRIPTIONS
+             * (docs/modbus.md §4.2).  Only the bridge is cycled. */
             dev.sendCommand("mqtt stop");
             dev.drain(1000);
 
-            if (!dev.sendAndExpect("modbus port disabled", "Modbus port: disabled", 2000)) {
-                return makeFail("modbus_setup", "step 'modbus port disabled' failed");
-            }
             if (!dev.sendAndExpect("modbus monitor on", "Modbus monitor: on", 1000)) {
                 return makeFail("modbus_setup", "step 'modbus monitor on' failed");
             }
             if (!dev.sendAndExpect("mqtt monitor on", "MQTT monitor: on", 1000)) {
                 return makeFail("modbus_setup", "step 'mqtt monitor on' failed");
             }
-            if (!dev.sendAndExpect("modbus start", "Modbus: walker started", 2000)) {
-                return makeFail("modbus_setup", "step 'modbus start' failed");
-            }
             if (!dev.sendAndExpect("mqtt start", "MQTT: bridge starting", 2000)) {
                 return makeFail("modbus_setup", "step 'mqtt start' failed");
             }
 
+            /* Since docs/modbus.md §10 step 2 the engine polls and dispatches
+             * only for SUBSCRIBERS.  The bridge is one, and it needs its
+             * catalogue before a set-topic resolves — give it a moment. */
+            dev.drain(1000);
+
             return makePass("modbus_setup", "port=disabled, monitors on, walker+bridge running");
         });
 
-    runner.addTest("modbus_valid_inject",
-        "Inject battery response at 3132, verify decode+publish (51.2V, SOC=85%)",
+    runner.addTest("modbus_provision",
+        "Upload + apply the fixture Modbus config over HTTP",
+        [deviceIp](Device& dev) -> TestOutcome {
+            std::string cfg = loadFixtureConfig();
+            if (cfg.empty()) {
+                return makeFail("modbus_provision",
+                                "tests/fixtures/modbus_solis.json not found");
+            }
+
+            HttpClient http(deviceIp);
+
+            auto up = http.post("/api/modbus/config/upload", cfg);
+            if (!up.ok) {
+                return makeSkip("modbus_provision",
+                                "no HTTP to " + deviceIp + ": " + up.error);
+            }
+            if (up.status != 200) {
+                return makeFail("modbus_provision",
+                                "upload -> HTTP " + std::to_string(up.status) +
+                                " " + up.body);
+            }
+
+            auto ap = http.post("/api/modbus/config/apply", "");
+            if (!ap.ok || ap.status != 200) {
+                return makeFail("modbus_provision",
+                                "apply -> " + ap.error + ap.body);
+            }
+
+            /* The engine commits the swap at its next safe point, so poll the
+             * STATE rather than racing a log line for it. */
+            bool live = false;
+            for (int i = 0; i < 20 && !live; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                auto st = http.get("/api/modbus/config/status");
+                live = st.ok && st.status == 200 &&
+                       st.body.find("\"valid\":true") != std::string::npos &&
+                       st.body.find("\"swap_pending\":false") !=
+                           std::string::npos;
+            }
+            if (!live) {
+                return makeFail("modbus_provision",
+                                "config never went live after apply");
+            }
+            dev.drain(300);
+
+            s_provisioned = true;
+            return makePass("modbus_provision",
+                            "fixture config live on " + deviceIp);
+        });
+
+    runner.addTest("modbus_valid_read",
+        "Stage a reply, request point 0, verify decode + publish (51.2 V)",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_valid_read");
+            }
             dev.drain(500);
 
-            /* grid_port_power is the LAST point of the 3132 transaction —
-             * expecting it means every earlier ack/publish is in `lines`
-             * (sendAndExpect stops capturing at the match) */
+            /* Stage first: A REPLY MAY BE STAGED BEFORE THE REQUEST EXISTS,
+             * which is what lets a harness answer traffic it did not cause. */
+            if (!dev.sendAndExpect(std::string("modbus inject ") + kReplyVoltage,
+                                   "Modbus inject: 7 bytes staged", 2000)) {
+                return makeFail("modbus_valid_read", "reply not staged");
+            }
+
             std::vector<std::string> lines;
-            bool ok = dev.sendAndExpect(std::string("modbus inject 3132 ") + kValidBatteryFrame,
-                                        "MQTT pub: periphnet/grid_port_power = 0",
-                                        2000, &lines);
-            if (!ok) {
-                return makeFail("modbus_valid_inject",
-                                "Publish pipeline did not run to grid_port_power");
+            if (!dev.sendAndExpect("modbus get 0 0",
+                                   "Modbus req: dev 0 pt 0 = 512 (0)",
+                                   3000, &lines)) {
+                return makeFail("modbus_valid_read",
+                                "request did not complete with 512");
             }
-            if (!linesContain(lines, "Modbus inject: 45 bytes")) {
-                return makeFail("modbus_valid_inject", "No 'Modbus inject: 45 bytes' ack");
+            if (!linesContain(lines, "Modbus RX[7]:")) {
+                return makeFail("modbus_valid_read", "monitor showed no RX[7]");
             }
-            if (!linesContain(lines, "Modbus RX[45]:")) {
-                return makeFail("modbus_valid_inject", "Monitor did not show 'Modbus RX[45]:'");
-            }
-            if (!linesContain(lines, "Walker inject: slave 1 addr 3132 regs 20")) {
-                return makeFail("modbus_valid_inject", "No 'Walker inject' ack");
-            }
+            /* A request's reads are broadcast like any other read (§4.6). */
             if (!linesContain(lines, "MQTT pub: periphnet/battery_voltage = 51.2")) {
-                return makeFail("modbus_valid_inject", "battery_voltage = 51.2 not published");
+                return makeFail("modbus_valid_read",
+                                "battery_voltage = 51.2 not published");
+            }
+            return makePass("modbus_valid_read", "512 -> 51.2 V, published");
+        });
+
+    runner.addTest("modbus_read_second_point",
+        "A second point of the same capability decodes independently (SOC)",
+        [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_read_second_point");
+            }
+            dev.drain(300);
+
+            dev.sendCommand(std::string("modbus inject ") + kReplySoc);
+            dev.drain(300);
+
+            std::vector<std::string> lines;
+            if (!dev.sendAndExpect("modbus get 0 2",
+                                   "Modbus req: dev 0 pt 2 = 85 (0)",
+                                   3000, &lines)) {
+                return makeFail("modbus_read_second_point", "no SOC result");
             }
             if (!linesContain(lines, "MQTT pub: periphnet/battery_soc = 85")) {
-                return makeFail("modbus_valid_inject", "battery_soc = 85 not published");
+                return makeFail("modbus_read_second_point",
+                                "battery_soc = 85 not published");
             }
-            if (!linesContain(lines, "MQTT pub: periphnet/battery_current = -5.0")) {
-                return makeFail("modbus_valid_inject", "battery_current = -5.0 not published");
-            }
-
-            return makePass("modbus_valid_inject",
-                            "Injected frame decoded+published: 51.2V -5.0A SOC=85%");
+            return makePass("modbus_read_second_point", "SOC = 85 published");
         });
 
-    runner.addTest("modbus_repeat_inject_republish",
-        "Re-inject the same frame — default config (threshold 0) republishes every read",
+    runner.addTest("modbus_silence_times_out",
+        "Staged silence makes the request time out (mbErr_timeout = -4)",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_silence_times_out");
+            }
             dev.drain(300);
 
-            std::vector<std::string> lines;
-            bool ok = dev.sendAndExpect(std::string("modbus inject 3132 ") + kValidBatteryFrame,
-                                        "MQTT pub: periphnet/battery_soc = 85",
-                                        2000, &lines);
-            if (!ok) {
-                return makeFail("modbus_repeat_inject_republish",
-                                "Unchanged value was not republished (threshold 0)");
-            }
-
-            return makePass("modbus_repeat_inject_republish",
-                            "Unchanged battery_soc republished on re-read");
-        });
-
-    runner.addTest("modbus_inject_unknown_addr",
-        "Inject at a startAddr not in the config, expect 'no matching transaction'",
-        [](Device& dev) -> TestOutcome {
+            dev.sendCommand("modbus silence");
             dev.drain(300);
 
-            if (!dev.sendAndExpect(std::string("modbus inject 9999 ") + kValidBatteryFrame,
-                                   "Walker inject: no matching transaction", 2000)) {
-                return makeFail("modbus_inject_unknown_addr",
-                                "No 'no matching transaction' for startAddr 9999");
+            /* The timeout path is reachable WITHOUT HARDWARE: the driver
+             * simply does not answer (§9). */
+            if (!dev.sendAndExpect("modbus get 0 0", "= 0 (-4)", 4000)) {
+                return makeFail("modbus_silence_times_out",
+                                "no mbErr_timeout result");
             }
-            return makePass("modbus_inject_unknown_addr",
-                            "Unknown transaction address rejected");
+            return makePass("modbus_silence_times_out", "silence -> timeout");
         });
 
     runner.addTest("modbus_bad_crc",
-        "Inject frame with corrupted CRC, expect ERR_CRC and no data forwarded",
+        "A corrupt reply is rejected by the ENGINE, not by the driver",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_bad_crc");
+            }
             dev.drain(300);
 
-            std::vector<std::string> lines;
-            bool ok = dev.sendAndExpect(std::string("modbus inject 3132 ") + kBadCrcFrame,
-                                        "Modbus inject: ERR_CRC", 1500, &lines);
-            if (!ok) {
-                return makeFail("modbus_bad_crc", "No 'Modbus inject: ERR_CRC'");
-            }
-            /* Rejected frame must not reach the walker */
-            if (linesContain(lines, "Walker inject:")) {
-                return makeFail("modbus_bad_crc", "Frame with bad CRC reached the walker");
-            }
+            dev.sendCommand(std::string("modbus inject ") + kBadCrcFrame);
+            dev.drain(300);
 
-            return makePass("modbus_bad_crc", "Bad CRC rejected, nothing forwarded");
+            /* The driver delivers it as a FRAME — how reception ended is all it
+             * knows — and the engine returns mbErr_crc (-5). */
+            if (!dev.sendAndExpect("modbus get 0 0", "(-5)", 3000)) {
+                return makeFail("modbus_bad_crc", "CRC error not reported");
+            }
+            return makePass("modbus_bad_crc", "corrupt frame -> mbErr_crc");
         });
 
-    runner.addTest("modbus_short_frame",
-        "Inject 2-byte frame, expect ERR_SHORT",
+    runner.addTest("modbus_exception_reply",
+        "A slave exception becomes a per-item code, not a generic failure",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_exception_reply");
+            }
             dev.drain(300);
 
-            if (!dev.sendAndExpect("modbus inject 3132 0104", "Modbus inject: ERR_SHORT", 1000)) {
-                return makeFail("modbus_short_frame", "No 'Modbus inject: ERR_SHORT'");
+            dev.sendCommand(std::string("modbus inject ") + kReplyExc2);
+            dev.drain(300);
+
+            /* Exception 2 = illegal data address = mbErr_excIllegalAddress. */
+            if (!dev.sendAndExpect("modbus get 0 0", "(-21)", 3000)) {
+                return makeFail("modbus_exception_reply",
+                                "exception 2 not reported as -21");
             }
-            return makePass("modbus_short_frame", "Short frame rejected");
+            return makePass("modbus_exception_reply", "exception 2 -> -21");
         });
 
     runner.addTest("mqtt_inject_write",
-        "Inject MQTT set message, verify Modbus write queued (reg 3010 = 15)",
+        "Inject MQTT set message, verify a Modbus request is submitted",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("mqtt_inject_write");
+            }
+            dev.drain(300);
+
+            /* An rw point writes then READS BACK, so the slave must answer
+             * twice: the echo, then the read-back. */
+            dev.sendCommand(std::string("modbus inject ") + kEchoOverdis);
             dev.drain(300);
 
             std::vector<std::string> lines;
             bool ok = dev.sendAndExpect("mqtt inject periphnet/overdischarge_soc/set 15",
-                                        "Modbus write: reg 3010 = 15", 2000, &lines);
+                                        "MQTT: set periphnet/overdischarge_soc = 15",
+                                        3000, &lines);
             if (!ok) {
-                return makeFail("mqtt_inject_write", "No 'Modbus write: reg 3010 = 15'");
+                return makeFail("mqtt_inject_write",
+                                "No 'MQTT: set periphnet/overdischarge_soc = 15'");
             }
             if (!linesContain(lines, "MQTT inject: periphnet/overdischarge_soc/set")) {
                 return makeFail("mqtt_inject_write", "No MQTT inject ack for set topic");
             }
-
-            return makePass("mqtt_inject_write", "set 15 → write reg 3010 queued");
+            return makePass("mqtt_inject_write", "set 15 -> Modbus_Request submitted");
         });
 
     runner.addTest("mqtt_inject_write_out_of_range",
-        "Inject out-of-range set value, verify rejected (config writeMin/Max)",
+        "Inject out-of-range set value, verify the MODULE rejects it (§4.6)",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("mqtt_inject_write_out_of_range");
+            }
             dev.drain(300);
 
+            /* The bounds live on the point record and the module enforces them
+             * BEFORE A FRAME IS FORMED; the bridge no longer checks. */
             if (!dev.sendAndExpect("mqtt inject periphnet/overdischarge_soc/set 99",
-                                   "Modbus write: reg 3010 rejected", 2000)) {
+                                   "MQTT: set periphnet/overdischarge_soc rejected",
+                                   4000)) {
                 return makeFail("mqtt_inject_write_out_of_range",
                                 "Out-of-range set (99 > writeMax 40) was not rejected");
             }
@@ -228,31 +347,38 @@ void registerModbusTests(TestRunner& runner)
         });
 
     runner.addTest("mqtt_inject_echo",
-        "Inject second writable register, verify ack + write (reg 3009 = 95)",
+        "Inject second writable point, verify ack + request (max_charge_soc = 95)",
         [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("mqtt_inject_echo");
+            }
+            dev.drain(300);
+
+            dev.sendCommand(std::string("modbus inject ") + kEchoMaxChg);
             dev.drain(300);
 
             std::vector<std::string> lines;
             bool ok = dev.sendAndExpect("mqtt inject periphnet/max_charge_soc/set 95",
-                                        "Modbus write: reg 3009 = 95", 2000, &lines);
+                                        "MQTT: set periphnet/max_charge_soc = 95",
+                                        3000, &lines);
             if (!ok) {
-                return makeFail("mqtt_inject_echo", "No 'Modbus write: reg 3009 = 95'");
+                return makeFail("mqtt_inject_echo",
+                                "No 'MQTT: set periphnet/max_charge_soc = 95'");
             }
             if (!linesContain(lines, "MQTT inject: periphnet/max_charge_soc/set")) {
                 return makeFail("mqtt_inject_echo", "No MQTT inject ack for set topic");
             }
-
-            return makePass("mqtt_inject_echo", "set 95 → write reg 3009 queued");
+            return makePass("mqtt_inject_echo", "set 95 -> Modbus_Request submitted");
         });
 
     runner.addTest("modbus_teardown",
-        "Stop both subsystems, restore port=uart2 and monitors off",
+        "Stop the bridge, monitors off; the engine has no stop",
         [](Device& dev) -> TestOutcome {
             dev.drain(500);
 
-            if (!dev.sendAndExpect("modbus stop", "Modbus: stopped", 5000)) {
-                return makeFail("modbus_teardown", "Modbus walker did not stop");
-            }
+            /* Only the BRIDGE has a lifecycle.  Stopping it unsubscribes,
+             * which destroys the timers and quiets the wire — that is what
+             * "a consumer controls the bus by subscribing" means (§4.3). */
             if (!dev.sendAndExpect("mqtt stop", "MQTT: stopped", 5000)) {
                 return makeFail("modbus_teardown", "MQTT bridge did not stop");
             }
@@ -264,44 +390,11 @@ void registerModbusTests(TestRunner& runner)
             if (!dev.sendAndExpect("mqtt monitor off", "MQTT monitor: off", 1000)) {
                 return makeFail("modbus_teardown", "mqtt monitor off failed");
             }
-            if (!dev.sendAndExpect("modbus port uart2", "Modbus port: uart2", 2000)) {
-                return makeFail("modbus_teardown", "port restore to uart2 failed");
-            }
-
-            if (!dev.sendAndExpect("modbus status", "stopped", 2000)) {
-                return makeFail("modbus_teardown", "modbus status not showing stopped");
-            }
             if (!dev.sendAndExpect("mqtt status", "stopped", 2000)) {
                 return makeFail("modbus_teardown", "mqtt status not showing stopped");
             }
 
-            return makePass("modbus_teardown", "Both stopped, port + monitors restored");
+            return makePass("modbus_teardown", "bridge stopped, monitors off");
         });
 
-    /* ------------------------------------------------------------------
-     * Optional hardware tests (UART6 via USB-serial RS485 adapter).
-     * UART6 pins are not confirmed in the schematic yet — the firmware
-     * refuses 'modbus port uart6'.  Skipped until that lands.
-     * ------------------------------------------------------------------ */
-
-    runner.addTest("modbus_hw_uart6_loopback",
-        "Switch to uart6 and exchange a known frame (requires USB-serial adapter)",
-        [](Device& /*dev*/) -> TestOutcome {
-            return makeSkip("modbus_hw_uart6_loopback",
-                            "Hardware test: requires UART6 USB-serial adapter (deferred)");
-        });
-
-    runner.addTest("modbus_hw_uart6_timing",
-        "Verify CRC-correct response within timeout on uart6",
-        [](Device& /*dev*/) -> TestOutcome {
-            return makeSkip("modbus_hw_uart6_timing",
-                            "Hardware test: requires UART6 USB-serial adapter (deferred)");
-        });
-
-    runner.addTest("modbus_hw_uart6_stop",
-        "Restore port=disabled after uart6 tests",
-        [](Device& /*dev*/) -> TestOutcome {
-            return makeSkip("modbus_hw_uart6_stop",
-                            "Hardware test: requires UART6 USB-serial adapter (deferred)");
-        });
 }

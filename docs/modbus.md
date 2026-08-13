@@ -1,15 +1,17 @@
 # Modbus — the common module
 
-**Status:** the design. Restructured 2026-08-12 so the *idea* leads, the rules
-follow from it, and the shipped code appears only where neither reaches. Two
+**Status:** the design, and now also the shape of the code. Restructured
+2026-08-12 so the *idea* leads, the rules follow from it, and the shipped code
+appears only where neither reaches. Two
 questions closed the same day: **plans became runtime objects** the system can
 enumerate, create and edit ([§3.5](#35-plans-are-runtime-objects), [§4.3](#43-plans-and-subscriptions)),
 which inverted the device↔plan link; and **the module enforces write bounds**
 ([§4.6](#46-requests--one-array-of-items-in-and-out)). [§12](#12-undesigned) now
 holds nothing blocking.
 
-Nothing in §2-§8 is implemented yet; §10 is the order it lands in, and the next
-action is step 1.
+**§1-§10 is implemented as of 2026-08-13** and has not yet run on hardware —
+§11.1 says what is on the board, what departs from this document and why.
+`docs/task_modbus_implementation.md` is the step-by-step record.
 
 Single source of truth for Modbus in PeriphNet.
 
@@ -860,6 +862,15 @@ breakdown reads it from `Modbus_PlanGet` rather than from the catalogue.
 27 back-to-back callbacks, at config swap and at every broker reconnect. Bounded
 and infrequent, and it is the consumer's call whether to copy-and-post or to act
 inline.
+
+**A consumer that cannot swallow a whole burst RESUMES it**, and that is a third
+case worth stating because the obvious alternative livelocks. A consumer posting
+to its own queue cannot drain that queue during the burst if it runs at a lower
+priority than the modbus task — so a config bigger than its queue overflows, and
+simply asking again replays from entry 0 and overflows at the same place
+forever. The fix is one counter: count what was actually consumed, skip that
+many ordinals on the next replay, and each round gets further. The burst is
+deterministic and ordered, which is what makes an ordinal enough.
 
 Note that capability, device and point records are walked **from flash** and never
 held in RAM — the plan headers of §3.5 are the one stated exception, and they carry
@@ -2231,27 +2242,44 @@ do: bisecting a regression, surviving the migration, and measuring. Where it and
 
 ### 11.1 What ships today
 
-The v1 engine: `modbus_rtu.c` (RTU master, FC03/04/06, CRC, DE pin, monitor,
-inject) and `modbus_walker.c` (one traversal per 100 ms tick, publishing straight
-to MQTT), over `Shared/Modbus/` (records, A/B store, streaming compiler, exporter,
-decode, units) and `jk_bms.c` beside it. It works against a Solis inverter and its
-host tests are green.
+**§1-§10 is implemented** (2026-08-13, `docs/task_modbus_implementation.md` has
+the step-by-step and the deviations). What is on the board:
 
-Behaviour it has that the design deliberately removes: per-point publish
-threshold/heartbeat, module-side device availability with a ≥30 s offline
-throttle, `Modbus_Probe`, `Modbus_InjectResponse`, `start`/`stop`, one global baud
-and one hardcoded port. **Do not carry any of it forward**, and do not read a
-silence in §1-§10 as a licence to keep it.
+| | |
+|---|---|
+| `App/Modbus/modbus.h` | the only consumer header |
+| `App/Modbus/modbus.c` | the surface: subscriptions, catalogue, requests + FIFO, plans, config |
+| `App/Modbus/modbus_engine.c` | timers, sequences, dispatch — no poll loop, no lifecycle |
+| `App/Modbus/modbus_port.c/h` | the frame-level contract; module-owned buffers in main SRAM |
+| `App/Rs485/rs485_port.c` | the RS485 driver — OUTSIDE the module, because a driver is |
+| `App/Test/modbus_test_port.c` | the test peripheral, likewise |
+| `Shared/Modbus/` | records v2, store, blocks, frame, compiler, exporter, plans, decode/encode, units |
 
-Bugs it carries which the design retires rather than fixes:
+Everything §11.1 previously listed as "do not carry forward" is gone:
+per-point publish threshold and heartbeat, module-side availability and its
+offline throttle, `Modbus_Probe`, `Modbus_InjectResponse`, `start`/`stop`, one
+global baud, one hardcoded port, and `jk_bms.c`. The five defects it listed are
+retired rather than fixed, as designed.
 
-| Defect | Where | Retired by |
-|---|---|---|
-| write address assumed `startAddr + offset`, wrong at any non-zero offset | `modbus_config_store.c:334` | `addr` authored verbatim (§3.3) |
-| a writable point is never checked against its function code, so an FC06 write lands on a *holding* register of the same number in a different space | `modbus_config_compiler.c:605-609` | `w`/`rw` requires holding, at compile (§3.2) |
-| `readPeriodS` is `uint16_t`, so a 24 h read cannot be expressed | `modbus_records.h:89` | `uint32_t` on the time-table record (§7.1) |
-| a UART overrun is indistinguishable from "no byte" | `modbus_rtu.c:151` | `mbPortDone_lineError` (§5.1) |
-| a slave answering *exceptions* counts as failing, so three misconfigured reads mark a healthy device offline | `modbus_walker.c:287-296` | availability leaves the module (§4.4, §8.3) |
+**Not run on hardware.** Host tests are green (11 suites) and the integration
+suite is re-pointed and compiles, but no part of this has met a real slave.
+That is the outstanding risk, and it is the whole of it.
+
+**Known departures from §1-§10**, each argued at its site in the code:
+
+- **No per-plan working copy** (§3.5, §5.2). Time tables are re-read from flash
+  per sequence instead of being loaded when a plan gains its first subscriber.
+  It keeps the stronger property — nothing RAM-resident but the plan headers —
+  and CCM is the binding constraint at 90 %.
+- **`MB_MAX_TIMERS` is 32**, enforced, where §5.2 bounds nothing. The config
+  caps admit 8 devices x 8 plans x 8 tables = 512 FreeRTOS timers off the 48 KB
+  CCM heap that task stacks come from. Scheduling state is the module's to
+  judge (§1.2), so it judges.
+- **`modbus plan add`/`set` are HTTP-only**, against §8.2's table. A plan
+  object is JSON, and a CLI mini-syntax would be a second schema for the one
+  thing §8.1 says has one. `list`, `show` and `del` need no body and stayed.
+- **A catalogue burst may be RESUMED.** §4.5 offers a consumer copy-and-post or
+  act-inline; a third case exists and bites, and it is written up in §4.5.
 
 ### 11.2 The migration is a wipe
 

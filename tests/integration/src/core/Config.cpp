@@ -23,6 +23,8 @@ static void printUsage(const char* prog)
         << "  --cmd-port PATH         Command serial port (serial/udp mode)\n"
         << "  --cmd-baud RATE         Command serial baud (default: 115200)\n"
         << "  --udp-port PORT         UDP listen port (default: 17001)\n"
+        << "  --ip ADDR               Board IPv4 for HTTP config upload\n"
+        << "                          (default: 10.42.0.203)\n"
         << "\n"
         << "Paths:\n"
         << "  --trice-bin PATH        Path to trice binary\n"
@@ -52,6 +54,8 @@ Config Config::fromArgs(int argc, char* argv[])
         if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             std::exit(0);
+        } else if (arg == "--ip") {
+            cfg.deviceIp = nextArg();
         } else if (arg == "--mode") {
             std::string m = nextArg();
             if (m == "usb")         cfg.mode = TransportMode::Usb;

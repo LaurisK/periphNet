@@ -32,6 +32,7 @@ add_library(periphnet_core STATIC
     src/core/Log.cpp
     src/core/Config.cpp
     src/core/Device.cpp
+    src/core/HttpClient.cpp
     src/core/TestRunner.cpp
     src/core/TestCases.cpp
     src/core/ModbusTests.cpp

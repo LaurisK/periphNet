@@ -10,7 +10,7 @@
 /* Runs on the HTTP task (4 KB stack) — keep the format buffer static. */
 static char s_line[192];
 
-static int emit(fMbByteSink sink, void *ctx, const char *fmt, ...)
+static int emit(fModbusByteSink sink, void *ctx, const char *fmt, ...)
 {
     va_list ap;
 
@@ -62,8 +62,28 @@ static void scale_str(int8_t pow10, char *buf, size_t size)
     buf[n] = '\0';
 }
 
-static int export_point(fMbByteSink sink, void *ctx,
-                        const sModbusPointRecord *pt, int first)
+static const char *fc_str(uint8_t fc)
+{
+    return (fc == mbFc_holding) ? "holding" : "input";
+}
+
+static const char *port_str(uint8_t portId)
+{
+    return (portId == mbPort_test) ? "test" : "rs485";
+}
+
+static const char *format_str(uint8_t fmt)
+{
+    switch (fmt) {
+    case mbFmt_8E1: return "8E1";
+    case mbFmt_8O1: return "8O1";
+    case mbFmt_8N2: return "8N2";
+    default:        return "8N1";
+    }
+}
+
+static int export_point(fModbusByteSink sink, void *ctx,
+                        const sModbusPointRecord *pt, uint16_t id)
 {
     const sMbUnitInfo *unit = MbUnits_FromCode(pt->unit);
     char scale[12];
@@ -74,10 +94,11 @@ static int export_point(fMbByteSink sink, void *ctx,
     scale_str(pt->scalePow10, scale, sizeof(scale));
 
     if (emit(sink, ctx,
-             "%s{\"offset\":%u,\"decodeType\":\"%s\",\"scale\":%s,"
-             "\"unit\":\"%s\",\"name\":\"%s\"",
-             first ? "" : ",",
-             pt->offset, decode_type_str(pt->decodeType), scale,
+             "%s{\"id\":%u,\"addr\":%u,\"fc\":\"%s\",\"decodeType\":\"%s\","
+             "\"scale\":%s,\"unit\":\"%s\",\"name\":\"%s\"",
+             (id == 0u) ? "" : ",",
+             id, pt->addr, fc_str(pt->functionCode),
+             decode_type_str(pt->decodeType), scale,
              unit->str, pt->name) != 0) {
         return -1;
     }
@@ -87,98 +108,176 @@ static int export_point(fMbByteSink sink, void *ctx,
         return -1;
     }
 
-    if (pt->publishThreshold != 0u || pt->publishHeartbeatS != 0u) {
-        if (emit(sink, ctx, ",\"publish\":{") != 0) {
+    /* access defaults to "r", so only w/rw is emitted. */
+    if ((pt->flags & MB_PT_WRITE) != 0u) {
+        if (emit(sink, ctx, ",\"access\":\"%s\"",
+                 (pt->flags & MB_PT_READ) ? "rw" : "w") != 0) {
             return -1;
         }
-        int comma = 0;
-        if (pt->publishThreshold != 0u) {
-            if (emit(sink, ctx, "\"threshold\":%u",
-                     pt->publishThreshold) != 0) {
-                return -1;
-            }
-            comma = 1;
-        }
-        if (pt->publishHeartbeatS != 0u) {
-            if (emit(sink, ctx, "%s\"heartbeatS\":%u",
-                     comma ? "," : "", pt->publishHeartbeatS) != 0) {
-                return -1;
-            }
-        }
-        if (emit(sink, ctx, "}") != 0) {
+        /* Bounds are emitted only if the author WROTE them: expanding absent
+         * bounds to the type range would export keys nobody authored, and the
+         * round trip is exactly what catches that (§9). */
+        if ((pt->flags & MB_PT_BOUNDED) != 0u &&
+            emit(sink, ctx, ",\"writeMin\":%ld,\"writeMax\":%ld",
+                 (long)pt->writeMin, (long)pt->writeMax) != 0) {
             return -1;
-        }
-    }
-
-    if (pt->flags & MB_POINT_FLAG_WRITABLE) {
-        if (emit(sink, ctx, ",\"writable\":true") != 0) {
-            return -1;
-        }
-        /* INT16_MIN/MAX is the compiled "no range validation" default —
-         * omit it on export so the round trip stays canonical */
-        if (pt->writeMin != INT16_MIN || pt->writeMax != INT16_MAX) {
-            if (emit(sink, ctx, ",\"writeMin\":%d,\"writeMax\":%d",
-                     pt->writeMin, pt->writeMax) != 0) {
-                return -1;
-            }
         }
     }
 
     return emit(sink, ctx, "}");
 }
 
-int MbCfgExport(uint32_t regionBase, fMbByteSink sink, void *ctx)
+static int export_capability(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
+                             const sModbusCapabilityRecord *cap, uint16_t id)
 {
-    sMbCfgCursor             c;
-    sModbusDeviceRecord      dev;
-    sModbusTransactionRecord txn;
-    sModbusPointRecord       pt;
-    int                      r, rt, rp;
-    int                      firstDev = 1;
+    sModbusBlockRecord blocks[MB_MAX_BLOCKS_PER_CAP];
+    sModbusPointRecord pt;
+    uint16_t           ptId = 0;
+    int                rp;
+
+    if (cap->blockCount > MB_MAX_BLOCKS_PER_CAP ||
+        MbCfg_ReadBlocks(c, blocks, cap->blockCount) != 0) {
+        return -1;
+    }
+
+    if (emit(sink, ctx,
+             "%s{\"id\":%u,\"name\":\"%s\",\"addrStride\":%u,\"writeFc\":%u,"
+             "\"maxReadRegs\":%u,\"blocks\":[",
+             (id == 0u) ? "" : ",",
+             id, cap->name, MbRecords_Stride(cap), cap->writeFc,
+             MbRecords_MaxReadRegs(cap)) != 0) {
+        return -1;
+    }
+
+    for (uint8_t i = 0; i < cap->blockCount; i++) {
+        if (emit(sink, ctx, "%s{\"base\":%u,\"regs\":%u}",
+                 (i == 0u) ? "" : ",", blocks[i].base, blocks[i].regs) != 0) {
+            return -1;
+        }
+    }
+
+    if (emit(sink, ctx, "],\"points\":[") != 0) {
+        return -1;
+    }
+    while ((rp = MbCfg_NextPoint(c, &pt)) == 1) {
+        if (export_point(sink, ctx, &pt, ptId) != 0) {
+            return -1;
+        }
+        ptId++;
+    }
+    if (rp != 0) {
+        return -1;
+    }
+
+    return emit(sink, ctx, "]}");
+}
+
+static int export_plan(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
+                       const sModbusPlanRecord *plan, int first)
+{
+    sModbusTimeTableRecord tt;
+    uint16_t               ids[MB_MAX_TT_ENTRIES_PER_TABLE];
+    int                    ttId = 0;
+    int                    rt;
+    int                    firstDev = 1;
+
+    if (emit(sink, ctx,
+             "%s{\"id\":%u,\"name\":\"%s\",\"capability\":%u,\"devices\":[",
+             first ? "" : ",", plan->planId, plan->name, plan->capId) != 0) {
+        return -1;
+    }
+    for (uint8_t d = 0; d < MB_MAX_DEVICES; d++) {
+        if ((plan->devices & (uint8_t)(1u << d)) == 0u) {
+            continue;
+        }
+        if (emit(sink, ctx, "%s%u", firstDev ? "" : ",", d) != 0) {
+            return -1;
+        }
+        firstDev = 0;
+    }
+    if (emit(sink, ctx, "],\"timeTables\":[") != 0) {
+        return -1;
+    }
+
+    while ((rt = MbCfg_NextTimeTable(c, &tt)) == 1) {
+        if (tt.entryCount > (sizeof(ids) / sizeof(ids[0])) ||
+            MbCfg_ReadPointIds(c, ids, tt.entryCount) != 0) {
+            return -1;
+        }
+        if (emit(sink, ctx, "%s{\"id\":%u,\"everySec\":%lu,\"points\":[",
+                 (ttId == 0) ? "" : ",", ttId,
+                 (unsigned long)tt.period_sec) != 0) {
+            return -1;
+        }
+        for (uint16_t i = 0; i < tt.entryCount; i++) {
+            if (emit(sink, ctx, "%s%u", (i == 0u) ? "" : ",", ids[i]) != 0) {
+                return -1;
+            }
+        }
+        if (emit(sink, ctx, "]}") != 0) {
+            return -1;
+        }
+        ttId++;
+    }
+    if (rt != 0) {
+        return -1;
+    }
+
+    return emit(sink, ctx, "]}");
+}
+
+int MbCfgExport(uint32_t regionBase, fModbusByteSink sink, void *ctx)
+{
+    sMbCfgCursor            c;
+    sModbusCapabilityRecord cap;
+    sModbusDeviceRecord     dev;
+    sModbusPlanRecord       plan;
+    uint16_t                capId = 0;
+    uint8_t                 devId = 0;
+    int                     r;
+    int                     firstDev = 1, firstPlan = 1;
 
     if (!sink || MbCfg_Open(regionBase, &c) != 0) {
         return -1;
     }
 
-    if (emit(sink, ctx, "{\"devices\":[") != 0) {
+    if (emit(sink, ctx, "{\"capabilities\":[") != 0) {
+        return -1;
+    }
+    while ((r = MbCfg_NextCapability(&c, &cap)) == 1) {
+        if (export_capability(sink, ctx, &c, &cap, capId) != 0) {
+            return -1;
+        }
+        capId++;
+    }
+    if (r != 0 || emit(sink, ctx, "],\"devices\":[") != 0) {
         return -1;
     }
 
     while ((r = MbCfg_NextDevice(&c, &dev)) == 1) {
         if (emit(sink, ctx,
-                 "%s{\"slaveAddr\":%u,\"topicPrefix\":\"%s\","
-                 "\"transactions\":[",
-                 firstDev ? "" : ",", dev.slaveAddr, dev.topicPrefix) != 0) {
+                 "%s{\"id\":%u,\"slaveAddr\":%u,\"capability\":%u,"
+                 "\"baud\":%lu,\"format\":\"%s\",\"port\":\"%s\","
+                 "\"topicPrefix\":\"%s\"}",
+                 firstDev ? "" : ",",
+                 devId, dev.slaveAddr, dev.capId,
+                 (unsigned long)MbRecords_BaudFromCode(dev.baudCode),
+                 format_str(dev.format), port_str(dev.portId),
+                 dev.topicPrefix) != 0) {
             return -1;
         }
         firstDev = 0;
+        devId++;
+    }
+    if (r != 0 || emit(sink, ctx, "],\"plans\":[") != 0) {
+        return -1;
+    }
 
-        int firstTxn = 1;
-        while ((rt = MbCfg_NextTransaction(&c, &txn)) == 1) {
-            if (emit(sink, ctx,
-                     "%s{\"startAddr\":%u,\"functionCode\":\"%s\","
-                     "\"readPeriodS\":%u,\"points\":[",
-                     firstTxn ? "" : ",", txn.startAddr,
-                     (txn.functionCode == mbFc_holding) ? "holding" : "input",
-                     txn.readPeriodS) != 0) {
-                return -1;
-            }
-            firstTxn = 0;
-
-            int firstPt = 1;
-            while ((rp = MbCfg_NextPoint(&c, &pt)) == 1) {
-                if (export_point(sink, ctx, &pt, firstPt) != 0) {
-                    return -1;
-                }
-                firstPt = 0;
-            }
-            if (rp != 0 || emit(sink, ctx, "]}") != 0) {
-                return -1;
-            }
-        }
-        if (rt != 0 || emit(sink, ctx, "]}") != 0) {
+    while ((r = MbCfg_NextPlan(&c, &plan)) == 1) {
+        if (export_plan(sink, ctx, &c, &plan, firstPlan) != 0) {
             return -1;
         }
+        firstPlan = 0;
     }
     if (r != 0) {
         return -1;

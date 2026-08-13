@@ -10,17 +10,18 @@
 #ifndef MODBUS_CONFIG_EXPORT_H_
 #define MODBUS_CONFIG_EXPORT_H_
 
+#include "modbus_records.h"
+
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Receive a JSON fragment; return 0 to continue, <0 to abort the export. */
-typedef int (*fMbByteSink)(void *ctx, const char *data, uint32_t len);
+/* fModbusByteSink lives in modbus_records.h (docs/modbus.md §4.9). */
 
 /* Walk the region and emit JSON. 0 = done, -1 = invalid region / sink abort. */
-int MbCfgExport(uint32_t regionBase, fMbByteSink sink, void *ctx);
+int MbCfgExport(uint32_t regionBase, fModbusByteSink sink, void *ctx);
 
 #ifdef __cplusplus
 }

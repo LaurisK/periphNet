@@ -10,9 +10,9 @@
 #include "App/Cmd/cmd_parser.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
-#include "App/Modbus/jk_bms.h"
-#include "App/Modbus/modbus_rtu.h"
-#include "App/Modbus/modbus_walker.h"
+#include "App/Test/modbus_test_port.h"
+#include "App/Modbus/modbus_trice_sink.h"
+#include "App/Modbus/modbus.h"
 #include "App/Mqtt/mqtt_bridge.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
@@ -66,15 +66,13 @@ static void cmd_reboot(const char *args);
 static void cmd_dfu(const char *args);
 static void cmd_bms(const char *args);
 static void cmd_modbus(const char *args);
-static void cmd_jk(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
-    { "modbus",      cmd_modbus,      "Modbus RTU (start|stop|read|set|port|monitor|inject|status)" },
-    { "jk",          cmd_jk,          "JK BMS (probe [slave] [baud])" },
+    { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
@@ -178,80 +176,92 @@ static int parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen)
     return (int)len;
 }
 
+/* One-item Modbus_Request from the CLI.  The array is BORROWED by the module
+ * until the callback fires, so it is static and guarded — the contract is the
+ * same one every requester lives under (docs/modbus.md §4.6). */
+static sModbusReqItem s_cliItem;
+static volatile int   s_cliBusy;
+static uint8_t        s_cliDev;
+
+static void cli_req_done(const sModbusReqReply *rep, void *ctx)
+{
+    (void)ctx;
+
+    if (rep->count > 0) {
+        TRice("Modbus req: dev %u pt %u = %d (%d)\n", s_cliDev,
+              rep->items[0].id, (int)rep->items[0].value,
+              (int)rep->items[0].result);
+    }
+    s_cliBusy = 0;
+}
+
+static void cli_request(const char *args, int isWrite)
+{
+    unsigned dev = 0, pt = 0;
+    int      val = 0;
+
+    if (isWrite) {
+        if (sscanf(args, "%u %u %d", &dev, &pt, &val) != 3) {
+            TRice("Usage: modbus set <devOrd> <ptOrd> <value>\n");
+            return;
+        }
+    } else if (sscanf(args, "%u %u", &dev, &pt) != 2) {
+        TRice("Usage: modbus get <devOrd> <ptOrd>\n");
+        return;
+    }
+
+    if (s_cliBusy) {
+        TRice("Modbus req: busy\n");
+        return;
+    }
+
+    s_cliDev         = (uint8_t)dev;
+    s_cliItem.id     = (uint16_t)pt;
+    s_cliItem.value  = val;
+    s_cliItem.result = mbErr_pending;
+    s_cliBusy        = 1;
+
+    int r = Modbus_Request((uint8_t)dev, &s_cliItem, 1, 3000u,
+                           cli_req_done, NULL);
+    if (r != 0) {
+        s_cliBusy = 0;
+        TRice("Modbus req: rejected (%d)\n", r);
+    }
+}
+
 /**
- * Modbus command: control the generic Modbus RTU config walker.
+ * Modbus command: drive the module.
+ *
+ * There is no start/stop (Modbus_Init is the entire lifecycle and what gets
+ * polled is decided by SUBSCRIPTIONS), no `set baud` (a device parameter), no
+ * `port` (a device lives on a port; that is config), no raw `write` (there is
+ * no raw write path) and no `probe` (no direct bus access at all) — each was a
+ * knob on something that is now either config or nobody's business outside the
+ * module (docs/modbus.md §8.2).
  *
  * Usage:
- *   modbus start [baud]          — Start the walker (default 9600 baud;
- *                                  devices/registers come from the config)
- *   modbus stop                  — Stop the walker
- *   modbus read                  — Log walker/config status
- *   modbus set baud <rate>       — Change baud rate (restart to apply)
- *   modbus write <slave> <reg> <value> — Write a holding register
- *   modbus port <uart2|uart6|disabled> — Select port (stop walker first)
+ *   modbus read / status         — Log engine/config status
+ *   modbus get <devOrd> <ptOrd>  — Read one point via Modbus_Request
+ *   modbus set <devOrd> <ptOrd> <value> — Write one point
  *   modbus monitor <on|off>      — Trice raw TX/RX frame monitoring
- *   modbus inject <startAddr> <hexbytes> — Feed a response frame to the
- *                                  {frame slave, startAddr} config transaction
- *   modbus status                — Show walker state
+ *   modbus dump <on|off>         — Trice subscriber: every decoded reading
+ *   modbus plan list             — every slot: name, capability, devices,
+ *                                  time tables, subscriber count
+ *   modbus plan show <id>        — one plan's time tables and point ids
+ *   modbus plan del <id>         — free a slot (refused while subscribed)
+ *   modbus inject <hexbytes>     — Stage the reply the next frame gets
+ *   modbus silence               — Stage silence for the next frame
  */
 static void cmd_modbus(const char *args)
 {
-    if (strncmp(args, "start", 5) == 0) {
-        if (ModbusWalker_IsRunning()) {
-            TRice("Modbus already running\n");
-            return;
-        }
-        sModbusWalkerCfg cfg = {
-            .baud              = 9600,
-            .responseTimeoutMs = 1000,
-        };
-        /* Parse optional: modbus start [baud] */
-        const char *p = args + 5;
-        unsigned b = 0;
-        if (sscanf(p, " %u", &b) == 1 && b > 0) {
-            cfg.baud = b;
-        }
-        ModbusWalker_Start(&cfg);
-    } else if (strncmp(args, "stop", 4) == 0) {
-        ModbusWalker_Stop();
+    if (strncmp(args, "get ", 4) == 0) {
+        /* What the config declares can be read on demand, whether or not any
+         * plan watches it (§4.6). */
+        cli_request(args + 4, 0);
+    } else if (strncmp(args, "set ", 4) == 0) {
+        cli_request(args + 4, 1);
     } else if (strncmp(args, "read", 4) == 0) {
-        ModbusWalker_LogStatus();
-    } else if (strncmp(args, "set baud ", 9) == 0) {
-        unsigned b = 0;
-        if (sscanf(args + 9, "%u", &b) == 1 && b > 0) {
-            ModbusWalker_SetBaud(b);
-            TRice("Modbus baud set to %u (restart to apply)\n", b);
-        } else {
-            TRice("Usage: modbus set baud <rate>\n");
-        }
-    } else if (strncmp(args, "write ", 6) == 0) {
-        unsigned slave = 0, reg = 0, val = 0;
-        if (sscanf(args + 6, "%u %u %u", &slave, &reg, &val) == 3 &&
-            slave >= 1 && slave <= 247) {
-            if (ModbusWalker_WriteRegister((uint8_t)slave, (uint16_t)reg,
-                                           (uint16_t)val) == 0) {
-                TRice("Modbus write queued: reg %u = %u\n", reg, val);
-            } else {
-                TRice("Modbus write failed (not running or queue full)\n");
-            }
-        } else {
-            TRice("Usage: modbus write <slave> <register> <value>\n");
-        }
-    } else if (strncmp(args, "port ", 5) == 0) {
-        const char *p = args + 5;
-        if (strncmp(p, "uart2", 5) == 0) {
-            if (Modbus_SetPort(mbPort_uart2) == 0) {
-                TRice("Modbus port: uart2\n");
-            }
-        } else if (strncmp(p, "uart6", 5) == 0) {
-            Modbus_SetPort(mbPort_uart6);  /* logs its own refusal */
-        } else if (strncmp(p, "disabled", 8) == 0) {
-            if (Modbus_SetPort(mbPort_disabled) == 0) {
-                TRice("Modbus port: disabled\n");
-            }
-        } else {
-            TRice("Usage: modbus port uart2|uart6|disabled\n");
-        }
+        Modbus_LogStatus();
     } else if (strncmp(args, "monitor ", 8) == 0) {
         if (strncmp(args + 8, "on", 2) == 0) {
             Modbus_SetMonitor(1);
@@ -262,80 +272,127 @@ static void cmd_modbus(const char *args)
         } else {
             TRice("Usage: modbus monitor on|off\n");
         }
+    } else if (strncmp(args, "plan", 4) == 0) {
+        const char *p = args + 4;
+        while (*p == ' ') p++;
+
+        if (strncmp(p, "list", 4) == 0) {
+            sModbusPlanInfo plans[MB_MAX_PLANS];
+            int n = Modbus_PlanList(plans, MB_MAX_PLANS);
+
+            if (n <= 0) {
+                TRice("Modbus plans: none\n");
+                return;
+            }
+            for (int i = 0; i < n; i++) {
+                char buf[100];
+                snprintf(buf, sizeof(buf),
+                         "%u %s cap=%u devices=0x%02x tables=%u subs=%u",
+                         plans[i].planId, plans[i].name, plans[i].capId,
+                         plans[i].devices, plans[i].timeTables,
+                         plans[i].subscribers);
+                TRiceS("Modbus plan: %s\n", buf);
+            }
+        } else if (strncmp(p, "show ", 5) == 0) {
+            unsigned id = 0;
+            sModbusPlanInfo info;
+
+            if (sscanf(p + 5, "%u", &id) != 1 || id >= MB_MAX_PLANS) {
+                TRice("Usage: modbus plan show <id>\n");
+                return;
+            }
+            if (Modbus_PlanGet((uint8_t)id, &info) != 0) {
+                TRice("Modbus plan: %u is free\n", id);
+                return;
+            }
+
+            char buf[100];
+            snprintf(buf, sizeof(buf),
+                     "%u %s cap=%u devices=0x%02x tables=%u subs=%u",
+                     info.planId, info.name, info.capId, info.devices,
+                     info.timeTables, info.subscribers);
+            TRiceS("Modbus plan: %s\n", buf);
+
+            /* A plan's time tables are NOT in the resident header table, so
+             * this reads them from flash like any other record (§4.3). */
+            sModbusTimeTableSpec tables[MB_MAX_TIME_TABLES_PER_PLAN];
+            uint16_t             ids[MB_MAX_TT_ENTRIES_PER_PLAN];
+            int n = Modbus_PlanTables((uint8_t)id, tables,
+                                      MB_MAX_TIME_TABLES_PER_PLAN,
+                                      ids, MB_MAX_TT_ENTRIES_PER_PLAN);
+            for (int t = 0; t < n; t++) {
+                char tb[100];
+                int  at = snprintf(tb, sizeof(tb), "%us:", 
+                                   (unsigned)tables[t].period_sec);
+                for (uint16_t k = 0; k < tables[t].count &&
+                                     at < (int)sizeof(tb) - 8; k++) {
+                    at += snprintf(tb + at, sizeof(tb) - (size_t)at, " %u",
+                                   tables[t].points[k]);
+                }
+                TRiceS("  table: %s\n", tb);
+            }
+        } else if (strncmp(p, "del ", 4) == 0) {
+            unsigned id = 0;
+            if (sscanf(p + 4, "%u", &id) != 1 || id >= MB_MAX_PLANS) {
+                TRice("Usage: modbus plan del <id>\n");
+                return;
+            }
+            int r = Modbus_PlanDelete((uint8_t)id);
+            if (r == 0) {
+                TRice("Modbus plan: %u delete armed\n", id);
+            } else if (r == mbErr_busy) {
+                TRice("Modbus plan: %u refused, it has a subscriber\n", id);
+            } else {
+                TRice("Modbus plan: %u delete failed (%d)\n", id, r);
+            }
+        } else {
+            /* `plan add` and `plan set` take a plan object, and a plan object
+             * is JSON — which the CLI has no business carrying.  They live on
+             * POST/PUT /api/modbus/plans (docs/modbus.md §8.1). */
+            TRice("Usage: modbus plan list|show <id>|del <id>  (add/set: HTTP)\n");
+        }
+    } else if (strncmp(args, "dump ", 5) == 0) {
+        if (strncmp(args + 5, "on", 2) == 0) {
+            ModbusTriceSink_Set(1);
+        } else if (strncmp(args + 5, "off", 3) == 0) {
+            ModbusTriceSink_Set(0);
+        } else {
+            TRice("Usage: modbus dump on|off\n");
+        }
     } else if (strncmp(args, "inject ", 7) == 0) {
-        /* modbus inject <startAddr> <hexbytes> */
-        unsigned startAddr = 0;
-        int      consumed = 0;
-        if (sscanf(args + 7, "%u %n", &startAddr, &consumed) != 1 ||
-            startAddr > 65535 || consumed == 0) {
-            TRice("Usage: modbus inject <startAddr> <hexbytes>\n");
-            return;
-        }
-        uint8_t frame[128];
-        int len = parse_hex_bytes(args + 7 + consumed, frame, sizeof(frame));
+        /* modbus inject <hexbytes> — stage the reply the next frame gets.
+         * NOT a hole beneath the port: it feeds an App-layer driver the module
+         * cannot distinguish from a UART (docs/modbus.md §8.2). */
+        uint8_t frame[MB_TEST_FRAME_MAX];
+        int len = parse_hex_bytes(args + 7, frame, sizeof(frame));
+
         if (len <= 0) {
-            TRice("Usage: modbus inject <startAddr> <hexbytes>\n");
+            TRice("Usage: modbus inject <hexbytes>\n");
             return;
         }
-        uint16_t regs[64];
-        uint16_t regCount = 0;
-        if (Modbus_ProcessInjectedFrame(frame, (uint16_t)len, regs,
-                                        64, &regCount) == mbErr_ok &&
-            regCount > 0) {
-            ModbusWalker_InjectResponse(frame[0], (uint16_t)startAddr,
-                                        regs, regCount);
+        if (ModbusTestPort_StageReply(frame, (uint16_t)len) == 0) {
+            TRice("Modbus inject: %d bytes staged\n", len);
+        } else {
+            TRice("Modbus inject: ERR_SHORT\n");
         }
+    } else if (strncmp(args, "silence", 7) == 0) {
+        ModbusTestPort_StageSilence();
+        TRice("Modbus inject: silence staged\n");
     } else if (strncmp(args, "status", 6) == 0) {
-        eModbusPort port = Modbus_GetPort();
-        char buf[100];
-        snprintf(buf, sizeof(buf), "%s port=%s monitor=%s baud=%u",
-                 ModbusWalker_IsRunning() ? "running" : "stopped",
-                 (port == mbPort_uart2)    ? "uart2" :
-                 (port == mbPort_uart6)    ? "uart6" : "disabled",
-                 Modbus_GetMonitor() ? "on" : "off",
-                 (unsigned)ModbusWalker_GetBaud());
+        sModbusStats st;
+        char         buf[100];
+
+        (void)Modbus_Stats(&st);
+        snprintf(buf, sizeof(buf),
+                 "monitor=%s polls=%lu errors=%lu missed=%lu reqs=%lu test=%lu",
+                 st.monitor ? "on" : "off", (unsigned long)st.polls,
+                 (unsigned long)st.errors, (unsigned long)st.missed,
+                 (unsigned long)st.requests,
+                 (unsigned long)ModbusTestPort_RequestCount());
         TRiceS("Modbus %s\n", buf);
-        ModbusWalker_LogStatus();
+        Modbus_LogStatus();
     } else {
-        TRice("Usage: modbus start|stop|read|set|write|port|monitor|inject|status\n");
-    }
-}
-
-/**
- * JK BMS command.
- *
- * Usage:
- *   jk probe [slave] [baud]   — one-shot DeviceInfo read; proves the board
- *                               sees a JK BMS on the bus.  Defaults slave 1,
- *                               115200.  Requires the walker to be stopped
- *                               (it owns USART2 and runs at its own baud).
- */
-static void cmd_jk(const char *args)
-{
-    if (strncmp(args, "probe", 5) == 0) {
-        unsigned slave = JK_DEFAULT_SLAVE;
-        unsigned baud  = JK_DEFAULT_BAUD;
-        unsigned a = 0, b = 0;
-        int      n = sscanf(args + 5, " %u %u", &a, &b);
-
-        if (n >= 1) {
-            if (a < 1u || a > 247u) {
-                TRice("Usage: jk probe [slave 1-247] [baud]\n");
-                return;
-            }
-            slave = a;
-        }
-        if (n >= 2) {
-            if (b == 0u) {
-                TRice("Usage: jk probe [slave 1-247] [baud]\n");
-                return;
-            }
-            baud = b;
-        }
-
-        JkBms_LogProbe((uint8_t)slave, baud);
-    } else {
-        TRice("Usage: jk probe [slave] [baud]\n");
+        TRice("Usage: modbus read|get|set|monitor|dump|plan|inject|silence|status\n");
     }
 }
 

@@ -5,7 +5,7 @@
 App::App()
 {
     registerAllTests(testRunner);
-    registerModbusTests(testRunner);
+    registerModbusTests(testRunner, config_.deviceIp);
     registerMqttTests(testRunner);
 }
 

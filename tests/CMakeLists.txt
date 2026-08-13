@@ -69,6 +69,31 @@ add_executable(test_modbus_store
 target_include_directories(test_modbus_store PRIVATE ${UNIT_INCLUDES})
 add_test(NAME modbus_store COMMAND test_modbus_store)
 
+add_executable(test_modbus_frame
+    test_modbus_frame.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_frame.c
+)
+target_include_directories(test_modbus_frame PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_frame COMMAND test_modbus_frame)
+
+add_executable(test_modbus_plans
+    test_modbus_plans.c
+    mocks/w25q128_mock.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_plans.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+target_include_directories(test_modbus_plans PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_plans COMMAND test_modbus_plans)
+
+add_executable(test_modbus_blocks
+    test_modbus_blocks.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
+)
+target_include_directories(test_modbus_blocks PRIVATE ${UNIT_INCLUDES})
+add_test(NAME modbus_blocks COMMAND test_modbus_blocks)
+
 add_executable(test_modbus_units
     test_modbus_units.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
@@ -81,11 +106,17 @@ add_executable(test_modbus_compiler
     mocks/w25q128_mock.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
     ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
     ${PROJECT_ROOT}/Shared/Fwu/version.c
 )
 target_include_directories(test_modbus_compiler PRIVATE ${UNIT_INCLUDES})
+# The integration suite uploads this fixture to a board; compiling it here is
+# what stops a broken fixture from being discovered over HTTP.
+target_compile_definitions(test_modbus_compiler PRIVATE
+    MB_FIXTURE_PATH="${PROJECT_ROOT}/tests/fixtures/modbus_solis.json"
+    MB_JK_FIXTURE_PATH="${PROJECT_ROOT}/tests/fixtures/modbus_jk_pb.json")
 add_test(NAME modbus_compiler COMMAND test_modbus_compiler)
 
 add_executable(test_modbus_export
@@ -94,6 +125,7 @@ add_executable(test_modbus_export
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_export.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
+    ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_units.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_decode.c
     ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c

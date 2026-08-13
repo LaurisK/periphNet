@@ -1,0 +1,65 @@
+{
+  "capabilities": [
+    {
+      "id": 0, "name": "jk_pb",
+      "addrStride": 2, "writeFc": 16, "maxReadRegs": 123,
+      "blocks": [
+        { "base": 4096, "regs": 147 },
+        { "base": 4608, "regs": 147 },
+        { "base": 5120, "regs": 147 }
+      ],
+      "points": [
+        { "id": 0, "addr": 5120, "fc": "holding", "decodeType": "ascii",
+          "length": 8, "unit": "", "name": "model" },
+        { "id": 1, "addr": 5136, "fc": "holding", "decodeType": "ascii",
+          "length": 4, "unit": "", "name": "hw_version" },
+        { "id": 2, "addr": 5144, "fc": "holding", "decodeType": "ascii",
+          "length": 4, "unit": "", "name": "sw_version" },
+        { "id": 3, "addr": 5152, "fc": "holding", "decodeType": "u32_be",
+          "scale": 1, "unit": "s", "name": "runtime" },
+        { "id": 4, "addr": 5156, "fc": "holding", "decodeType": "u32_be",
+          "scale": 1, "unit": "", "name": "power_on_times" },
+
+        { "id": 5, "addr": 4736, "fc": "holding", "decodeType": "u32_be",
+          "scale": 0.001, "unit": "V", "name": "pack_voltage" },
+        { "id": 6, "addr": 4744, "fc": "holding", "decodeType": "s32_be",
+          "scale": 0.001, "unit": "A", "name": "pack_current" },
+        { "id": 7, "addr": 4750, "fc": "holding", "decodeType": "u16",
+          "scale": 1, "unit": "%", "name": "soc" },
+        { "id": 8, "addr": 4752, "fc": "holding", "decodeType": "u32_be",
+          "scale": 0.001, "unit": "Ah", "name": "remaining_capacity" },
+        { "id": 9, "addr": 4726, "fc": "holding", "decodeType": "s16",
+          "scale": 0.1, "unit": "C", "name": "mos_temp" },
+
+        { "id": 10, "addr": 4096, "fc": "holding", "decodeType": "u32_be",
+          "scale": 0.001, "unit": "V", "name": "cell_ovp",
+          "access": "rw", "writeMin": 2500, "writeMax": 4300 },
+        { "id": 11, "addr": 4100, "fc": "holding", "decodeType": "u32_be",
+          "scale": 0.001, "unit": "V", "name": "cell_ovp_recover",
+          "access": "rw", "writeMin": 2500, "writeMax": 4300 },
+        { "id": 12, "addr": 4108, "fc": "holding", "decodeType": "u32_be",
+          "scale": 0.001, "unit": "V", "name": "cell_uvp",
+          "access": "rw", "writeMin": 2000, "writeMax": 3500 }
+      ]
+    }
+  ],
+
+  "devices": [
+    { "id": 0, "slaveAddr": 1, "capability": 0, "baud": 115200,
+      "format": "8N1", "port": "rs485", "topicPrefix": "bms1" },
+    { "id": 1, "slaveAddr": 2, "capability": 0, "baud": 115200,
+      "format": "8N1", "port": "rs485", "topicPrefix": "bms2" }
+  ],
+
+  "plans": [
+    { "id": 0, "name": "pack_fast", "capability": 0, "devices": [0, 1],
+      "timeTables": [
+        { "id": 0, "everySec": 5,  "points": [5, 6, 7, 8] },
+        { "id": 1, "everySec": 60, "points": [9] }
+      ] },
+    { "id": 1, "name": "pack_info", "capability": 0, "devices": [0, 1],
+      "timeTables": [
+        { "id": 0, "everySec": 3600, "points": [0, 1, 2, 3, 4] }
+      ] }
+  ]
+}

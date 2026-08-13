@@ -25,6 +25,9 @@ struct Config {
     std::string serialCommandPort = "/dev/ttyUSB1";
     int serialCommandBaud = 115200;
 
+    // HTTP control plane (config upload; there is no built-in default config)
+    std::string deviceIp = "10.42.0.203";
+
     // Tool paths (auto-detected, overridable)
     std::string triceBinary;
     std::string tilJson;

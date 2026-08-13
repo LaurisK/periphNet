@@ -11,11 +11,13 @@
  *
  * Frozen semantics for the odd types:
  *  - ASCII:    decoded via MbDecode_Ascii (2 chars per register, wire order,
- *              NUL-terminated). Change detection uses a CRC32 of the string
- *              stored in the walker's int32 last-value slot; publishThreshold
- *              is ignored, publishHeartbeatS is honored. No HA unit/classes.
- *  - BITFIELD: raw uint16 published as unsigned decimal; threshold compares
- *              the raw value. No HA unit/classes.
+ *              NUL-terminated).  A sample carries `text` and its `value` is
+ *              UNSPECIFIED — nothing in the module computes one, and a
+ *              consumer wanting change detection hashes the string itself.
+ *  - BITFIELD: raw uint16 rendered as unsigned decimal.
+ *
+ * Neither gets an HA device_class or unit.  There is no change detection and
+ * no publish policy anywhere: the module keeps no previous value (§1.2).
  *  - u32/s32 values are clamped to int32 for the scaled domain.
  */
 #ifndef MODBUS_DECODE_H_
@@ -39,6 +41,19 @@ int32_t MbDecode_Scaled(const sModbusPointRecord *p, const uint16_t *regs);
  * or -1 if out is too small (needs 2*length+1). */
 int MbDecode_Ascii(const sModbusPointRecord *p, const uint16_t *regs,
                    char *out, size_t outSize);
+
+/* ENCODING IS DECODE'S INVERSE AND LIVES BESIDE IT (docs/modbus.md §5.3).
+ * A write converts a scaled int32 back into 1..N registers per decodeType,
+ * using the same word-order rules decode uses.  A value that does not fit the
+ * point's register width is REJECTED, never silently truncated — the module
+ * does not quietly move a value to the nearest legal one, exactly as §4.6
+ * refuses to clamp an out-of-range request item.
+ *
+ * Returns the register count written, or -1 if the value does not fit (or the
+ * type cannot be written at all: ascii and float32 have no defined inverse
+ * here — a float32 point's scaled value has already lost the exponent). */
+int MbEncode_Scaled(const sModbusPointRecord *p, int32_t scaled,
+                    uint16_t *regs);
 
 /* Render scaledInt * 10^pow10 as decimal text ("512",-1 -> "51.2";
  * "12",2 -> "1200"). Returns chars written (snprintf semantics). */

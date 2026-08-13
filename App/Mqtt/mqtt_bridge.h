@@ -6,7 +6,8 @@
  * connect (generated from the active Modbus config), subscribes to
  * <topicPrefix>/+/set topics for writable points and resolves them against
  * the config.  Point values are published by the Modbus walker through
- * MqttBridge_Publish() — the walker owns the data cadence.
+ * MqttBridge_Publish().  Values arrive through Modbus_Subscribe: the
+ * module owns the cadence, this file owns what is worth sending.
  *
  * Runs as a FreeRTOS task.
  */
@@ -81,7 +82,9 @@ int MqttBridge_Publish(const char *topic, const char *payload,
  * @brief  Publish a device's retained availability topic
  *         ("<topicPrefix>/availability" = online/offline, design §10).
  */
-void MqttBridge_PublishDeviceStatus(const char *topicPrefix, int online);
+/* Per-device availability. Internal: it is derived from mbEvt_txn failures
+ * inside this file, because HA availability is MQTT's semantic and belongs
+ * where it is published (docs/modbus.md §8.3). */
 
 /* --------------------------------------------------------------------------
  * Integration-test support
@@ -106,7 +109,8 @@ int MqttBridge_Inject(const char *topic, const char *payload,
 
 /**
  * @brief  Request an immediate re-publish of all points (delegates to
- *         ModbusWalker_ForceRepublish — the walker owns the data).
+ *         there is no way to force a re-read — a value arrives at its
+ *         period, docs/modbus.md §4.3).
  */
 void MqttBridge_PublishNow(void);
 

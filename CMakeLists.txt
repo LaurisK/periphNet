@@ -108,6 +108,9 @@ set(SHARED_MODBUS_SOURCES
     Shared/Modbus/modbus_config_store.c
     Shared/Modbus/modbus_config_compiler.c
     Shared/Modbus/modbus_config_export.c
+    Shared/Modbus/modbus_blocks.c
+    Shared/Modbus/modbus_frame.c
+    Shared/Modbus/modbus_config_plans.c
     Shared/Modbus/modbus_decode.c
     Shared/Modbus/modbus_units.c
 )
@@ -248,6 +251,47 @@ file(GLOB_RECURSE APP_MODULE_SOURCES CONFIGURE_DEPENDS
 foreach(_app_src ${APP_MODULE_SOURCES})
     if(_app_src MATCHES "secrets")
         message(FATAL_ERROR "secrets source leaked into application: ${_app_src}")
+    endif()
+endforeach()
+
+# ------------------------------------------------------------------------------
+# Modbus module boundary (docs/modbus.md §2.2), enforced the same way the
+# secrets guard is: greppable rules, checked at configure time.
+#
+#   1. Files in App/Modbus must not include App/Mqtt, App/Http, App/Can,
+#      App/Data or any lwIP header.  The module knows nothing about its
+#      consumers, and that is what lets the engine be rebuilt without touching
+#      one.
+#   2. A CONSUMER includes only App/Modbus/modbus.h.  Scheduler, engine and
+#      framing are module-internal; a DRIVER is the one exception and includes
+#      modbus_port.h.
+#   3. Consumers may name Shared/Modbus TYPES but must not call its flash
+#      accessors, so they must not include its accessor headers either.
+# ------------------------------------------------------------------------------
+
+file(GLOB_RECURSE _mb_module_srcs CONFIGURE_DEPENDS
+     "App/Modbus/*.c" "App/Modbus/*.h")
+foreach(_f ${_mb_module_srcs})
+    file(STRINGS "${_f}" _hits REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<](App/(Mqtt|Http|Can|Data)/|lwip/)")
+    if(_hits)
+        message(FATAL_ERROR
+                "Modbus module boundary: ${_f} includes a consumer or lwIP header: ${_hits}")
+    endif()
+endforeach()
+
+file(GLOB_RECURSE _mb_consumer_srcs CONFIGURE_DEPENDS
+     "App/*.c" "App/*.h")
+foreach(_f ${_mb_consumer_srcs})
+    if(_f MATCHES "App/Modbus/")
+        continue()
+    endif()
+    # A driver may include modbus_port.h; nothing else module-internal is fair
+    # game, and neither are Shared/Modbus's flash accessors.
+    file(STRINGS "${_f}" _hits
+         REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<](App/Modbus/modbus_(engine|internal|rtu)\\.h|modbus_config_(store|compiler|export|plans)\\.h)")
+    if(_hits)
+        message(FATAL_ERROR
+                "Modbus module boundary: ${_f} reaches past modbus.h: ${_hits}")
     endif()
 endforeach()
 

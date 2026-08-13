@@ -28,26 +28,38 @@
 extern "C" {
 #endif
 
-/* Pull up to maxLen bytes; returns >0 = bytes read, 0 = EOF, <0 = I/O error. */
-typedef int (*fMbByteSource)(void *ctx, uint8_t *buf, uint32_t maxLen);
-
-typedef struct {
-    int          ok;          /* 1 = compiled, region marked valid          */
-    int          deviceIdx;   /* first failure location; -1 = n/a           */
-    int          txnIdx;
-    int          pointIdx;
-    char         field[24];   /* offending key, or "json" for syntax errors */
-    char         reason[64];
-    sMbCfgCounts counts;      /* filled on success                          */
-} sMbCompileResult;
+/* fModbusByteSource and sModbusCompileResult live in modbus_records.h: the
+ * result is data a consumer may name, MbCfgCompile() is a flash accessor it
+ * may not call (docs/modbus.md §4.9). */
 
 /* Compile JSON from `src` into the LUT region at `regionBase`.
  * `kick` (nullable) is called before each sector erase (IWDG).
  * Returns 0 and res->ok=1 on success; -1 with res describing the first
  * failure otherwise. Not reentrant (static parser state) — callers are the
  * HTTP task and one-time default provisioning, serialized by design. */
-int MbCfgCompile(fMbByteSource src, void *srcCtx, uint32_t regionBase,
-                 void (*kick)(void), sMbCompileResult *res);
+int MbCfgCompile(fModbusByteSource src, void *srcCtx, uint32_t regionBase,
+                 void (*kick)(void), sModbusCompileResult *res);
+
+/* The same pass with the record writes discarded: same source, same rules,
+ * same *res, no flash touched (docs/modbus.md §4.9).  It exists because
+ * "compile is validation" conflates two things — not ACTIVATING is already
+ * true, but not WRITING is not: an upload consumes the inactive region
+ * whether it succeeds or fails, and that region holds the previous config, so
+ * a fat-fingered upload destroys the fallback while telling you it failed. */
+int MbCfgVerify(fModbusByteSource src, void *srcCtx,
+                sModbusCompileResult *res);
+
+/* Parse ONE plan object — the same JSON an operator would paste into a
+ * config's plans[] array (docs/modbus.md §8.1).  Fills `out` with pointers
+ * into this module's static storage, valid until the next call, and `*outId`
+ * with the authored slot or -1 if the body did not name one.
+ *
+ * Syntax and shape only: the semantic rules (capability exists, devices lie
+ * within it, point ids are readable and unique) are MbCfgPlans_Validate's, so
+ * there is one semantic validator reached two ways. */
+int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
+                   sModbusPlanSpec *out, int *outId,
+                   sModbusCompileResult *res);
 
 #ifdef __cplusplus
 }

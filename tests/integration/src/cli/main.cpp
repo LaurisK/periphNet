@@ -14,7 +14,7 @@ int main(int argc, char* argv[])
 
     TestRunner runner;
     registerAllTests(runner);
-    registerModbusTests(runner);
+    registerModbusTests(runner, config.deviceIp);
     registerMqttTests(runner);
 
     if (config.listTests) {
