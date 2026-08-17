@@ -10,10 +10,14 @@ Boards referred to here:
 | | board #1 | board #2 ("sodas") |
 |---|---|---|
 | Site | Zaliakalnis, `192.168.0.116` | bench, `192.168.8.114` |
-| Firmware | `Pd1.0.9` | `Pd1.1.4` |
+| Firmware | `Pd1.1.8` (2026-08-17) — tunnel **working** | `Pd1.1.6` — still has the §3.11 bug |
 | Tunnel address | `10.77.0.64` | `10.77.0.5` |
-| Hub peer | `PeriphNet_1` | `PeriphNet_sodas`, `10.77.0.5/32` |
-| Public key | — | `ab3CVhJxWMtTLDzrf0Z8HvRPxVq4W0T75pd1cssDiyI=` |
+| Hub peer | `namai` (was `PeriphNet_1`) | `PeriphNet_sodas`, `10.77.0.5/32` |
+| Public key | `U55gBRzFuUEIhFF6e8bPK3dlhKOa6nircpnEdKwWpCA=` | `ab3CVhJxWMtTLDzrf0Z8HvRPxVq4W0T75pd1cssDiyI=` |
+| Provisioned | 2026-08-17, `session_up` ✅ | 2026-08-12 |
+
+As of 2026-08-17 board #2 is powered down (no handshake on the dashboard) and
+board #1 is the only live board.
 
 ## 1. Releases
 
@@ -23,9 +27,11 @@ Boards referred to here:
 | `Pd1.1.1` | netif-teardown leak fix (§4.1) | superseded |
 | `Pd1.1.2` | `POST /api/trice/dest` | superseded |
 | `Pd1.1.3` | `GET /api/trice/status` (first counters) | superseded |
-| `Pd1.1.4` | full Trice counters (UDP sent/failed, USB TxState, heap) | **on board #2** |
-| `Pd1.1.5` | Trice USB TxState latch fix (§4.2) | built, **not flashed** |
-| `Pd1.1.6` | per-peer WireGuard data-path counters (§3.3) | built, **not flashed** |
+| `Pd1.1.4` | full Trice counters (UDP sent/failed, USB TxState, heap) | superseded |
+| `Pd1.1.5` | Trice USB TxState latch fix (§4.2) | superseded (folded into `1.1.6`) |
+| `Pd1.1.6` | per-peer WireGuard data-path counters (§3.3) | superseded |
+| `Pd1.1.7` | **inner-packet checksums (§3.11)** — the fix that made the tunnel carry data; Trice destination list + `POST /api/trice/subscribe` | superseded |
+| `Pd1.1.8` | pbuf-per-destination fix (§3.12) | **on board #1**, confirmed + golden, deployed **through the tunnel** |
 
 `1.1.1` … `1.1.4` were all deployed **over the network** (upload → install →
 confirm → golden promotion), five consecutive cycles with
@@ -49,7 +55,14 @@ Sizes at `1.1.6`: `.text` 279,080 · `.bss` 67,432 · `.ccmram` 11,960
 | Board's **outbound** tunnel path | see §3.2 — `udp_sendto()` returned `ERR_OK` into the tunnel |
 | USB CDC command input | `wg stop` over `/dev/ttyACM0` flipped `running` true→false |
 
-## 3. Unresolved: the tunnel carries no data
+## 3. SOLVED 2026-08-17: the tunnel carries no data
+
+**Read §3.11 first — it is the answer.** Two independent faults, both ours:
+missing inner-packet checksums (§3.11, the real one) and an endpoint collision
+from binding the client socket to the server's port (§3.9). §3.1–§3.8 are the
+investigation trail, kept because the eliminations in them are sound and the
+misattributions are instructive — the hub was blamed twice and was innocent
+both times.
 
 ### 3.1 Symptom
 
@@ -118,6 +131,333 @@ Ping `10.77.0.5` from a tunnel peer, then read the status:
 - **`peer_last_rx_ms` advances, nothing comes back** → the board receives and
   fails to reply. Board-side; start at `ip4_input` acceptance with the `/32`
   netmask on the tunnel netif.
+
+### 3.5 SETTLED (2026-08-14): the board is exonerated, loss is board → hub
+
+The §3.3 test was run on board #2 after OTA'ing it to `Pd1.1.6` from its own
+LAN. Trice was first retargeted off the tunnel (`POST /api/trice/dest`
+→ `192.168.8.100`) so `tx_packets` counted nothing but ICMP replies:
+
+| | `peer_last_rx_ms` | `peer_last_tx_ms` | `tx_packets` | `rx_counter` |
+|---|---|---|---|---|
+| before | 117628 | 132413 | 1 | 0 |
+| after 5 × `ping 10.77.0.5` | 139891 | 139892 | 6 | 5 |
+
+`rx_counter` +5 and `tx_packets` +5, with `tx_ms` **1 ms after** `rx_ms`.
+So the board **receives every echo request and answers every one of them**.
+Not one reply reached the laptop.
+
+The second half, measured at the same time: the laptop's own
+`/sys/class/net/wgpn/statistics/rx_packets` did **not move** over 15 s while
+the board's `udp_sent` rose 69 → 84 with `udp_failed` flat at 2 — i.e. lwIP
+and the WG port accepted, encrypted and transmitted 15 datagrams that the
+laptop's tunnel never decrypted.
+
+**Both directions of §3.3's fork are now answered:** hub → board delivers
+(§3.1's assumption was wrong), and board → hub → peer does not. Board-side
+code is not implicated in either direction — `ip4_input` acceptance and the
+`/32` netmask are ruled out, since replies are generated.
+
+What remains is hub-side, and the prior "not the hub's forwarding" in §3.2 was
+**too strong**: it rested on board #1, which sits on the hub's *LAN* and is
+routed, not on peer-to-peer forwarding between two WireGuard peers. That path
+was never actually tested. Note laptop → board forwarding demonstrably works,
+so the failure is asymmetric — a plain "no `FORWARD` rule" does not explain it.
+
+Leading candidate: at the time of the test the laptop (`192.168.8.100`) and
+board #2 (`192.168.8.114`) were **behind the same NAT**, presenting one public
+IP to the hub for two peers. Next test is therefore free: repeat from a
+different site, where the two peers no longer share a public IP.
+
+Needs hub-side evidence to close: `wg show` peer counters and a `tcpdump` on
+the hub's `wg0`. No SSH credentials for the hub are recorded anywhere in this
+repo.
+
+### 3.6 (2026-08-17) same-NAT hypothesis disproven; fault isolated to the hub
+
+Board #1 was provisioned as hub peer `namai` (`10.77.0.64`, dashboard-issued
+`.conf` uploaded through `/api/image/upload`), giving a **second** board on a
+**different site behind a different NAT** from the laptop — the variable §3.5
+named as the leading suspect. It reproduces board #2 exactly:
+
+| | `rx_counter` | `tx_packets` |
+|---|---|---|
+| before | 13 | 116 |
+| after 5 × `ping 10.77.0.64` | 19 (+6) | 126 (+10) |
+
+Laptop `wgpn rx_packets` **flat at 63** across the burst while the board pushed
+~76 packets into the tunnel. **The same-NAT theory is dead.**
+
+The same session narrows the fault decisively. Board #1's HTTP works over the
+tunnel via the hub's LAN route (`192.168.0.116/32`), and that path *requires*
+the hub to take a reply addressed to `10.77.0.4`, encrypt it to the laptop peer
+and send it. So **hub → laptop encryption and forwarding work.** What fails is
+only:
+
+> packets arriving at the hub **from a board peer** are not forwarded.
+
+Working, for contrast: hub → peer (both boards), peer → hub handshakes, and
+hub ↔ its own LAN in both directions.
+
+**Ruled out — the hub's `AllowedIPs`.** A receive-side cryptokey drop was the
+first guess (a decrypted packet whose inner source is outside that peer's
+`AllowedIPs` is discarded with no error). It does not survive the evidence:
+for the ping to reach the board at all, the hub had to look `10.77.0.64` up in
+`AllowedIPs`, match this peer and encrypt to it. That is the **same table** the
+receive check consults, so a reply sourced from `10.77.0.64` passes it too.
+Confirmed independently: `namai` is a **rename of `PeriphNet_1`**, not a second
+entry, so there is no duplicate peer shadowing the address either.
+
+**Ruled out — "the dashboard says it's up".** Per §3.1 that reports handshakes
+only, and handshakes carry no inner addresses. Green is expected here and
+carries no information about the data path.
+
+What the asymmetry reduces to, given hub → laptop encryption works (proved by
+board #1's HTTP over the LAN route) and laptop → board forwarding works:
+the hub forwards `eth0 → wg0` fine and `wg0 → wg0` **in one direction only**.
+That is not explicable by cryptokey routing, which is direction-symmetric —
+it points at the hub's own `FORWARD`/conntrack rules or its `wg0` handling.
+
+Next measurement, and it needs no SSH — **WGDashboard per-peer transfer
+counters**, read while board #1 is transmitting (its Trice stream aims at
+`10.77.0.4` continuously, so traffic is always available):
+
+- `namai` **Received** rising → the hub *is* getting the board's packets;
+  the loss is inside the hub, after decryption.
+- `Lauris_laptop` **Sent** not rising in step → confirms the hub never
+  re-encrypts them onward.
+
+Also worth recording verbatim from the dashboard rather than inferring: the
+literal `AllowedIPs` string on both peers.
+
+Still open: no SSH credentials for the hub are recorded, so `wg show` and a
+`tcpdump` on `wg0` remain ungathered.
+
+### 3.7 The dashboard `.conf` reused the compromised key
+
+`PeriphNet_namai.conf` (downloaded 2026-08-17) carries `PrivateKey =
+0DT2Rqlr…` — the key to-do item 9 flags as being in git history and in every
+`.bin` built from it. This is not dashboard misbehaviour: `namai` is
+`PeriphNet_1` **renamed**, so it is the same peer and necessarily the same
+key. The security consequence is unchanged, though — board #1 is live on a
+key that must be treated as public. **Item 9 is NOT discharged.**
+Rotation is `POST /api/wg/keygen` + pasting the new public key into the
+dashboard; the tunnel is down between those two steps.
+
+Extraction gotcha worth keeping: a base64 WireGuard key ends in `=`, so
+`sed 's/.*= *//'` on a `PrivateKey = …` line silently yields the **empty
+string**, and any comparison built on it reports a bogus mismatch. Split on
+the literal `PrivateKey *= *` instead.
+
+### 3.8 MEASURED (2026-08-17): packets reach the hub and die there — *cause misattributed, see §3.11*
+
+WGDashboard v4.3 exposes per-peer transfer counters over its REST API
+(`GET /api/getWireguardConfigurationInfo?configurationName=wg0`, header
+`wg-dashboard-apikey`), on `192.168.0.161:10086`. That closed the last gap
+without needing SSH. Over one 30 s window:
+
+| Quantity | Δ |
+|---|---|
+| board `udp_sent` / `tx_packets` | **+30 packets** |
+| hub **received from** `PeriphNet_namai` | **+2480 B** (≈83 B/pkt — matches) |
+| laptop `wgpn` rx, quiet 25 s window | **+0 packets, +0 bytes** |
+
+WireGuard's receive counter increments only for packets that decrypt **and
+authenticate**. So the board's packets arrive at the hub, are valid, and are
+lost after decryption. This is no longer inference: §3.6 reached the right
+conclusion by elimination, and this measures it directly. Note the mechanism
+precisely — WireGuard **ingress succeeds**; the failure is **forwarding, after
+a successful receive**.
+
+The hub's `PostUp` is correct and cannot be the cause:
+
+```
+sysctl -q -w net.ipv4.ip_forward=1
+iptables -A FORWARD -i wg0 -j ACCEPT
+iptables -A FORWARD -o wg0 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -o eth0 -j MASQUERADE
+```
+
+`-i wg0 -j ACCEPT` accepts anything arriving on wg0 on first match, so both
+directions hit the same rule. And both directions are `wg0 → wg0`
+(laptop→board works, board→laptop does not), so the only difference between
+them is the **source address**.
+
+**Prime suspect: `rp_filter`.** It validates source against the routing table,
+so it drops traffic from `10.77.0.64` if the hub has no route for it via wg0,
+while `10.77.0.4` passes because the laptop's route exists. Settle it on the
+hub console (Proxmox, no SSH):
+
+```bash
+sysctl net.ipv4.conf.all.rp_filter net.ipv4.conf.wg0.rp_filter
+ip route get 10.77.0.4 from 10.77.0.64 iif wg0   # direct oracle
+ip route show dev wg0                            # is 10.77.0.64/32 present?
+```
+
+`sysctl -w net.ipv4.conf.wg0.rp_filter=0` proves it instantly if so. Note a
+wg0 restart was already tried on 2026-08-17 and did **not** fix it.
+
+**Bug found in `PostDown`** (not today's fault, but it makes the chain drift):
+
+```
+iptables -A FORWARD -i wg0 -j ACCEPT;   <-- should be -D
+iptables -D FORWARD -o wg0 -j ACCEPT;
+```
+
+Every down/up cycle leaves an extra `-i wg0 ACCEPT` behind.
+
+Peer list also confirms `PeriphNet_sodas` is `stopped` / no handshake (board #2
+powered down) and `PeriphNet_namai` holds the correct `10.77.0.64/32`.
+
+### 3.9 ROOT CAUSE #1 (2026-08-17): endpoint collision — the board's source
+### port equals the hub's listening port
+
+`wg show wg0` on the hub (the live kernel view, which the dashboard's stored
+copy had been hiding) showed board #1's peer as:
+
+```
+peer: U55gBRzFuUEIhFF6e8bPK3dlhKOa6nircpnEdKwWpCA=
+  endpoint: 85.206.57.75:51820      <-- the HUB'S OWN public IP:port
+  allowed ips: 10.77.0.64/32
+```
+
+**The hub believed the board lived at the hub's own public endpoint**, so every
+packet it sent toward `10.77.0.64` went back out to the site router and
+hairpinned into the hub's own listening socket. `ping 10.77.0.64` from the hub
+returned 0/3 while `ping 10.77.0.4` returned 3/3.
+
+Why it happens, and it will happen again on any board sharing a site with the
+hub:
+
+1. board #1 (`192.168.0.116`) and the hub (`192.168.0.161`) are on the **same
+   LAN**, so they share the public IP `85.206.57.75`;
+2. the board dials the hub's **public** endpoint, so the traffic hairpins
+   through the router;
+3. `App/Net/wg_link.c` binds the board's socket to
+   `WIREGUARDIF_DEFAULT_PORT` = **51820** — the same port the router
+   statically forwards to the hub.
+
+The learned endpoint is then indistinguishable from the hub's own. Contrast the
+laptop's healthy entry: `78.62.38.227:48972`, remote address, ephemeral port.
+
+**Fix applied** (config only, no firmware change): point board #1 at the hub's
+LAN address — `POST /api/wg/config {"endpoint_ip":"192.168.0.161",
+"endpoint_port":51820}` — then `POST /api/wg/restart`, which is **required**:
+setting the endpoint alone does not re-create the peer, and `live_endpoint`
+keeps the old value until a fresh handshake. The hub then relearned
+`192.168.0.116:51820`.
+
+**Result:** hub → board data works for the first time — board `rx_counter`
+8 → 15 across 5 pings (previously pinned at 0) and hub `sent` to namai +640 B
+= 5 × 128 exactly.
+
+**Better long-term fix (firmware, not yet done):** stop binding the board's
+socket to 51820. A WireGuard *client* has no reason to listen on the server
+port; `listen_port = 0` (ephemeral) removes the collision at any site and keeps
+the portable public endpoint working. `wg_link.c:311`.
+
+**Still broken after this fix:** board → hub → laptop. See §3.10.
+
+### 3.10 Remaining fault after §3.9 — *not the hub's forwarding; see §3.11*
+
+With §3.9 fixed, every leg is individually proven except one:
+
+| Leg | Status |
+|---|---|
+| hub → board | ✅ measured, §3.9 |
+| board → hub | ✅ rx counters climb |
+| hub → laptop | ✅ +11 KB in the same window |
+| **board → hub → laptop** | ❌ |
+
+The hub receives the board's packets (`recv` +1440 B while the board's
+`tx_packets` went 75 → 87) and delivers none onward: `ping 10.77.0.64` 0/5 from
+the laptop, Trice listener unchanged.
+
+Ruled out on the hub: `FORWARD` policy is `ACCEPT` and its `-i wg0` rule counted
+1301 packets/442 K; `rp_filter = 2` (loose); `ip route get 10.77.0.4 from
+10.77.0.64 iif wg0` resolves to `dev wg0`; `wg show` shows no overlapping
+`allowed ips` (each peer holds a unique `/32`) and a valid laptop endpoint.
+
+The oddity is that the working and failing directions are **both `wg0 → wg0`**
+and differ only in addresses, which nothing examined so far distinguishes.
+Next: `ping -c3 10.77.0.64` from the hub (now expected to succeed — it tests
+board→hub local delivery with no forwarding), then
+`tcpdump -ni wg0 -Q out 'host 10.77.0.4'` to see whether the kernel emits the
+forwarded packet at all.
+
+### 3.11 ROOT CAUSE #2 — SOLVED (2026-08-17): no checksums on inner packets
+
+**The tunnel now carries data. The fault was ours, not the hub's.** §3.8 and
+§3.10 correctly localised *where* packets died but wrongly concluded the hub
+was at fault; it was doing exactly what any correct IP stack does.
+
+The decisive measurement: the hub's `FORWARD` chain counter stayed at
+**1383 → 1383** across 30 s while `tcpdump -ni wg0 -Q in` captured ~30 packets
+arriving from the board. Visible to tcpdump, never reaching FORWARD, means
+dropped in `ip_rcv()` — and the classic reason is a bad checksum, because
+tcpdump captures *before* validation.
+
+`LWIP/Target/lwipopts.h` (CubeMX default):
+
+```c
+#define CHECKSUM_BY_HARDWARE 1
+#define CHECKSUM_GEN_IP   0
+#define CHECKSUM_GEN_UDP  0
+#define CHECKSUM_GEN_ICMP 0
+```
+
+Software checksum generation is off because the STM32 ETH DMA inserts
+checksums in hardware. **That is only true for frames the ETH peripheral
+emits.** The WireGuard netif has no hardware behind it: lwIP builds the inner
+packet, wireguard-lwip encrypts it, and it travels as the *payload* of an outer
+UDP datagram. The hardware checksums the outer datagram and never sees the
+inner one — so every packet the board ever sent into the tunnel carried a
+garbage inner checksum and was discarded by the peer's IP stack.
+
+Every observation fits, including ones that looked contradictory:
+
+| Observation | Explanation |
+|---|---|
+| handshakes fine, sessions stable | WireGuard transport packets are the *outer* UDP — hardware-checksummed |
+| hub's per-peer rx counters climbed | WireGuard authenticates crypto; it does not check the inner IP checksum |
+| `tcpdump` showed the packets | capture precedes checksum validation |
+| `FORWARD` counter frozen | dropped in `ip_rcv()`, before the chain |
+| laptop → board worked | Linux emits correct checksums, and our `CHECKSUM_CHECK_*` are all 0, so the board validates nothing |
+| board #2 identical symptom | same firmware |
+
+**Fix** (`Pd1.1.7`): compile software checksum generation **in**, enable
+`LWIP_CHECKSUM_CTRL_PER_NETIF`, and clear the flags on the **ETH netif only**
+(`App_DefaultTaskEntry`, via `netif_default`) so Ethernet keeps its hardware
+offload unchanged. `netif_add()` defaults every netif to
+`NETIF_CHECKSUM_ENABLE_ALL`, so the WireGuard netif needs no code of its own.
+Cost: `.text` +880 B.
+
+**Verified on hardware, 2026-08-17:**
+
+- `ping 10.77.0.64` from the laptop — **5/5, ~8 ms** (was 100 % loss for a week)
+- `POST /api/trice/subscribe` over the tunnel → `{"you":"10.77.0.4"}`
+- Trice decoding live over WireGuard, `udp_failed 0`
+- `Pd1.1.8` uploaded, installed and confirmed **through the tunnel itself**
+
+### 3.12 Bug in the new Trice fan-out: never reuse a pbuf across sends
+
+`Pd1.1.7` shipped the destination list with **one pbuf reused for all
+destinations**, on the reasoning that `udp_sendto()` does not take ownership.
+That is wrong on this platform: the STM32 ETH driver is **zero-copy** —
+`low_level_output()` hands the pbuf to a DMA descriptor and holds a reference
+until the TX-complete interrupt, so it is still in flight when `udp_sendto()`
+returns.
+
+Symptom: **every send that egressed the Ethernet netif failed** while the
+WireGuard destination succeeded, because wireguard-lwip encrypts into a pbuf of
+its own and never retains the caller's. Isolated by moving one destination at a
+time — `255.255.255.255`, `192.168.0.255` and unicast `192.168.0.161` all
+failed 1:1 with sends; only `10.77.0.4` (tunnel) succeeded. It was not a
+broadcast problem, which was the first guess.
+
+**Fix** (`Pd1.1.8`): allocate a fresh pbuf per destination. Verified — with
+broadcast + tunnel configured, `sent +30, failed 0` over 15 s and Trice arriving
+on both paths.
 
 ### 3.4 Access constraint
 
@@ -225,9 +565,15 @@ before this was noticed. Sequential probes only.
 
 **Immediate, needs someone on board #2's LAN**
 
-1. Flash `Pd1.1.6` (`upload` → `install` → `confirm`, ~40 s).
-2. Run the §3.3 test and record `peer_last_rx_ms`. This is the single
-   measurement that splits the WireGuard problem in half.
+1. ~~Flash `Pd1.1.6`~~ — **done 2026-08-14**, both boards, confirmed + golden.
+2. ~~Run the §3.3 test~~ — **done, see §3.5.** The board is exonerated; the
+   loss is board → hub → peer, hub-side.
+
+**Board #2 still carries the §3.11 checksum bug** and is powered down. Its
+tunnel will handshake and carry nothing until it is flashed to `Pd1.1.8` — and
+because the fault is precisely what breaks remote access, that first flash
+**must happen from its own LAN**. Once on `1.1.8`, every later update can go
+over the tunnel, as board #1's did.
 3. Verify the §4.2 USB fix: Trice should decode over `/dev/ttyACM0` via
    `tools/usb_console.py`.
 
@@ -242,23 +588,43 @@ before this was noticed. Sequential probes only.
 6. **MAC address from the device UID.** Still the CubeMX constant
    `00:80:E1:00:00:00` on every unit — harmless while the boards are on
    different LANs, fatal the moment two share one.
+6b. **Stop binding the board's WireGuard socket to 51820** (`wg_link.c:311`,
+    `WIREGUARDIF_DEFAULT_PORT`). A client has no reason to listen on the
+    server's port, and when board and hub share a site the learned endpoint
+    collides with the hub's own (§3.9 — cost a full debugging session).
+    `listen_port = 0` gives an ephemeral port and fixes it everywhere while
+    keeping the portable public endpoint.
 7. **Second `AllowedIPs` range is implemented but untested.** Adding
    `192.168.0.0/24` should let a board reach site-LAN hosts directly; nothing
    has exercised it.
-8. **Board #1 migration.** Its stored record is v1 and carries no keys, so
-   after an OTA to `1.1.x` its tunnel stays down until its own `.conf` is
-   uploaded. It remains reachable at `192.168.0.116` through the hub's LAN
-   route in the meantime, so this is recoverable — but do not OTA it expecting
-   the tunnel to survive unattended.
-9. **Rotate board #1's key.** The `0DT2Rqlr…` key is in git history and in
-   every `.bin` ever built from it.
+8. ~~**Board #1 migration.**~~ **Done 2026-08-17** — `PeriphNet_namai.conf`
+   uploaded, `session_up`. The warning stands for any future OTA: a v1 record
+   carries no keys, so the tunnel stays down until a `.conf` is re-uploaded.
+   Reachability via the hub's LAN route is what makes that recoverable.
+9. **Rotate board #1's key — STILL OPEN.** The `0DT2Rqlr…` key is in git
+   history and in every `.bin` ever built from it, and the 2026-08-17
+   dashboard `.conf` **reused it** (§3.7). Fix: `POST /api/wg/keygen`, then
+   paste the new public key into WGDashboard. Tunnel is down in between.
+10. **Board #1 HardFault on the shipped `Pd1.1.6`.** Crash log read
+    2026-08-17: `pc 0804AF7E` → `vTaskDelay`, `lr 0804B23B` →
+    `xTaskResumeAll`, `cfsr 0x00008200` (PRECISERR + BFARVALID),
+    `bfar 0x0083002D` (not valid memory), `r12 0xA5A5A5A5` (FreeRTOS stack
+    fill pattern), at `tick 86397689` ≈ 24 h uptime. A bad pointer
+    dereferenced while walking the task lists — FreeRTOS list or CCM heap
+    corruption. `sp 0x10006700` is in CCM, where the 48 KB heap lives. Not a
+    WG or Trice fault; it is in the firmware currently deployed to both
+    boards.
 
 **Hygiene**
 
-10. Commit the working tree, including the §4.5 compile fixes.
-11. `~/Downloads/*.conf` are mode `664` — world-readable files holding private
-    keys. Move to `/etc/wireguard/` at `600`. `PeriphNet_1.conf` is stale and
-    contradicts the live hub; delete or regenerate it.
-12. WGDashboard's generated `Address` field has now disagreed with the hub's
+11. Commit the working tree, including the §4.5 compile fixes.
+12. `~/Downloads/*.conf` are mode `664` — world-readable files holding private
+    keys. Move to `/etc/wireguard/` at `600`. This now includes
+    `PeriphNet_namai.conf`, which holds the compromised `0DT2Rqlr…` key.
+    `PeriphNet_1.conf` is stale (it claims `10.77.0.5`, board #2's address);
+    delete it.
+13. WGDashboard's generated `Address` field has now disagreed with the hub's
     peer AllowedIPs twice. Treat the dashboard's peer entry as authoritative
-    and the generated `.conf` as a starting point only.
+    and the generated `.conf` as a starting point only. Note also that
+    re-downloading a `.conf` after **renaming** a peer returns the original
+    key — a rename is not a re-issue (§3.7).

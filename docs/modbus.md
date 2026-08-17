@@ -2368,9 +2368,13 @@ on 2026-08-12 and are now §4.6 and §3.5 respectively.
   compiler aborts at the first failure today, and continuing means separating
   semantic errors it can skip past from structural ones it cannot.
 
-JK PB-series integration is otherwise a config problem, not a firmware one. Its
-protocol dossier lives in `~/Projects/JK_BMS` (`src/core/JkRegisters.h`,
-`FW/decompiled/protocol-rs485-modbus.md` — read out of the BMS binaries, and they
-override the vendor PDF). Running a DeviceInfo read against real hardware is still
-the cheapest next fact to acquire, and after step 13 it is a config upload plus a
-`Modbus_Request`.
+JK PB-series integration is otherwise a config problem, not a firmware one, and
+**the config now exists**: `tests/fixtures/modbus_jk_pb.json`, compiled by the
+host suite, with a derivation case proving the byte-addressed quantity comes out
+in registers. Its protocol dossier lives in `~/Projects/JK_BMS`
+(`src/core/JkRegisters.h`, `FW/decompiled/protocol-rs485-modbus.md` — read out
+of the BMS binaries, and they override the vendor PDF).
+
+Running a DeviceInfo read against real hardware is still the cheapest next fact
+to acquire, and it is now exactly what §2.3 promised: upload the config, then
+`modbus get 0 0`.

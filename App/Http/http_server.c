@@ -1499,10 +1499,13 @@ static void handle_wg_config_reset(struct netconn *conn)
  * ready.  So a stuck UART state silences every sink at once, and that is
  * indistinguishable from "nothing is being logged" unless the counters are
  * exposed somewhere that does not itself depend on Trice. */
+static size_t trice_dests_array(char *buf, size_t size);
+
 static void handle_trice_status(struct netconn *conn)
 {
     uint32_t udpSent = 0u, udpFailed = 0u;
     unsigned usbTxState = 255u;
+    size_t   off;
 
     Trice_UdpGetStats(&udpSent, &udpFailed);
     {
@@ -1515,14 +1518,14 @@ static void handle_trice_status(struct netconn *conn)
     }
 
     /* huart3 and the Trice counters are declared by usart.h / trice.h. */
-    snprintf(resp_buf, sizeof(resp_buf),
+    off = (size_t)snprintf(resp_buf, sizeof(resp_buf),
         "{\"uart3_gstate\":%u,\"uart3_ready\":%s,"
         "\"aux_fn_registered\":%s,\"consumer_pending\":%u,"
         "\"udp_consumer_registered\":%s,\"udp_pcb_ok\":%s,"
         "\"udp_sent\":%u,\"udp_failed\":%u,\"usb_tx_state\":%u,"
         "\"free_heap\":%u,"
         "\"trice_errors\":%u,\"deferred_overflow\":%u,"
-        "\"half_buffer_depth_max\":%u}",
+        "\"half_buffer_depth_max\":%u,\"dests\":",
         (unsigned)huart3.gState,
         MX_USART3_Ready() ? "true" : "false",
         (UserNonBlockingDeferredWrite8AuxiliaryFn != NULL) ? "true" : "false",
@@ -1534,21 +1537,79 @@ static void handle_trice_status(struct netconn *conn)
         (unsigned)TriceErrorCount,
         (unsigned)TriceDeferredOverflowCount,
         (unsigned)TriceHalfBufferDepthMax);
+
+    /* snprintf reports what it *would* have written, so clamp before using it
+     * as a cursor — otherwise a future field could walk this past the end. */
+    if (off >= sizeof(resp_buf)) {
+        off = sizeof(resp_buf) - 1u;
+    }
+    off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
+    snprintf(resp_buf + off, sizeof(resp_buf) - off, "}");
     send_json(conn, "200 OK", resp_buf);
 }
 
-/* Retarget the Trice UDP stream at runtime.
- *
- * The default destination is a tunnel address, which makes the log stream
- * useless for diagnosing the tunnel itself — the output only arrives over the
- * link being debugged.  This endpoint breaks that circle: point Trice at a
- * host on whatever network currently works. */
-static void handle_trice_dest(struct netconn *conn, sConnStream *s)
+/* Render the Trice destination list as a JSON array: ["a.b.c.d",...] */
+static size_t trice_dests_array(char *buf, size_t size)
 {
-    uint32_t content_length = parse_content_length(req_buf);
-    char     body[96];
-    uint32_t got = 0u;
-    uint8_t  ip[4];
+    ip_addr_t list[TRICE_UDP_MAX_DEST];
+    uint32_t  n   = Trice_UdpGetDests(list, TRICE_UDP_MAX_DEST);
+    size_t    off = 0u;
+
+    if (size == 0u) {
+        return 0u;
+    }
+    buf[off++] = '[';
+
+    for (uint32_t i = 0u; i < n && off < (size - 1u); i++) {
+        int w = snprintf(buf + off, size - off, "%s\"%u.%u.%u.%u\"",
+                         (i == 0u) ? "" : ",",
+                         (unsigned)ip4_addr1(&list[i]),
+                         (unsigned)ip4_addr2(&list[i]),
+                         (unsigned)ip4_addr3(&list[i]),
+                         (unsigned)ip4_addr4(&list[i]));
+        if (w < 0 || (size_t)w >= (size - off)) {
+            off = size - 1u;
+            break;
+        }
+        off += (size_t)w;
+    }
+
+    if (off < (size - 1u)) {
+        buf[off++] = ']';
+    }
+    buf[off] = '\0';
+    return off;
+}
+
+/* Manage the Trice UDP destination list explicitly.
+ *
+ * Slot 0 is the LAN broadcast: it needs no configuration and, by definition,
+ * never leaves the LAN.  This endpoint is for entries a connection cannot
+ * express — a collector that is not the caller, or a second broadcast address.
+ * A listener registering *itself* should use /api/trice/subscribe instead,
+ * which needs no body and cannot name the wrong address.
+ *
+ * POST   {"ip":"a.b.c.d"}  add (or refresh) an entry
+ * DELETE {"ip":"a.b.c.d"}  remove that entry
+ * DELETE (no body)         reset to broadcast-only */
+static void handle_trice_dest(struct netconn *conn, sConnStream *s, int add)
+{
+    uint32_t  content_length = parse_content_length(req_buf);
+    char      body[96];
+    uint32_t  got = 0u;
+    uint8_t   ip[4];
+    ip_addr_t addr;
+
+    if (!add && content_length == 0u) {
+        Trice_UdpResetDests();
+        TRice("Trice UDP destinations reset to broadcast\n");
+        size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
+        off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
+        snprintf(resp_buf + off, sizeof(resp_buf) - off,
+                 ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
+        send_json(conn, "200 OK", resp_buf);
+        return;
+    }
 
     if (content_length == 0u || content_length >= sizeof(body)) {
         send_json(conn, "411 Length Required",
@@ -1575,12 +1636,87 @@ static void handle_trice_dest(struct netconn *conn, sConnStream *s)
         return;
     }
 
-    Trice_UdpSetDest(ip[0], ip[1], ip[2], ip[3]);
-    TRice("Trice UDP retargeted to %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+    IP4_ADDR(&addr, ip[0], ip[1], ip[2], ip[3]);
 
-    snprintf(resp_buf, sizeof(resp_buf),
-             "{\"dest\":\"%u.%u.%u.%u\",\"port\":%u}",
-             ip[0], ip[1], ip[2], ip[3], (unsigned)TRICE_UDP_PORT);
+    if (add) {
+        if (Trice_UdpAddDest(&addr) < 0) {
+            send_json(conn, "507 Insufficient Storage",
+                      "{\"error\":\"destination list is full\"}");
+            return;
+        }
+        TRice("Trice UDP dest added %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+    } else {
+        if (Trice_UdpRemoveDest(&addr) != 0) {
+            send_json(conn, "404 Not Found",
+                      "{\"error\":\"address is not in the list\"}");
+            return;
+        }
+        TRice("Trice UDP dest removed %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
+    }
+
+    {
+        size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
+        off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
+        snprintf(resp_buf + off, sizeof(resp_buf) - off,
+                 ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
+    }
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* Register (or drop) the caller as a Trice listener.
+ *
+ * The address is taken from the connection, never from a body: the caller does
+ * not have to know which of its own addresses the board should use, and the
+ * recorded address is return-routable by construction because a packet just
+ * arrived from it.  LAN and tunnel behave identically here, since the HTTP
+ * listener is bound to IP_ADDR_ANY and the connection's peer address is
+ * whatever actually reached us.
+ *
+ * Only valid where no NAT sits between listener and board — behind one, the
+ * peer address is the translated one and UDP will not find its way back; use
+ * /api/trice/dest there. */
+static void handle_trice_subscribe(struct netconn *conn, int add)
+{
+    ip_addr_t peer;
+    u16_t     port = 0u;
+    size_t    off;
+
+    if (netconn_peer(conn, &peer, &port) != ERR_OK) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not read peer address\"}");
+        return;
+    }
+
+    if (add) {
+        if (Trice_UdpAddDest(&peer) < 0) {
+            send_json(conn, "507 Insufficient Storage",
+                      "{\"error\":\"destination list is full\"}");
+            return;
+        }
+        TRice("Trice UDP subscriber %d.%d.%d.%d added\n",
+              (unsigned)ip4_addr1(&peer), (unsigned)ip4_addr2(&peer),
+              (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
+    } else {
+        if (Trice_UdpRemoveDest(&peer) != 0) {
+            send_json(conn, "404 Not Found",
+                      "{\"error\":\"caller is not subscribed\"}");
+            return;
+        }
+        TRice("Trice UDP subscriber %d.%d.%d.%d removed\n",
+              (unsigned)ip4_addr1(&peer), (unsigned)ip4_addr2(&peer),
+              (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
+    }
+
+    off = (size_t)snprintf(resp_buf, sizeof(resp_buf),
+                           "{\"you\":\"%u.%u.%u.%u\",\"dests\":",
+                           (unsigned)ip4_addr1(&peer), (unsigned)ip4_addr2(&peer),
+                           (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
+    if (off >= sizeof(resp_buf)) {
+        off = sizeof(resp_buf) - 1u;
+    }
+    off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
+    snprintf(resp_buf + off, sizeof(resp_buf) - off,
+             ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -1670,7 +1806,13 @@ static void handle_connection(struct netconn *conn)
     } else if (route_is("GET /api/trice/status")) {
         handle_trice_status(conn);
     } else if (route_is("POST /api/trice/dest")) {
-        handle_trice_dest(conn, &stream);
+        handle_trice_dest(conn, &stream, 1);
+    } else if (route_is("DELETE /api/trice/dest")) {
+        handle_trice_dest(conn, &stream, 0);
+    } else if (route_is("POST /api/trice/subscribe")) {
+        handle_trice_subscribe(conn, 1);
+    } else if (route_is("DELETE /api/trice/subscribe")) {
+        handle_trice_subscribe(conn, 0);
     } else if (route_is("POST /api/wg/keygen")) {
         handle_wg_keygen(conn);
     } else if (route_is("POST /api/wg/restart")) {

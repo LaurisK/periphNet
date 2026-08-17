@@ -1,15 +1,28 @@
 /**
  * @file    trice_udp.h
- * @brief   Trice UDP transport — sends TCOBS-encoded trice data over UDP
+ * @brief   Trice UDP transport — streams TCOBS-encoded trice data over UDP
  *
- * Default destination is the developer's WireGuard tunnel address, so log
- * output is visible from outside the board's LAN.  The previous default was
- * the 255.255.255.255 limited broadcast, which is never routed and therefore
- * produced nothing at all once off-LAN.
+ * The board pushes log frames to a small list of destinations.  There is no
+ * inbound socket and no subscriber protocol on the wire: this is a one-way
+ * streamer, and the listener is an ordinary UDP receiver.
  *
- * Usage: call Trice_UdpInit() after lwIP is up, then assign the write function
- * to UserNonBlockingDeferredWrite8AuxiliaryFn. The trice tool receives data with:
+ * Slot 0 holds the limited broadcast 255.255.255.255 by default, so anyone on
+ * the board's own LAN receives the stream with no configuration whatsoever:
+ *
  *   trice log -p UDP4 -args ":17001" -i ./til.json -li ./li.json
+ *
+ * Broadcast is never forwarded by a router, so remote listeners (across the
+ * WireGuard tunnel, say) add themselves as unicast entries.  The intended way
+ * is POST /api/trice/subscribe, which takes the caller's address from the HTTP
+ * connection itself — the board never has to be *told* an address, and the one
+ * it records is return-routable by construction, because a packet just arrived
+ * from it.  POST /api/trice/dest remains for entries a connection cannot
+ * express (a third-party collector, a different broadcast address).
+ *
+ * The list is RAM-only and reverts to broadcast-only on every reboot.  That is
+ * why the default has to be something that works unconfigured: a default that
+ * only a working tunnel can reach makes the log stream disappear exactly when
+ * the tunnel is the thing under investigation.
  */
 
 #ifndef TRICE_UDP_H_
@@ -17,39 +30,57 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "lwip/ip_addr.h"
 
-#define TRICE_UDP_PORT  17001
+#define TRICE_UDP_PORT      17001
 
-/* Developer laptop inside the WireGuard tunnel (peer Lauris_laptop). */
-#define TRICE_UDP_DEFAULT_DEST_0  10
-#define TRICE_UDP_DEFAULT_DEST_1  77
-#define TRICE_UDP_DEFAULT_DEST_2  0
-#define TRICE_UDP_DEFAULT_DEST_3  4
+/** Destination slots.  Small on purpose — this is a debug fan-out, and every
+ *  entry costs one udp_sendto() per trice frame. */
+#define TRICE_UDP_MAX_DEST  4
 
 /**
  * @brief Initialize trice UDP transport
  *
- * Creates a UDP PCB and registers the auxiliary write function.
- * Must be called after tcpip_init() and from a context where
- * LOCK_TCPIP_CORE is available (e.g., a FreeRTOS task).
+ * Creates a UDP PCB, seeds the destination list with the broadcast address and
+ * starts the consumer task.  Must be called after tcpip_init() and from a
+ * context where LOCK_TCPIP_CORE is available (e.g. a FreeRTOS task).
  */
 void Trice_UdpInit(void);
 
 /**
- * @brief Send trice data over UDP broadcast
+ * @brief Send trice data to every configured destination
  *
- * Registered as UserNonBlockingDeferredWrite8AuxiliaryFn.
- * Called from TriceTransfer() in the trice task.
+ * Registered (indirectly) as UserNonBlockingDeferredWrite8AuxiliaryFn and
+ * called from the consumer task.
  */
 void Trice_UdpWrite(const uint8_t *data, size_t len);
 
 /**
- * @brief Retarget trice UDP output at runtime.
+ * @brief  Add a destination, or refresh it if already present.
  *
- * Pass 255.255.255.255 to restore the old on-LAN broadcast behaviour, or any
- * unicast address (e.g. another tunnel peer) to follow the developer.
+ * When the list is full the least-recently-added non-sticky entry is evicted;
+ * the default broadcast entry is sticky and is never evicted automatically.
+ *
+ * @return slot index, or -1 if the address is invalid or every slot is sticky.
  */
-void Trice_UdpSetDest(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+int Trice_UdpAddDest(const ip_addr_t *addr);
+
+/**
+ * @brief  Remove a destination.
+ * @return 0 if it was removed, -1 if it was not in the list.
+ */
+int Trice_UdpRemoveDest(const ip_addr_t *addr);
+
+/**
+ * @brief Drop every destination and restore the default broadcast entry.
+ */
+void Trice_UdpResetDests(void);
+
+/**
+ * @brief  Snapshot the destination list.
+ * @return number of entries written to @p out (at most @p max).
+ */
+uint32_t Trice_UdpGetDests(ip_addr_t *out, uint32_t max);
 
 /**
  * @brief  1 if the UDP PCB was allocated, i.e. the transport can send.
@@ -58,7 +89,9 @@ int Trice_UdpIsReady(void);
 
 /**
  * @brief  Number of datagrams handed to udp_sendto(), and how many of those
- *         it rejected (typically ERR_RTE while the tunnel is down).
+ *         it rejected (typically ERR_RTE while a tunnel destination is down).
+ *
+ * Counted per destination, so one trice frame fanned out to N slots counts N.
  */
 void Trice_UdpGetStats(uint32_t *sent, uint32_t *failed);
 

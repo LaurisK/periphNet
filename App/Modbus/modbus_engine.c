@@ -549,10 +549,13 @@ void ModbusEngine_LogStatus(void)
         }
     }
 
+    /* `dropped` counts wakes that did not fit the queue — the same capacity
+     * signal `missed` is, one level down (§4.8). */
     snprintf(buf, sizeof(buf),
-             "%s polls=%u errors=%u missed=%u timers=%u subs=%s",
+             "%s polls=%u errors=%u missed=%u dropped=%u timers=%u subs=%s",
              s_running ? "running" : "stopped", (unsigned)s_pollCount,
-             (unsigned)s_errorCount, (unsigned)s_missedTotal, timers,
+             (unsigned)s_errorCount, (unsigned)s_missedTotal,
+             (unsigned)s_droppedPokes, timers,
              ModbusSub_AnyLive() ? "yes" : "none");
     TRiceS("Modbus engine: %s\n", buf);
 

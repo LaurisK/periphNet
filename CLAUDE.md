@@ -511,11 +511,16 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
 | `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
+| `/api/modbus/config/verify` | POST | Validate a config JSON **without writing anything** — an upload consumes the inactive region on success *and* on failure, and that region holds the previous config |
 | `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
 | `/api/modbus/config/apply` | POST | Arm the config swap; the engine commits it at its next safe point (hot reload, no reboot) |
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
-| `/api/modbus/config` | DELETE | Stage the built-in Solis default + arm swap (hot factory reset) |
+| `/api/modbus/config` | DELETE | Erase the config — the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
+| `/api/modbus/plans` | GET | Every plan slot: name, capability, device set, time tables, live subscriber count |
+| `/api/modbus/plans` | POST | Create a plan (201 + `{"id":N}`); body is one element of the config's `plans[]`, so one schema, one validator |
+| `/api/modbus/plans/N` | PUT | Modify a plan — **409 if a subscription named it** (`MB_PLAN_ALL` subscribers do not lock a plan) |
+| `/api/modbus/plans/N` | DELETE | Free a slot; 409 likewise. Deleting moves no other plan — that is what makes a slot a slot |
 | `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base |
 | `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
 | `/api/wg/config` | DELETE | Erase the stored config **including the private key** — the board becomes unprovisioned and the tunnel stops |

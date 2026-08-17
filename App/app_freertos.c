@@ -33,6 +33,7 @@
 #include "usart.h"
 #include "w25q128.h"
 #include "lwip/netif.h"
+#include "lwip/tcpip.h"
 #include "lwip/dhcp.h"
 #include "trice.h"
 
@@ -177,6 +178,21 @@ void App_DefaultTaskEntry(void)
     if (Modbus_Init() != 0) {
         TRice("Modbus: init failed\n");
     }
+
+    /* Hand the Ethernet netif back to the ETH DMA's checksum offload.
+     *
+     * lwipopts.h now compiles software checksum generation IN, because the
+     * WireGuard netif has no hardware behind it and was emitting inner packets
+     * with garbage checksums — every peer's ip_rcv() dropped them before the
+     * FORWARD chain, so the tunnel handshook perfectly and carried no data.
+     * netif_add() gives every netif NETIF_CHECKSUM_ENABLE_ALL, which is what
+     * the WireGuard netif wants; here we clear the flags on the ETH netif so it
+     * behaves exactly as before and the DMA keeps doing the work. */
+    LOCK_TCPIP_CORE();
+    if (netif_default != NULL) {
+        NETIF_SET_CHECKSUM_CTRL(netif_default, 0);
+    }
+    UNLOCK_TCPIP_CORE();
 
     /* Start HTTP server (upload/download/status) */
     http_server_init();

@@ -251,6 +251,7 @@ static void cli_request(const char *args, int isWrite)
  *   modbus plan del <id>         — free a slot (refused while subscribed)
  *   modbus inject <hexbytes>     — Stage the reply the next frame gets
  *   modbus silence               — Stage silence for the next frame
+ *   modbus lastreq               — The last frame the engine formed
  */
 static void cmd_modbus(const char *args)
 {
@@ -375,6 +376,25 @@ static void cmd_modbus(const char *args)
         } else {
             TRice("Modbus inject: ERR_SHORT\n");
         }
+    } else if (strncmp(args, "lastreq", 7) == 0) {
+        /* What the engine FORMED, for a harness that wants to assert on the
+         * request rather than only on what comes up out of the module.  A
+         * bonus rather than the point: integration testing is upward-only
+         * (docs/modbus.md §9). */
+        uint8_t frame[MB_TEST_FRAME_MAX];
+        uint16_t n = ModbusTestPort_LastRequest(frame, sizeof(frame));
+
+        if (n == 0u) {
+            TRice("Modbus lastreq: none\n");
+            return;
+        }
+        char hex[80];
+        int  at = 0;
+        for (uint16_t i = 0; i < n && at < (int)sizeof(hex) - 3; i++) {
+            at += snprintf(hex + at, sizeof(hex) - (size_t)at, "%02x",
+                           frame[i]);
+        }
+        TRiceS("Modbus lastreq: %s\n", hex);
     } else if (strncmp(args, "silence", 7) == 0) {
         ModbusTestPort_StageSilence();
         TRice("Modbus inject: silence staged\n");
@@ -392,7 +412,7 @@ static void cmd_modbus(const char *args)
         TRiceS("Modbus %s\n", buf);
         Modbus_LogStatus();
     } else {
-        TRice("Usage: modbus read|get|set|monitor|dump|plan|inject|silence|status\n");
+        TRice("Usage: modbus read|get|set|monitor|dump|plan|inject|silence|lastreq|status\n");
     }
 }
 

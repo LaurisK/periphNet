@@ -99,14 +99,32 @@
 #define LWIP_DISABLE_MEMP_SANITY_CHECKS 1
 /*----- Value in opt.h for LWIP_STATS: 1 -----*/
 #define LWIP_STATS 0
+/* Checksums: software generation is COMPILED IN, then switched off per netif.
+ *
+ * CubeMX sets these to 0 because the STM32 ETH DMA inserts IP/UDP/TCP/ICMP
+ * checksums in hardware.  That is true only for frames the ETH peripheral
+ * actually emits.  The WireGuard netif is not the ETH peripheral: its packets
+ * are checksummed by nobody, encrypted, and carried as the payload of an outer
+ * UDP datagram — the hardware checksums that outer datagram and never sees the
+ * inner one.  Every packet the board sent into the tunnel therefore carried a
+ * garbage IP/UDP checksum and was dropped by the peer's ip_rcv() before it
+ * reached the FORWARD chain, which is exactly what the hub showed: visible in
+ * tcpdump, WireGuard rx counters climbing, FORWARD counter frozen.
+ *
+ * So: generate in software (1), enable LWIP_CHECKSUM_CTRL_PER_NETIF, and clear
+ * the flags again on the ETH netif only (App_LwipChecksumInit), which keeps the
+ * hardware offload for Ethernet while the WireGuard netif gets real checksums.
+ * netif_add() defaults every new netif to NETIF_CHECKSUM_ENABLE_ALL, so the
+ * WireGuard netif needs no code of its own. */
+#define LWIP_CHECKSUM_CTRL_PER_NETIF 1
 /*----- Value in opt.h for CHECKSUM_GEN_IP: 1 -----*/
-#define CHECKSUM_GEN_IP 0
+#define CHECKSUM_GEN_IP 1
 /*----- Value in opt.h for CHECKSUM_GEN_UDP: 1 -----*/
-#define CHECKSUM_GEN_UDP 0
+#define CHECKSUM_GEN_UDP 1
 /*----- Value in opt.h for CHECKSUM_GEN_TCP: 1 -----*/
-#define CHECKSUM_GEN_TCP 0
+#define CHECKSUM_GEN_TCP 1
 /*----- Value in opt.h for CHECKSUM_GEN_ICMP: 1 -----*/
-#define CHECKSUM_GEN_ICMP 0
+#define CHECKSUM_GEN_ICMP 1
 /*----- Value in opt.h for CHECKSUM_GEN_ICMP6: 1 -----*/
 #define CHECKSUM_GEN_ICMP6 0
 /*----- Value in opt.h for CHECKSUM_CHECK_IP: 1 -----*/
