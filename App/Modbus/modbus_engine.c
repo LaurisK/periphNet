@@ -22,6 +22,7 @@
 #include "App/Modbus/modbus.h"
 #include "App/Modbus/modbus_internal.h"
 #include "App/Modbus/modbus_port.h"
+#include "App/Mon/sysmon.h"
 #include "App/system.h"
 
 #include "modbus_config_store.h"
@@ -450,12 +451,18 @@ static void engine_task(void *arg)
 
     TRice("Modbus: started\n");
 
+    /* The 200 ms floor below is what makes a deadline meaningful here: the
+     * task must come round even with nothing subscribed.  A sequence that
+     * hangs on a port is the failure this catches. */
+    int8_t monId = SysMon_TaskRegister(640U, 3000U);
+
     for (;;) {
         uint8_t msg;
 
         /* The wake is the queue; the 200 ms floor only keeps a lost poke from
          * stalling pending API work forever. */
         (void)osMessageQueueGet(s_queue, &msg, NULL, pdMS_TO_TICKS(200));
+        SysMon_TaskCheckin(monId);
 
         /* A config swap is committed here, on the task that walks the config,
          * so a reader can never race one. */

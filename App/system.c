@@ -38,6 +38,12 @@ static TIM_HandleTypeDef s_htim14;
 static uint32_t          s_resetCause    = 0U;
 static volatile uint8_t  s_wdgTestMode   = 0U;
 
+/* Watchdog margin.  The interesting number is not that the board is alive but
+ * how close it comes to the 16.4 s IWDG timeout — a task that occasionally
+ * blocks for 9 s is a crash-loop waiting for a slower flash write. */
+static volatile uint32_t s_lastKick_ms   = 0U;
+static volatile uint32_t s_kickGapMax_ms = 0U;
+
 /* --------------------------------------------------------------------------
  * Private functions
  * -------------------------------------------------------------------------- */
@@ -109,12 +115,35 @@ uint32_t System_GetResetCause(void)
 
 void KickIwdg(void)
 {
+    uint32_t now_ms = HAL_GetTick();
+    uint32_t gap_ms = now_ms - s_lastKick_ms;
+
+    if (s_lastKick_ms != 0U && gap_ms > s_kickGapMax_ms) {
+        s_kickGapMax_ms = gap_ms;
+    }
+    s_lastKick_ms = now_ms;
+
     if (s_wdgTestMode) {
         return;
     }
     HAL_IWDG_Refresh(&hiwdg);
     /* Reset TIM14 counter – period restarts from now */
     __HAL_TIM_SET_COUNTER(&s_htim14, 0U);
+}
+
+void System_GetIwdgStats(uint32_t *gapMax_ms, uint32_t *sinceKick_ms)
+{
+    if (gapMax_ms != NULL) {
+        *gapMax_ms = s_kickGapMax_ms;
+    }
+    if (sinceKick_ms != NULL) {
+        *sinceKick_ms = HAL_GetTick() - s_lastKick_ms;
+    }
+}
+
+void System_ResetIwdgStats(void)
+{
+    s_kickGapMax_ms = 0U;
 }
 
 void System_SetWatchdogTestMode(void)

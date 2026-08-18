@@ -24,6 +24,7 @@
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
+#include "App/Mon/sysmon.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -55,8 +56,11 @@ static void triceTask(void *arg)
 {
     (void)arg;
 
+    int8_t monId = SysMon_TaskRegister(256U, 1000U);
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(10U));
+        SysMon_TaskCheckin(monId);
         if (MX_USART3_Ready()) {
             TriceTransfer();
         }
@@ -69,6 +73,10 @@ static void triceTask(void *arg)
 
 void App_FreertosInit(void)
 {
+    /* Before any task exists: SysMon_TaskRegister() is a no-op until this
+     * runs, and a task only registers once, from inside its own body. */
+    SysMon_Init();
+
     osThreadNew(triceTask, NULL, &s_triceAttr);
 }
 
@@ -226,11 +234,23 @@ void App_DefaultTaskEntry(void)
     uint32_t wgTick          = 0U;
     int      wgWasUp         = -1;
 
+    /* The loop runs at 100 ms, but golden promotion and the pre-reboot flush
+     * both hold it for seconds while kicking the IWDG themselves — hence a
+     * deadline well clear of those rather than of the loop period. */
+    int8_t monId = SysMon_TaskRegister(1024U, 10000U);
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(100U));
 
         /* Feed watchdog every 100 ms */
         KickIwdg();
+
+        /* Housekeeping for the system monitor.  It samples once a second and
+         * returns immediately in between.  It runs HERE, in the same task
+         * that kicks the watchdog, so the one task it cannot report on is the
+         * one the IWDG and TIM14 already cover. */
+        SysMon_TaskCheckin(monId);
+        SysMon_Poll();
 
         /* ---- LED1 status indication ---- */
         if (ledFastCtr > 0U) {

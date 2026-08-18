@@ -1,6 +1,7 @@
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "App/Log/trice_consumer.h"
+#include "App/Mon/sysmon.h"
 #include "trice.h"
 #include "lwip/udp.h"
 #include "lwip/tcpip.h"
@@ -201,8 +202,13 @@ static void Trice_UdpConsumerTask(void *arg)
 {
     TriceConsumer_Register(TRICE_CONSUMER_UDP, xTaskGetCurrentTaskHandle());
 
+    /* Purely notification-driven: with nothing being logged it legitimately
+     * blocks forever, so no deadline — stack and CPU only. */
+    int8_t monId = SysMon_TaskRegister(512U, 0U);
+
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        SysMon_TaskCheckin(monId);
         size_t len = TriceConsumer_GetLen();
         if (len) {
             const uint8_t *data = TriceConsumer_GetData();

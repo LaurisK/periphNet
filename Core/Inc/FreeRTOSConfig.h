@@ -180,6 +180,21 @@ standard names. */
    ~47 KB of DMA-capable SRAM.  Nothing from pvPortMalloc (task stacks,
    kernel objects) may ever be handed to a DMA peripheral. */
 #define configAPPLICATION_ALLOCATED_HEAP 1
+
+/* Per-task CPU accounting for App/Mon/sysmon.c.  The clock is the DWT cycle
+   counter divided by 16 (~10.5 MHz at 168 MHz), which is a free-running core
+   register — no timer peripheral is consumed.  The formatting helpers stay
+   off: they pull sprintf and a heap allocation into the image, and sysmon
+   renders the same data itself. */
+#define configGENERATE_RUN_TIME_STATS            1
+#define configUSE_STATS_FORMATTING_FUNCTIONS     0
+extern void     SysMon_RunTimeCounterInit(void);
+extern uint32_t SysMon_RunTimeCounter(void);
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() SysMon_RunTimeCounterInit()
+#define portGET_RUN_TIME_COUNTER_VALUE()         SysMon_RunTimeCounter()
+
+/* sysmon separates "the board is idle" from "a task is starving". */
+#define INCLUDE_xTaskGetIdleTaskHandle           1
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

@@ -65,6 +65,22 @@ uint32_t System_GetResetCause(void);
 void KickIwdg(void);
 
 /**
+ * @brief Watchdog margin: longest gap ever seen between KickIwdg() calls, and
+ *        how long ago the last one was.
+ *
+ * Either pointer may be NULL.  The maximum ignores the very first kick (there
+ * is no previous one to measure from).  Reported by the system monitor —
+ * a maximum creeping towards the 16.4 s IWDG timeout is the early warning the
+ * reset itself does not give.
+ */
+void System_GetIwdgStats(uint32_t *gapMax_ms, uint32_t *sinceKick_ms);
+
+/**
+ * @brief Clear the recorded IWDG gap maximum.
+ */
+void System_ResetIwdgStats(void);
+
+/**
  * @brief Stop feeding the watchdog (for deliberate watchdog-trigger test).
  *
  * After calling this the device will reset in ≤ 16.4 s.

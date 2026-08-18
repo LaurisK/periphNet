@@ -19,6 +19,7 @@
 #include "App/Log/crash.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_consumer.h"
+#include "App/Mon/sysmon.h"
 #include "usart.h"
 #include "usbd_cdc_if.h"
 #include "usbd_cdc.h"
@@ -94,6 +95,9 @@ static const char index_html[] =
     "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
     "<button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button>"
     "</div></div>"
+    "<div class=card><h3>System</h3>"
+    "<div id=sysinfo class=info>Loading...</div><div id=systasks></div>"
+    "<button class=btn-dl onclick=resetPeaks()>Reset peaks</button></div>"
     "<div class=card><h3>Last Crash</h3>"
     "<div id=crash>Loading...</div></div>"
     "<script>"
@@ -131,7 +135,28 @@ static const char index_html[] =
     "document.getElementById('finfo').textContent=t;"
     "document.getElementById('bconf').disabled=j.confirmed;"
     "}).catch(()=>{})}"
-    "function poll(){pollImg();pollFwu()}"
+    "function pct(p){return (p/10).toFixed(1)+'%'}"
+    "function pollSys(){fetch(B+'/api/system/status').then(r=>r.json()).then(j=>{"
+    "var h='CPU '+pct(j.cpu_load_permille)+' (peak '+pct(j.cpu_peak_permille)"
+    "+') | idle '+pct(j.idle_permille)"
+    "+'<br>Heap '+j.heap.free+' / '+j.heap.size+' B free (min '+j.heap.free_min+')'"
+    "+'<br>Watchdog margin: worst gap '+j.iwdg.gap_max_ms+' ms of '+j.iwdg.timeout_ms+' ms';"
+    "if(!j.runtime_counter_ok)h+='<br><b>CPU clock not running</b>';"
+    "if(j.tasks_stale)h+='<br><b>'+j.tasks_stale+' task(s) missed their check-in deadline</b>';"
+    "if(j.stack_warnings)h+='<br><b>'+j.stack_warnings+' task(s) below '+j.stack_warn_words+' free stack words</b>';"
+    "document.getElementById('sysinfo').innerHTML=h;"
+    "var t='task            pri st    cpu   peak  stack(free/size) checkins\\n';"
+    "j.tasks.forEach(function(k){"
+    "t+=(k.name+'               ').slice(0,15)+String(k.prio).padStart(4)+' '+k.state"
+    "+pct(k.cpu_permille).padStart(7)+pct(k.cpu_peak_permille).padStart(7)+'  '"
+    "+(k.stack_free_min_words+'/'+(k.stack_size_words||'?')).padStart(14)+' '"
+    "+k.checkins+(k.deadline_ms?' ('+k.since_checkin_ms+'ms)':'')"
+    "+(k.stale?' STALE':'')+(k.present?'':' GONE')+'\\n'});"
+    "document.getElementById('systasks').innerHTML='<pre>'+t+'</pre>'"
+    "}).catch(()=>{})}"
+    "function resetPeaks(){fetch(B+'/api/system/reset-peaks',{method:'POST'})"
+    ".then(()=>pollSys()).catch(()=>{})}"
+    "function poll(){pollImg();pollFwu();pollSys()}"
     "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
     ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
     ".catch(e=>show('fmsg',e,0))}"
@@ -843,6 +868,107 @@ static void handle_crash_get(struct netconn *conn)
 static void handle_crash_delete(struct netconn *conn)
 {
     Crash_ClearFlash();
+    send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
+}
+
+/* --------------------------------------------------------------------------
+ * System monitor (/api/system/status, /api/system/reset-peaks)
+ *
+ * The whole task table does not fit resp_buf, and growing that buffer would
+ * cost CCM — the constrained region on this part.  A transient heap block
+ * costs nothing when nobody is asking, which is the normal case.
+ * -------------------------------------------------------------------------- */
+
+#define SYS_STATUS_BUF_SIZE 3072u
+
+static void handle_system_status(struct netconn *conn)
+{
+    sSysMonTaskInfo tasks[SYSMON_MAX_TASKS];
+    sSysMonSummary  sum;
+    char           *buf;
+    size_t          off;
+    uint8_t         n;
+
+    buf = (char *)pvPortMalloc(SYS_STATUS_BUF_SIZE);
+    if (buf == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+
+    SysMon_GetSummary(&sum);
+    n = SysMon_GetTasks(tasks, SYSMON_MAX_TASKS);
+
+    off = (size_t)snprintf(buf, SYS_STATUS_BUF_SIZE,
+        "{\"uptime_sec\":%lu,"
+        "\"cpu_load_permille\":%u,"
+        "\"cpu_peak_permille\":%u,"
+        "\"idle_permille\":%u,"
+        "\"runtime_counter_ok\":%s,"
+        "\"samples\":%lu,"
+        "\"reset_cause\":\"0x%08lX\","
+        "\"heap\":{\"size\":%lu,\"free\":%lu,\"free_min\":%lu,\"used\":%lu},"
+        "\"iwdg\":{\"gap_max_ms\":%lu,\"since_kick_ms\":%lu,"
+        "\"timeout_ms\":16400},"
+        "\"tasks_total\":%u,\"tasks_stale\":%u,\"stack_warnings\":%u,"
+        "\"stack_warn_words\":%u,"
+        "\"tasks\":[",
+        (unsigned long)sum.uptime_sec,
+        (unsigned)sum.cpuLoad_permille,
+        (unsigned)sum.cpuPeakLoad_permille,
+        (unsigned)sum.idle_permille,
+        sum.runTimeCounterOk ? "true" : "false",
+        (unsigned long)sum.sampleCnt,
+        (unsigned long)System_GetResetCause(),
+        (unsigned long)sum.heapSize_bytes,
+        (unsigned long)sum.heapFree_bytes,
+        (unsigned long)sum.heapFreeMin_bytes,
+        (unsigned long)(sum.heapSize_bytes - sum.heapFree_bytes),
+        (unsigned long)sum.iwdgGapMax_ms,
+        (unsigned long)sum.iwdgSinceKick_ms,
+        (unsigned)sum.taskCnt, (unsigned)sum.staleCnt,
+        (unsigned)sum.stackWarnCnt, (unsigned)SYSMON_STACK_WARN_WORDS);
+
+    if (off >= SYS_STATUS_BUF_SIZE) {
+        off = SYS_STATUS_BUF_SIZE - 1u;
+    }
+
+    for (uint8_t i = 0u; i < n; i++) {
+        const sSysMonTaskInfo *t = &tasks[i];
+        int w = snprintf(buf + off, SYS_STATUS_BUF_SIZE - off,
+            "%s{\"name\":\"%s\",\"state\":\"%s\",\"prio\":%u,"
+            "\"stack_free_min_words\":%u,\"stack_size_words\":%u,"
+            "\"cpu_permille\":%u,\"cpu_peak_permille\":%u,\"run_ms\":%lu,"
+            "\"checkins\":%lu,\"since_checkin_ms\":%lu,\"deadline_ms\":%lu,"
+            "\"stale\":%s,\"stale_cnt\":%lu,\"present\":%s}",
+            (i == 0u) ? "" : ",",
+            t->name, SysMon_StateName(t->state), (unsigned)t->priority,
+            (unsigned)t->stackFreeMin_words, (unsigned)t->stackSize_words,
+            (unsigned)t->cpuLoad_permille, (unsigned)t->cpuPeak_permille,
+            (unsigned long)t->runTime_ms,
+            (unsigned long)t->checkinCnt,
+            (unsigned long)t->sinceCheckin_ms,
+            (unsigned long)t->deadline_ms,
+            t->stale ? "true" : "false",
+            (unsigned long)t->staleCnt,
+            t->present ? "true" : "false");
+
+        /* Truncating mid-object would emit invalid JSON — stop on the last
+         * entry that fits instead. */
+        if (w < 0 || (size_t)w >= (SYS_STATUS_BUF_SIZE - off)) {
+            break;
+        }
+        off += (size_t)w;
+    }
+
+    snprintf(buf + off, SYS_STATUS_BUF_SIZE - off, "]}");
+    send_json(conn, "200 OK", buf);
+    vPortFree(buf);
+}
+
+static void handle_system_reset_peaks(struct netconn *conn)
+{
+    SysMon_ResetPeaks();
+    TRice("SysMon: peaks cleared over HTTP\n");
     send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
 }
 
@@ -1776,6 +1902,10 @@ static void handle_connection(struct netconn *conn)
         handle_crash_get(conn);
     } else if (route_is("DELETE /api/crash/latest")) {
         handle_crash_delete(conn);
+    } else if (route_is("GET /api/system/status")) {
+        handle_system_status(conn);
+    } else if (route_is("POST /api/system/reset-peaks")) {
+        handle_system_reset_peaks(conn);
     } else if (route_is("POST /api/modbus/config/upload")) {
         handle_modbus_cfg_upload(conn, &stream);
     } else if (route_is("POST /api/modbus/config/verify")) {
@@ -1849,6 +1979,10 @@ static void http_task(void *arg)
 {
     (void)arg;
 
+    /* Idle means blocked in netconn_accept() forever, so no deadline — the
+     * check-in counts served connections, which is the useful number here. */
+    int8_t monId = SysMon_TaskRegister(1024U, 0U);
+
     struct netconn *listener = netconn_new(NETCONN_TCP);
     if (listener == NULL ||
         netconn_bind(listener, IP_ADDR_ANY, HTTP_SERVER_PORT) != ERR_OK ||
@@ -1873,6 +2007,8 @@ static void http_task(void *arg)
 
         netconn_close(conn);
         netconn_delete(conn);
+
+        SysMon_TaskCheckin(monId);
     }
 }
 

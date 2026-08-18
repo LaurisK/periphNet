@@ -10,6 +10,8 @@
 #include "App/Cmd/cmd_parser.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
+#include "App/Mon/sysmon.h"
+#include "App/system.h"
 #include "App/Test/modbus_test_port.h"
 #include "App/Modbus/modbus_trice_sink.h"
 #include "App/Modbus/modbus.h"
@@ -68,6 +70,7 @@ static void cmd_bms(const char *args);
 static void cmd_modbus(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
+static void cmd_sysmon(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
@@ -75,6 +78,7 @@ static const sCmdEntry s_commands[] = {
     { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
+    { "sysmon",      cmd_sysmon,      "System monitor (tasks|heap|reset)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
     { "help",        cmd_help,        "List available commands"  },
@@ -632,6 +636,42 @@ static void cmd_wg(const char *args)
     }
 }
 
+/**
+ * System monitor: task liveness, stacks, heap and CPU share.
+ *
+ * Usage:
+ *   sysmon          — full report (summary + one line per task)
+ *   sysmon tasks    — same as above
+ *   sysmon heap     — heap and watchdog margin only
+ *   sysmon reset    — clear peak CPU, the IWDG gap maximum and stale counts
+ */
+static void cmd_sysmon(const char *args)
+{
+    if (strncmp(args, "reset", 5) == 0) {
+        SysMon_ResetPeaks();
+        TRice("SysMon: peaks cleared\n");
+        return;
+    }
+
+    if (strncmp(args, "heap", 4) == 0) {
+        sSysMonSummary sum;
+        char           line[112];
+
+        SysMon_GetSummary(&sum);
+        snprintf(line, sizeof(line),
+                 "heap %u/%u B free (min %u, used %u) | iwdg gap max %u ms of "
+                 "16400", (unsigned)sum.heapFree_bytes,
+                 (unsigned)sum.heapSize_bytes,
+                 (unsigned)sum.heapFreeMin_bytes,
+                 (unsigned)(sum.heapSize_bytes - sum.heapFree_bytes),
+                 (unsigned)sum.iwdgGapMax_ms);
+        TRiceS("SysMon: %s\n", line);
+        return;
+    }
+
+    SysMon_Report();
+}
+
 static void cmd_reboot(const char *args)
 {
     (void)args;
@@ -793,8 +833,13 @@ static void cmdTask(void *arg)
 {
     (void)arg;
 
+    /* A handler may block for a long time (flash erase, `wg` restart), so the
+     * deadline is generous — this catches a wedged parser, not a slow one. */
+    int8_t monId = SysMon_TaskRegister(1024U, 5000U);
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(20));
+        SysMon_TaskCheckin(monId);
 
         for (int i = 0; i < cmdSrc_last; i++) {
             sCmdLine *line = &s_lines[i];

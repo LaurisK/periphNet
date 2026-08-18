@@ -12,6 +12,7 @@
 
 #include "App/Mqtt/mqtt_bridge.h"
 #include "App/Modbus/modbus.h"
+#include "App/Mon/sysmon.h"
 #include "cmsis_os.h"
 #include "trice.h"
 
@@ -881,7 +882,13 @@ static void mqttTask(void *arg)
 
     uint32_t reconnectDelay = 2000;
 
+    /* Reconnect backoff can hold the outer loop for reconnectDelay, which
+     * grows to 30 s — so the check-in goes in the inner wait too, and the
+     * deadline covers only the 200 ms service loop. */
+    int8_t monId = SysMon_TaskRegister(512U, 3000U);
+
     while (!s_stopReq) {
+        SysMon_TaskCheckin(monId);
         service_test_hooks();
         drain_publish_queue();
 
@@ -897,6 +904,7 @@ static void mqttTask(void *arg)
             for (uint32_t w = 0; w < reconnectDelay && !s_connected && !s_stopReq;
                  w += 100) {
                 vTaskDelay(pdMS_TO_TICKS(100));
+                SysMon_TaskCheckin(monId);
                 service_test_hooks();
                 /* Keep draining with no broker: monitor lines are how the
                  * bridge stays observable in broker-less CI (§9). */

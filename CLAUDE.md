@@ -89,6 +89,7 @@ ping 10.42.0.203
 curl http://10.42.0.203/
 curl http://10.42.0.203/api/image/info                 # stored image (name/version/size/crc)
 curl http://10.42.0.203/api/fwu/status                 # FWU state (running/golden/confirmed)
+curl http://10.42.0.203/api/system/status              # tasks, stacks, heap, CPU, IWDG margin
 
 # Full OTA cycle (blob only — plaintext .bin uploads are rejected)
 curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
@@ -217,6 +218,9 @@ PeriphNet/
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
     Log/                          # crash handler + backtrace, trice transports
+    Mon/sysmon.c/h                # System monitor: per-task liveness check-ins,
+                                  #   stack high-water marks, heap, per-task CPU
+                                  #   share and idle time, IWDG kick margin
     Net/                          # WireGuard peer: wg_link (tunnel netif +
                                   #   hub peer), wg_platform (port hooks: HW
                                   #   RNG-backed DRBG, TAI64N), wg_time
@@ -493,6 +497,45 @@ overflow → crash report (`crashType_stackOverflow`) + reset. `configASSERT`
 also records a crash report (`crashType_assert`) + resets instead of silently
 spinning with interrupts masked.
 
+## System Monitor (`App/Mon/sysmon.c`)
+
+Answers "is the firmware healthy?" without a debugger. `sysmon` on the CLI,
+`GET /api/system/status` as JSON, and a **System** card in the web UI.
+`SysMon_Init()` runs from `App_FreertosInit()` — *before* any task exists,
+because registration is a no-op until it has.
+
+- **Liveness is a check-in, not a heartbeat.** A task registers itself from
+  inside its own body (`SysMon_TaskRegister(stackWords, deadline_ms)`) and
+  calls `SysMon_TaskCheckin(id)` once per loop iteration. A task that is still
+  being scheduled but has stopped completing its loop is invisible to both the
+  scheduler and the IWDG; that is exactly what a deadline catches. `deadline_ms
+  = 0` means "legitimately blocks forever" (http on `netconn_accept`, tudp on a
+  notify take) — still tracked for stack and CPU, never judged.
+- **Nothing here reboots the board.** Going stale logs once and increments a
+  counter. `SysMon_AllTasksAlive()` is the hook if that policy ever changes —
+  a false positive would reset a healthy board, so it is the caller's call.
+- **Sampling runs in defaultTask** (`SysMon_Poll()` next to `KickIwdg()`, real
+  work once per second). Deliberate: the one task the monitor cannot report on
+  is the one TIM14 + IWDG already cover.
+- **CPU comes from the DWT cycle counter / 16** wired to
+  `portGET_RUN_TIME_COUNTER_VALUE` (`configGENERATE_RUN_TIME_STATS=1`) — no
+  timer peripheral is consumed. FreeRTOS's lifetime totals wrap every ~409 s at
+  that rate, so every figure is a **delta over the 1 s window**; sysmon keeps
+  its own 64-bit accumulator for lifetime run time. Board load is reported as
+  `1000 - idle` per-mille, since interrupt time is charged to whichever task
+  was interrupted.
+- **Stacks** are the FreeRTOS high-water mark for *every* task, registered or
+  not. Tasks created outside the application (IDLE, Tmr Svc, tcpip_thread,
+  EthIf) have their configured depth in a small table in `sysmon.c` so the
+  percentage means something; getting one wrong costs a wrong percentage and
+  nothing else. Crossing below 64 free words logs once per task.
+- **Watchdog margin** — `System_GetIwdgStats()` reports the longest gap ever
+  seen between `KickIwdg()` calls. A maximum creeping toward 16.4 s is the
+  early warning the reset itself never gives.
+- Its own state lives in plain `.bss` (~1.6 KB), **not CCM** — CCM is the
+  constrained region here and none of this is hot. The HTTP handler builds its
+  JSON in a transient `pvPortMalloc` block for the same reason.
+
 ## HTTP API
 
 Two independent sections: **image management** (`/api/image/*`, owned by
@@ -511,6 +554,8 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
 | `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
+| `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag) |
+| `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |
 | `/api/modbus/config/verify` | POST | Validate a config JSON **without writing anything** — an upload consumes the inactive region on success *and* on failure, and that region holds the previous config |
 | `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
 | `/api/modbus/config/apply` | POST | Arm the config swap; the engine commits it at its next safe point (hot reload, no reboot) |
