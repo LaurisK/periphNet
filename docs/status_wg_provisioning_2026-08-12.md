@@ -10,14 +10,15 @@ Boards referred to here:
 | | board #1 | board #2 ("sodas") |
 |---|---|---|
 | Site | Zaliakalnis, `192.168.0.116` | bench, `192.168.8.114` |
-| Firmware | `Pd1.1.8` (2026-08-17) — tunnel **working** | `Pd1.1.6` — still has the §3.11 bug |
+| Firmware | `Pd1.1.11` — tunnel **working** | `Pd1.1.12` (2026-08-18) — tunnel **working**, see §3.13 |
 | Tunnel address | `10.77.0.64` | `10.77.0.5` |
 | Hub peer | `namai` (was `PeriphNet_1`) | `PeriphNet_sodas`, `10.77.0.5/32` |
 | Public key | `U55gBRzFuUEIhFF6e8bPK3dlhKOa6nircpnEdKwWpCA=` | `ab3CVhJxWMtTLDzrf0Z8HvRPxVq4W0T75pd1cssDiyI=` |
 | Provisioned | 2026-08-17, `session_up` ✅ | 2026-08-12 |
 
-As of 2026-08-17 board #2 is powered down (no handshake on the dashboard) and
-board #1 is the only live board.
+As of 2026-08-18 **both boards are live and both tunnels carry data.** Board #2
+was recovered from its own LAN (§3.13) — the last action in this whole
+investigation that needed physical presence.
 
 ## 1. Releases
 
@@ -31,7 +32,9 @@ board #1 is the only live board.
 | `Pd1.1.5` | Trice USB TxState latch fix (§4.2) | superseded (folded into `1.1.6`) |
 | `Pd1.1.6` | per-peer WireGuard data-path counters (§3.3) | superseded |
 | `Pd1.1.7` | **inner-packet checksums (§3.11)** — the fix that made the tunnel carry data; Trice destination list + `POST /api/trice/subscribe` | superseded |
-| `Pd1.1.8` | pbuf-per-destination fix (§3.12) | **on board #1**, confirmed + golden, deployed **through the tunnel** |
+| `Pd1.1.8` | pbuf-per-destination fix (§3.12) | superseded; was deployed **through the tunnel** |
+| `Pd1.1.11` | Modbus module rebuild (unrelated to WG) | **on board #1**, confirmed + golden |
+| `Pd1.1.12` | **ephemeral WireGuard source port (to-do 6b)** — `listen_port = 0` | **on board #2**, confirmed + golden (§3.13) |
 
 `1.1.1` … `1.1.4` were all deployed **over the network** (upload → install →
 confirm → golden promotion), five consecutive cycles with
@@ -459,6 +462,114 @@ broadcast problem, which was the first guess.
 broadcast + tunnel configured, `sent +30, failed 0` over 15 s and Trice arriving
 on both paths.
 
+### 3.13 CLOSED (2026-08-18): board #2 recovered, §3.11 verified independently
+
+Board #2 was flashed from its own LAN (`192.168.8.114`, HTTP only, no cable)
+with `Pd1.1.12`. **This is the confirmation that §3.11 was the whole fault on
+the board side** — board #1's recovery on 2026-08-17 changed the endpoint
+(§3.9) *and* the checksums (§3.11) in the same session, so it could not
+separate them. Board #2 is remote from the hub, so no endpoint collision was
+ever possible for it and its endpoint was never touched: `85.206.57.75:51820`
+before and after. The only variable was the checksum fix.
+
+Before, on `Pd1.1.6`, from board #2's own LAN:
+
+| | result |
+|---|---|
+| `ping 10.77.0.5` ×5 | **0/5, 100 % loss** |
+| `rx_counter` / `tx_packets` after the burst | **0 / 0 — unmoved** |
+| `session_up` | `true` throughout |
+
+`rx_counter` pinned at 0 is *worse* than §3.5 measured on the same board in
+August, where it climbed: with 4.3 days of uptime the hub had long since lost
+whatever mapping made hub → board work back then. It restates §3.1's lesson —
+`session_up` and a green dashboard track handshakes and are worth nothing as
+evidence about the data path.
+
+After, on `Pd1.1.12`, same LAN:
+
+| | result |
+|---|---|
+| `ping 10.77.0.5` ×5 | **5/5, ~71 ms** |
+| `rx_counter` / `tx_packets` | **14 / 15**, `rx`→`tx` 17 ms apart |
+| HTTP over the tunnel | `GET /api/fwu/status` served on `10.77.0.5` |
+
+Install took ~36 s (upload 5.9 s over LAN, `last_fwu_result: 0`). Confirm was
+issued **over the tunnel**, and golden is now `Pd1.1.12` — so for the first
+time board #2's rollback target is an image whose tunnel works. Previously a
+rollback landed on `Pd1.1.6` and took remote access away with it.
+
+**Remote acceptance, from a different site** (laptop moved to `192.168.0.147`,
+board #2's LAN unreachable — `192.168.8.114` down, confirming the path is
+genuinely the tunnel):
+
+| Check | Result |
+|---|---|
+| `ping 10.77.0.5` ×40 | **40/40, 0 % loss**, 44–95 ms |
+| `/api/fwu/status`, `/api/wg/status`, `/api/system/status` | all served |
+| **367 KB blob upload over the tunnel** | 10.6 s (~35 KB/s), CRC `0xBDE9DF7D` matching the build byte-for-byte |
+| Board health at 1.6 h uptime | no crash log, 0 stale tasks, 0 stack warnings, IWDG gap max 617 ms of 16400, heap free 16.8 KB, load 21 % |
+
+The bulk upload matters more than the pings: it is the first thing to exercise
+full-MTU TCP through the 1420-byte tunnel, which is where a checksum or
+fragmentation fault would still show. **Board #2 is now fully manageable
+remotely, including OTA.**
+
+An earlier 30-ping run measured on board #2's own LAN showed 6.7 % loss; the
+40-ping run from the remote site showed none, and a LAN-local ping in the same
+window showed 0 % with a 127 ms outlier. That loss was the sodas wifi, not the
+tunnel — worth recording so it is not later mistaken for a tunnel defect.
+
+### 3.13b Board #2 stability baseline (2026-08-18)
+
+Board #2 is the board nobody can reach physically, so item 10's HardFault at
+~24 h uptime is its main residual risk. A heap leak is the classic cause, and
+there is none: sampled five times over 100 s at ~1.7 h uptime, `free` held at
+**17064 B exactly** and `free_min` at **13784 B**, both unmoved.
+
+One reading worth not misinterpreting: a single earlier sample showed `free`
+at 16864. That is not drift — the `/api/system/status` handler builds its JSON
+in a transient `pvPortMalloc` block, so a sample taken while another request is
+in flight sees its own overhead. Compare `free_min`, which is monotonic.
+
+Idle load is **7 ‰**; the 213–225 ‰ figures elsewhere in this session were
+measured under active tunnel traffic, not at rest.
+
+A soak monitor samples uptime, heap, stale tasks and the IWDG gap every 5 min
+and dumps the crash log if uptime ever goes backwards. It only detects the
+fault; item 10 is still unexplained and still open on both boards.
+
+### 3.14 To-do 6b implemented: ephemeral WireGuard source port (`Pd1.1.12`)
+
+`wg_link.c` set `s_initData.listen_port = WIREGUARDIF_DEFAULT_PORT` (51820),
+which is what let §3.9 happen: a board sharing a site with the hub hairpins
+through the router and the endpoint the hub learns becomes indistinguishable
+from the hub's own `public-IP:51820`. Now `listen_port = 0` — `udp_bind()` with
+port 0 picks a free port, exactly like every other roaming client, and the
+portable public endpoint keeps working.
+
+Note the bind happens in `wireguardif_init()`, which runs only on the first
+`netif_add()`; the reconfigure path (§4.1) does not re-bind, so the port is
+chosen once per boot.
+
+**Verified only in the sense that board #2's tunnel works with it.** Board #2
+is remote from the hub, so it never had the collision this fixes — the change
+is preventive there. **The fix is unproven against the fault it targets**,
+which needs board #1: it is co-sited with the hub and is still on the §3.9
+*workaround* (endpoint pointed at the hub's LAN address `192.168.0.161`
+instead of its public IP). The test is to put board #1 on `Pd1.1.12`, set the
+endpoint back to `85.206.57.75:51820`, restart, and see whether the hub learns
+`192.168.0.116:<ephemeral>` rather than its own endpoint. Until then to-do 6b
+is implemented but not validated.
+
+### 3.15 Hub-side counters still ungathered
+
+WGDashboard on `192.168.0.161:10086` answers `200` from the hub's LAN, but the
+`wg-dashboard-apikey` value is recorded nowhere in this repo, so the per-peer
+transfer counters of §3.8 could not be re-read this session. Not blocking —
+the board-side counters plus end-to-end traffic settle everything current —
+but the key is worth storing somewhere durable for the next investigation.
+
 ### 3.4 Access constraint
 
 Board #2 is currently unreachable: it is not on the LAN the laptop moved to,
@@ -569,11 +680,10 @@ before this was noticed. Sequential probes only.
 2. ~~Run the §3.3 test~~ — **done, see §3.5.** The board is exonerated; the
    loss is board → hub → peer, hub-side.
 
-**Board #2 still carries the §3.11 checksum bug** and is powered down. Its
-tunnel will handshake and carry nothing until it is flashed to `Pd1.1.8` — and
-because the fault is precisely what breaks remote access, that first flash
-**must happen from its own LAN**. Once on `1.1.8`, every later update can go
-over the tunnel, as board #1's did.
+2b. ~~**Board #2 carries the §3.11 checksum bug**~~ — **DONE 2026-08-18**,
+    flashed from its own LAN to `Pd1.1.12`, confirmed + golden, verified
+    remotely including a 367 KB OTA upload over the tunnel (§3.13). Nothing in
+    this project needs physical presence at the sodas site any more.
 3. Verify the §4.2 USB fix: Trice should decode over `/dev/ttyACM0` via
    `tools/usb_console.py`.
 
@@ -588,12 +698,15 @@ over the tunnel, as board #1's did.
 6. **MAC address from the device UID.** Still the CubeMX constant
    `00:80:E1:00:00:00` on every unit — harmless while the boards are on
    different LANs, fatal the moment two share one.
-6b. **Stop binding the board's WireGuard socket to 51820** (`wg_link.c:311`,
-    `WIREGUARDIF_DEFAULT_PORT`). A client has no reason to listen on the
-    server's port, and when board and hub share a site the learned endpoint
-    collides with the hub's own (§3.9 — cost a full debugging session).
-    `listen_port = 0` gives an ephemeral port and fixes it everywhere while
-    keeping the portable public endpoint.
+6b. ~~**Stop binding the board's WireGuard socket to 51820**~~ —
+    **IMPLEMENTED 2026-08-18** in `Pd1.1.12` (`listen_port = 0`, §3.14).
+    **Still needs validation against the fault it targets:** that requires
+    board #1 (co-sited with the hub, still on the §3.9 endpoint workaround) to
+    be put on `1.1.12` with its endpoint restored to the hub's *public* IP.
+    Do it from the hub's LAN, where recovery over `192.168.0.116` is certain.
+    **Deliberately not done 2026-08-18** — board #1 was working and was left
+    untouched by decision; board #2 was the priority. Nothing is blocked by
+    this, since board #2 is remote from the hub and cannot hit §3.9.
 7. **Second `AllowedIPs` range is implemented but untested.** Adding
    `192.168.0.0/24` should let a board reach site-LAN hosts directly; nothing
    has exercised it.
@@ -605,6 +718,9 @@ over the tunnel, as board #1's did.
    history and in every `.bin` ever built from it, and the 2026-08-17
    dashboard `.conf` **reused it** (§3.7). Fix: `POST /api/wg/keygen`, then
    paste the new public key into WGDashboard. Tunnel is down in between.
+9b. **Board #1 is one release behind** — `Pd1.1.11`, i.e. it lacks the §3.14
+    ephemeral-port fix and still depends on the §3.9 workaround. See 6b.
+
 10. **Board #1 HardFault on the shipped `Pd1.1.6`.** Crash log read
     2026-08-17: `pc 0804AF7E` → `vTaskDelay`, `lr 0804B23B` →
     `xTaskResumeAll`, `cfsr 0x00008200` (PRECISERR + BFARVALID),
@@ -618,6 +734,10 @@ over the tunnel, as board #1's did.
 **Hygiene**
 
 11. Commit the working tree, including the §4.5 compile fixes.
+11b. **Store the WGDashboard API key** somewhere durable (§3.15) — the
+     hub-side per-peer counters are the measurement that closed §3.8 and it
+     could not be repeated this session.
+
 12. `~/Downloads/*.conf` are mode `664` — world-readable files holding private
     keys. Move to `/etc/wireguard/` at `600`. This now includes
     `PeriphNet_namai.conf`, which holds the compromised `0DT2Rqlr…` key.

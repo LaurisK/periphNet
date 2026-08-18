@@ -308,7 +308,14 @@ int WgLink_Start(const sWgLinkCfg *cfg)
     ip4_addr_set_zero(&gateway);
 
     s_initData.private_key = s_privKeyB64;
-    s_initData.listen_port = WIREGUARDIF_DEFAULT_PORT;
+    /* Ephemeral source port, NOT WIREGUARDIF_DEFAULT_PORT.  A client has no
+     * reason to listen on the server's port, and binding to 51820 breaks any
+     * board sharing a site with the hub: the traffic hairpins through the site
+     * router, so the endpoint the hub learns is its own public IP:51820 and it
+     * sends every reply back into its own listening socket.  udp_bind() with
+     * port 0 picks a free port, which is indistinguishable from any other
+     * roaming client and keeps the portable public endpoint working. */
+    s_initData.listen_port = 0u;
     s_initData.bind_netif  = NULL;   /* follow the routing table */
 
     LOCK_TCPIP_CORE();
