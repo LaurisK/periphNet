@@ -15,6 +15,7 @@ memory map, HTTP API, task table, coding standards.
 | [pylontech_can_protocol.md](pylontech_can_protocol.md) | current | Pylontech CAN frame layout used by `App/Can/` |
 | [issue_idle_iwdg_crashloop.md](issue_idle_iwdg_crashloop.md) | current | Post-mortem: EthIf stack overflow → IWDG crash loop; includes the halt-during-hang debug recipe |
 | [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md) | direction | Bridge → edge controller (BMS + CAN), WAN access across NAT, RS485 bus budget, open questions |
+| [task_nv_db.md](task_nv_db.md) | direction | **`nvDb` — the application's only path to non-volatile storage.** Two rules: a client knows nothing it does not need, and nothing reaches flash except through `nvDb`. §1 is the whole pattern — clients and object classes (FW blobs, Modbus LUTs, parameters, time base), the bootloader/crash-handler exception contract, flash opacity, configurable layout, self-healing, deferred reclaim with a collector, wear measurement. §2 makes each checkable, §3 is the API. §4 storage is **provisional**; §6 is the migration list |
 | [issue_doc_code_inconsistencies.md](issue_doc_code_inconsistencies.md) | current | Doc/code audit of 2026-08-03 and what was corrected (references several docs since merged into `modbus.md`) |
 | [archive/](archive/) | historical | Early project/milestone plans, the pre-encryption FWU architecture, and the 2026-03 `architecture.dot` state diagram |
 
