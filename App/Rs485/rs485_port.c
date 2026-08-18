@@ -98,6 +98,10 @@ static inline void rs485_rx_enable(void)
  * nothing else.
  * -------------------------------------------------------------------------- */
 
+/* Minimum silence before addressing the next slave on the bus — see the note
+ * in rtu_submit().  Deliberately far above the 3.5-character spec minimum. */
+#define RS485_TURNAROUND_MS   20u
+
 static uint32_t frame_gap_ms(uint32_t baud)
 {
     /* 3.5 chars x 11 bits = 38.5 bit times, rounded up to whole ms; the
@@ -373,6 +377,20 @@ static int rtu_submit(void *ctx, const uint8_t *tx, uint16_t txLen,
     uint32_t timeout = (p->responseTimeout_ms == 0u) ? 1000u
                                                      : p->responseTimeout_ms;
     uint32_t gap     = frame_gap_ms(baud);
+
+    /* The 3.5-character gap is the Modbus RTU minimum, not what a real slave
+     * needs to turn around.  Measured on board #2 (2026-08-18) with two JK
+     * PB-series BMS on one bus: whichever device was addressed IMMEDIATELY
+     * after another device's successful reply never answered, in both poll
+     * orders, while either unit polled alone answered every time.  Splitting
+     * them into plans with coprime periods made both read, and the only
+     * failures left were the laps where the two periods coincided.  So the
+     * fault is back-to-back transactions, not addressing or hardware.
+     * RS485_TURNAROUND_MS is the recovery silence that buys; it costs one
+     * delay per transaction and nothing else. */
+    if (gap < RS485_TURNAROUND_MS) {
+        gap = RS485_TURNAROUND_MS;
+    }
 
     if (configure_line(baud, p->format) != 0) {
         Modbus_PortDone(mbPort_rs485, mbPortDone_txFailed, 0);

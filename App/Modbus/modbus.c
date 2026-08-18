@@ -1347,7 +1347,7 @@ void Modbus_LogStatus(void)
 void Modbus_SetMonitor(int enable)
 {
     ModbusPort_SetMonitor(enable);
-    TRice("Modbus monitor: %s\n", enable ? "on" : "off");
+    TRiceS("Modbus monitor: %s\n", enable ? "on" : "off");
 }
 
 int Modbus_GetMonitor(void)

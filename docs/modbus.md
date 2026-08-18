@@ -2343,6 +2343,170 @@ from. That is the consumer's bug to find, and the instrument is
 
 ---
 
+## 11a. First real-hardware bring-up — two JK BMS (2026-08-18)
+
+Board #2 ("sodas"), two JK `JK-PB2A16S30P` on one RS485 bus, driven entirely
+over the WireGuard tunnel (`/api/modbus/config/*`, `/api/modbus/dump/on`,
+Trice UDP). Three separate faults, none of them where they first appeared.
+
+### 11a.1 Back-to-back transactions: the second slave never answers
+
+**The finding that matters, and it was invisible until two slaves were real.**
+With both devices in one plan, whichever was addressed IMMEDIATELY after
+another device's *successful* reply never answered — 100 % timeout
+(`mbErr_timeout`). Proven not to be device-, address- or hardware-specific:
+
+| Test | Result |
+|---|---|
+| slave 2 first, slave 15 second | slave 2 ✅ 8/8, slave 15 ❌ 0/8 |
+| **order swapped** — 15 first, 2 second | slave 15 ✅ 8/8, slave 2 ❌ 0/8 |
+| either unit polled **alone** | ✅ every time |
+| separate plans, coprime periods 5 s / 7 s | both ✅, and the *only* failures were the laps where the periods coincided |
+
+The mirror image under swap is what settles it: the failing device is the
+*second one in the sequence*, not a particular slave.
+
+Why it hid for so long: a **timeout is itself a gap**. Both boards had one
+real BMS and one empty address, so every real transaction was preceded by a
+~1 s silence and always worked. Board #1's "bms2 fails" was read as a missing
+slave — correct there, but it is the same log line this bug produces.
+
+**Cause:** `rs485_port.c` waited `frame_gap_ms()` before transmitting — the
+Modbus RTU 3.5-character minimum, which is ~0.3 ms at 115200 and floored to
+2 ms. That is the spec's framing rule, not the recovery time a real slave
+needs. **Fix (`Pd1.1.13`):** `RS485_TURNAROUND_MS` = 20 ms floor on that
+pre-transmit silence. Verified back-to-back in one plan: **70 reads each,
+0 failures, both devices.**
+
+### 11a.2 The JK register addresses in the shipped config were wrong
+
+The config in use on both boards pointed into the **cell-wire-resistance
+array** instead of the pack summary fields. It failed silently — plausible
+numbers, wrong meaning:
+
+| Config point | Actually read | Symptom |
+|---|---|---|
+| `pack_voltage` @4736 | `CellWireRes27` | 0.000 |
+| `pack_current` @4744 | `CellWireRes31` | 0.235 "A" = 235 mΩ |
+| `soc` @4750 | inside `CellWireResSta` | 0 |
+| `mos_temp` @4726 | `CellWireRes22` | 0.0 |
+| `remaining_capacity` @4752 | **`BatVol`** | "51.256 Ah" was **51.256 V** |
+
+Authority is `JK-PB-series_BMS-RS485-Modbus-V1.1.pdf` (register map, block
+base `0x1200`), not the decompiled docs — those carry the addressing model but
+not this block's map. Corrected byte addresses:
+
+| Field | Addr | Type | Unit |
+|---|---|---|---|
+| `TempMos` | 4746 `0x128A` | s16 | 0.1 °C |
+| `BatVol` | 4752 `0x1290` | u32 | mV |
+| `BatWatt` | 4756 `0x1294` | u32 | mW |
+| `BatCurrent` | 4760 `0x1298` | s32 | mA |
+| `TempBat1/2` | 4764 / 4766 | s16 | 0.1 °C |
+| alarms | 4768 `0x12A0` | u32 | bitfield |
+| `BalanCurrent` | 4772 `0x12A4` | s16 | mA |
+| `BalanSta`+`SOC` | 4774 `0x12A6` | **two u8** | hi = state, lo = SOC % |
+| `SOCCapRemain` | 4776 `0x12A8` | s32 | mAh |
+| `SOCFullChargeCap` | 4780 `0x12AC` | u32 | mAh |
+| `SOCCycleCount` | 4784 `0x12B0` | u32 | |
+| `SOH`+`Precharge` | 4792 `0x12B8` | **two u8** | hi = SOH % |
+| `RunTime` | 4796 `0x12BC` | u32 | s |
+
+Confirmed by cross-check, not by hope: `BatWatt` = `BatVol` × `BatCurrent`
+(50.607 V × 102.624 A = 5193 W, read 5193.483), and the SOC byte matches
+`CapRemain / FullChargeCap` (17 % vs 98.673 / 594.738).
+
+**Gap this exposes: there is no `u8` decode type.** JK packs `SOC` and `SOH`
+each as one byte of a two-byte field, so neither can be expressed. They are
+currently read as u16 (`balsta_soc`, `soh_precharge`) and split by the
+consumer — `SOC = value & 0xFF`, `SOH = value >> 8`. `mbDecode_u8Hi` /
+`mbDecode_u8Lo` would fix it; the enum is append-only, so this is additive.
+
+### 11a.3 The writable points aimed at the wrong settings — dangerous
+
+Same class of error in the settings block (base `0x1000`), but these are
+`access: "rw"`:
+
+| Config point | Range | Actually | |
+|---|---|---|---|
+| `cell_ovp` @4096 | 2500–4300 | `VolSmartSleep` | sleep voltage |
+| `cell_ovp_recover` @4100 | 2500–4300 | **`VolCellUV`** | UV protection, would be set to 4.3 V |
+| `cell_uvp` @4108 | 2000–3500 | **`VolCellOV`** | OV protection, would be set to 2.0 V |
+
+Writing either of the last two would mis-set a **protection threshold** on a
+live pack, and the BMS accepts it silently — exactly the "wrong-but-aligned
+write" hazard §7 warns about. Correct: `VolCellUV` 4100, `VolCellUVPR` 4104,
+`VolCellOV` 4108, `VolCellOVPR` 4112. **The rw points are omitted from the
+corrected config** — monitoring needs none of them, and nothing should carry
+these addresses again until a write is actually wanted.
+
+### 11a.4 Device servicing is not fair under timeout load
+
+With 8 devices configured and 7 of them dead, devices 4–7 were **never
+attempted** in a 45 s window while devices 0–3 were serviced 5 times each.
+The same slaves, configured as the only four, were attempted normally. So
+later devices starve when earlier ones burn the lap on timeouts. Not
+diagnosed further — with the §11a.1 fix and two live devices it does not bite,
+and `ModbusEngine_LogStatus()`'s `missed` / `dropped` counters are the
+instrument if it ever does. They are CLI-only; there is no HTTP route for
+them, which is why this was measured by absence rather than read off a counter.
+
+### 11a.5 Corrected config deployed to both boards, with access rights
+
+`Pd1.1.13` + a rebuilt `jk_pb` capability are on **both** boards. 38 points:
+**21 read-only, 17 `rw`**, and the R/RW split now follows the PDF rather than
+being decorative — the whole realtime block (`0x1200`) and device-info block
+(`0x1400`) are read-only, and only settings-block (`0x1000`) parameters carry
+`access: "rw"`.
+
+Two settings registers are deliberately **read-only despite being RW in the
+PDF**, because writing them loses the device or corrupts the pack model:
+`DevAddr` (4360) and `CellCount` (4204).
+
+**The read-back is the proof, and it is unambiguous:** each BMS reports its
+own Modbus address at 4360 — board #1 `device_address = 1`, board #2
+`device_address = 2` and `= 15` — exactly where the scan found them. A wrong
+base would not produce three self-consistent answers. `CellCount` reads 16 on
+all three, and `design_capacity` (4220) matches `SOCFullChargeCap` from the
+*other* block (bms15: 300.000 = 300.000; bms1: 261.000 = 261.000).
+
+Settings read back as coherent LiFePO4, correctly ordered
+(`uvp < uvp_recover < float < charge`), which the old addresses never did:
+
+| | board #1 `bms1` | board #2 `bms2` | board #2 `bms15` |
+|---|---|---|---|
+| `cell_uvp` / recover | 2.750 / 3.000 V | 2.500 / 2.900 V | 2.500 / 2.900 V |
+| `cell_ovp` / recover | 3.550 / 3.450 V | 3.500 / 3.400 V | 3.650 / 3.400 V |
+| `charge` / `float` | 3.500 / 3.350 V | 3.450 / 3.350 V | 3.450 / 3.350 V |
+| chg / dsg current max | 150 / 150 A | 300 / 300 A | 300 / 300 A |
+| `design_capacity` | 261.000 Ah | 660.000 Ah | 300.000 Ah |
+| model | `JK_PB2A16S15P` sw 19.04 | `JK-PB2A16S30P` sw 19.30 | `JK-PB2A16S30P` sw 19.30 |
+
+Configs live in `configs/` (`jk_pb_board1_slave1.json`,
+`jk_pb_board2_slaves2and15.json`, generated by `configs/gen_jk_config.py` —
+edit the generator, not the JSON, since the two differ only in the device
+list).
+
+**§11a.1 also bites a single-device board.** Board #1 has one BMS, but three
+plans, so its reads are still back-to-back: on `Pd1.1.11` it dropped 3 of its
+transactions in 45 s, and the `pack_settings` read failed and then would not
+retry for an hour. On `Pd1.1.13`: **80 reads, 0 failures.** Board #2 with two
+devices in one plan: **60 reads each, 0 failures.** So the turnaround fix is
+not a two-device workaround — any config with more than one transaction per
+lap needs it.
+
+### 11a.6 Bus inventory
+
+Scanned slaves 1–16 on both boards (in batches, since `MB_MAX_DEVICES` is 8).
+Board #2 has exactly **two** BMS, at addresses **2 and 15** — not 1 and 2.
+Board #1 has exactly **one**, at address 1; 2–16 are silent.
+
+Board #1 was re-scanned deliberately, because §11a.1 means a second BMS there
+*would have been invisible*: its slave 1 answers first, so anything polled
+after it would time out and read as absent. Scanning with slave 1 excluded —
+so every candidate is preceded by a timeout, i.e. a gap — found nothing. The
+one-BMS conclusion for board #1 is therefore a measurement, not an assumption.
+
 ## 12. Undesigned
 
 Named deliberately, with the constraint any answer must satisfy.
