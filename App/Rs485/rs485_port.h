@@ -16,11 +16,11 @@
  * the line knows — DE turnaround, the inter-frame gap, end-of-frame silence,
  * and the UART itself.
  *
- * Still COMPLETES INLINE: submit blocks and calls Modbus_PortDone before it
- * returns.  That is what "the RS485 driver first, behind the existing
- * synchronous engine" means at §10 step 8 — the contract is proven before
- * anything depends on its asynchrony.  Step 10 makes it a DMA driver
- * completing from an ISR, and NOTHING ABOVE IT CHANGES.
+ * COMPLETES FROM AN ISR (§10 step 10, done).  submit sends over DMA and
+ * returns; the reply is received by DMA and ended by the USART's own IDLE
+ * line, so the 3.5-character silence is detected in hardware and nothing
+ * above this file changed to make that true — which was the claim the port
+ * contract was making all along.
  */
 
 #ifndef RS485_PORT_H_
@@ -38,5 +38,15 @@
  * @return 0, or -1 if the slot refused the registration
  */
 int MbRtu_Register(void);
+
+/**
+ * @brief  The transmitted frame has fully left the wire.
+ *
+ *         Called from HAL_UART_TxCpltCallback, which Core/Src/usart.c owns
+ *         because trice claimed it for USART3 first — one global HAL callback,
+ *         so the dispatch by instance lives there and the work lives here.
+ *         ISR context: it drops DE and starts the DMA receive.
+ */
+void MbRtu_TxCompleteFromIsr(void);
 
 #endif /* RS485_PORT_H_ */

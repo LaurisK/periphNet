@@ -1227,7 +1227,14 @@ int Modbus_ConfigErase(void)
     int a = MbCfgStore_EraseRegion(MbCfgStore_ActiveBase());
     int b = MbCfgStore_EraseRegion(MbCfgStore_InactiveBase());
 
-    return (a == 0 && b == 0) ? 0 : mbErr_config;
+    /* Disarming is part of erasing, not a courtesy.  A swap armed against the
+     * region just erased can never be committed (the engine requires a valid
+     * inactive region) and can never be cleared, while the flag itself refuses
+     * every subsequent compile — an erase would otherwise leave the config
+     * plane permanently locked out, in flash, across reboots. */
+    int c = MbCfgStore_IsSwapPending() ? MbCfgStore_ClearSwapPending() : 0;
+
+    return (a == 0 && b == 0 && c == 0) ? 0 : mbErr_config;
 }
 
 int Modbus_ConfigVerify(fModbusByteSource src, void *srcCtx,

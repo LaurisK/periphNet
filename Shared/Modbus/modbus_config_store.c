@@ -200,6 +200,20 @@ int MbCfgStore_CommitSwap(void)
     return 0;
 }
 
+int MbCfgStore_ClearSwapPending(void)
+{
+    sMbSelector sel;
+
+    memset(&sel, 0, sizeof(sel));
+    sel.magic        = MODBUS_SEL_MAGIC;
+    sel.version      = MODBUS_SEL_VERSION;
+    sel.activeRegion = s_activeRegion;   /* disarm only — no flip */
+    sel.header_crc32 = sel_header_crc(&sel);
+    sel.flags.word   = 0xFFFFFFFFu;      /* pending discarded */
+
+    return sel_write(&sel);
+}
+
 /* ==========================================================================
  * Region erase — "invalid is erased, not repaired" (docs/modbus.md §4.2)
  * ========================================================================== */

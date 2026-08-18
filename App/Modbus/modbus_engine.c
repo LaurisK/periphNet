@@ -467,7 +467,17 @@ static void engine_task(void *arg)
         /* A config swap is committed here, on the task that walks the config,
          * so a reader can never race one. */
         if (MbCfgStore_IsSwapPending() &&
-            MbCfgStore_RegionValid(MbCfgStore_InactiveBase())) {
+            !MbCfgStore_RegionValid(MbCfgStore_InactiveBase())) {
+            /* Armed with nothing to swap to: unreachable by design (arming
+             * checks the region), so getting here means the region was
+             * invalidated afterwards.  Left alone the flag is never consumed
+             * AND refuses every compile, which locks the config plane out for
+             * good — so discard it rather than wait for a commit that cannot
+             * come.  Recovers a board already wedged in flash. */
+            if (MbCfgStore_ClearSwapPending() == 0) {
+                TRice("Modbus: stale config swap discarded\n");
+            }
+        } else if (MbCfgStore_IsSwapPending()) {
             if (MbCfgStore_CommitSwap() == 0) {
                 sModbusConfigCounts counts;
 

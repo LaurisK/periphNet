@@ -21,6 +21,7 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
+#include "App/Rs485/rs485_port.h"
 #include "App/Log/trice_consumer.h"
 /* USER CODE END 0 */
 
@@ -323,6 +324,12 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART3) {
         TriceConsumer_Done(TRICE_CONSUMER_UART);
+    } else if (huart->Instance == USART2) {
+        /* RS485: TC has fired, so the last stop bit is on the wire and
+         * DE can drop.  The driver owns what happens next; this is only
+         * the dispatch, because HAL_UART_TxCpltCallback is one global
+         * callback for every UART and trice claimed it first. */
+        MbRtu_TxCompleteFromIsr();
     }
 }
 

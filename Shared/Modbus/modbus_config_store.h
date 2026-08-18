@@ -83,6 +83,18 @@ bool     MbCfgStore_IsSwapPending(void);
  * Called by the engine at a safe point only. Never erases LUT regions. */
 int      MbCfgStore_CommitSwap(void);
 
+/* Disarm a pending swap WITHOUT flipping the active region (sector
+ * erase+rewrite, same cost as a commit).
+ *
+ * The invariant the engine relies on is "pending implies something valid to
+ * swap to": it commits only when the inactive region validates, so a pending
+ * flag left armed over an invalid region is never consumed and never clears.
+ * Because the flag also refuses every compile, that state is a permanent
+ * lockout of the config plane, persisted in flash across reboots.  Erasing a
+ * region while a swap is armed is exactly how a board gets there, so whoever
+ * invalidates the inactive region must disarm the flag in the same breath. */
+int      MbCfgStore_ClearSwapPending(void);
+
 /* ==========================================================================
  * Record cursor — sequential walk of a region's record stream
  *

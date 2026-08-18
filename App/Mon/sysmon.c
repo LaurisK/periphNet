@@ -285,7 +285,16 @@ static void sample(uint32_t now_ms)
 
         /* Liveness.  Only a registered task with a deadline can go stale;
          * everything else is reported but never judged. */
-        slot->sinceCheckin_ms = now_ms - slot->lastCheckin_ms;
+        /* Signed difference, not a bare unsigned subtract.  now_ms is
+         * sampled once before this walk, but a HIGHER-PRIORITY task
+         * preempts it mid-walk and checks in.  Trice at priority 25,
+         * checking in every 10 ms, against defaultTask at 24 is exactly
+         * that race: its lastCheckin_ms then sits AHEAD of now_ms, the
+         * unsigned wrap produced ~4294967294 ms, and that tripped the
+         * deadline and reported a healthy task as stalled.  The signed
+         * form is also correct across the 49.7-day tick wrap. */
+        int32_t age_ms = (int32_t)(now_ms - slot->lastCheckin_ms);
+        slot->sinceCheckin_ms = (age_ms > 0) ? (uint32_t)age_ms : 0u;
         if (slot->hasCheckin && slot->deadline_ms != 0u) {
             if (slot->sinceCheckin_ms > slot->deadline_ms) {
                 staleCnt++;

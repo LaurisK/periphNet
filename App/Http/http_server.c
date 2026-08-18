@@ -24,6 +24,7 @@
 #include "usbd_cdc_if.h"
 #include "usbd_cdc.h"
 #include "App/Modbus/modbus.h"
+#include "App/Modbus/modbus_trice_sink.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -973,6 +974,41 @@ static void handle_system_reset_peaks(struct netconn *conn)
 }
 
 /* --------------------------------------------------------------------------
+ * Modbus observation (/api/modbus/dump, /api/modbus/monitor)
+ *
+ * Same reason the wg endpoints exist: these toggles were reachable only from
+ * the `modbus` CLI, i.e. only over USB CDC / UART1, i.e. only with physical
+ * access -- which is exactly what the tunnel removes the need for.
+ *
+ * The dump toggle is not merely a log level.  It is a SUBSCRIPTION, and in
+ * this module a subscription is what creates the per-device timers, so
+ * turning it on is what puts frames on the wire at all.  A provisioned board
+ * with no subscriber polls nothing by design, per docs/modbus.md 4.2 and 5.2.
+ * That makes this the remote form of "is the slave actually there?": the sink
+ * logs a decoded value per point when one answers and a failed-txn line when
+ * one does not.
+ * -------------------------------------------------------------------------- */
+
+static void handle_modbus_dump(struct netconn *conn, int enable)
+{
+    ModbusTriceSink_Set(enable);
+
+    /* Report what the module ended up at, not what was asked for: a subscribe
+     * can fail on a full table, and the sink logs that but still returns. */
+    snprintf(resp_buf, sizeof(resp_buf), "{\"dump\":%s}",
+             ModbusTriceSink_Get() ? "true" : "false");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+static void handle_modbus_monitor(struct netconn *conn, int enable)
+{
+    Modbus_SetMonitor(enable);
+    snprintf(resp_buf, sizeof(resp_buf), "{\"monitor\":%s}",
+             Modbus_GetMonitor() ? "true" : "false");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* --------------------------------------------------------------------------
  * Modbus config endpoints (/api/modbus/config/*) — upload compiles JSON
  * straight into the inactive LUT region (compile = validation, design §4/§9);
  * apply arms the swap flag and the walker commits at a lap boundary.
@@ -1906,6 +1942,14 @@ static void handle_connection(struct netconn *conn)
         handle_system_status(conn);
     } else if (route_is("POST /api/system/reset-peaks")) {
         handle_system_reset_peaks(conn);
+    } else if (route_is("POST /api/modbus/dump/on")) {
+        handle_modbus_dump(conn, 1);
+    } else if (route_is("POST /api/modbus/dump/off")) {
+        handle_modbus_dump(conn, 0);
+    } else if (route_is("POST /api/modbus/monitor/on")) {
+        handle_modbus_monitor(conn, 1);
+    } else if (route_is("POST /api/modbus/monitor/off")) {
+        handle_modbus_monitor(conn, 0);
     } else if (route_is("POST /api/modbus/config/upload")) {
         handle_modbus_cfg_upload(conn, &stream);
     } else if (route_is("POST /api/modbus/config/verify")) {

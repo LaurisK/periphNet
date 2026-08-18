@@ -331,6 +331,41 @@ static void test_swap_lifecycle(void)
     TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR);
 }
 
+/* The erase-while-armed lockout, observed on a live board: the config plane
+ * refused every upload with "busy" and no reboot cleared it.  Arming checks
+ * the inactive region, but nothing kept it valid afterwards — and the engine
+ * only ever consumes the flag by committing, which an invalid region forbids.
+ * The flag is in flash, so the board stays unprovisionable for good. */
+static void test_erase_disarms_pending_swap(void)
+{
+    sTestStream s;
+
+    mock_flash_reset();
+    TEST_ASSERT(MbCfgStore_Init() == 0);
+    ts_build_worked_example(&s);
+    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_B_ADDR);
+
+    /* Arm a swap, then invalidate the region it is armed against */
+    TEST_ASSERT(MbCfgStore_SetSwapPending() == 0);
+    TEST_ASSERT(MbCfgStore_IsSwapPending());
+    TEST_ASSERT(MbCfgStore_EraseRegion(MbCfgStore_InactiveBase()) == 0);
+    TEST_ASSERT(!MbCfgStore_RegionValid(MbCfgStore_InactiveBase()));
+
+    /* Whoever invalidated the region must disarm in the same breath */
+    TEST_ASSERT(MbCfgStore_ClearSwapPending() == 0);
+    TEST_ASSERT(!MbCfgStore_IsSwapPending());
+
+    /* Disarm is not a commit: the active region must not have moved */
+    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+
+    /* And the board comes back up provisioned, not wedged */
+    TEST_ASSERT(MbCfgStore_Init() == 0);
+    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+    TEST_ASSERT(!MbCfgStore_IsSwapPending());
+    TEST_ASSERT(MbCfgStore_RegionValid(MbCfgStore_ActiveBase()));
+}
+
 static void test_selector_recovery_prefers_valid_region(void)
 {
     sTestStream s;
@@ -364,6 +399,7 @@ int main(void)
     RUN_TEST(test_resolve_point_by_ordinal);
     RUN_TEST(test_plan_headers_with_a_gap);
     RUN_TEST(test_swap_lifecycle);
+    RUN_TEST(test_erase_disarms_pending_swap);
     RUN_TEST(test_selector_recovery_prefers_valid_region);
     return test_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
