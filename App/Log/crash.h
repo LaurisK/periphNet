@@ -19,7 +19,13 @@
 
 #define CRASH_LOG_MAGIC         0x43525348u   /* "CRSH" */
 #define CRASH_LOG_MAX_BT_DEPTH  8
-#define CRASH_LOG_MAX_TASKS     8
+#define CRASH_LOG_MAX_SCAN      16   /* persisted LR candidates */
+/* MUST be >= the number of FreeRTOS tasks.  uxTaskGetSystemState() returns
+ * ZERO when the array it is handed is too small, so an undersized value does
+ * not truncate the snapshot -- it silently discards all of it.  That is how
+ * this log lost its whole task section: the system grew past 8 tasks (11 as
+ * of Pd1.1.14) and nothing said so.  Keep it ahead of the task count. */
+#define CRASH_LOG_MAX_TASKS     16
 
 /**
  * @brief Crash / fault type identifiers
@@ -65,6 +71,16 @@ typedef struct {
     uint32_t    cfsr, hfsr, mmfar, bfar;
     /* Backtrace */
     uint32_t    bt_addr[CRASH_LOG_MAX_BT_DEPTH];
+    /* Callee-saved registers of the FAULTING context, captured by
+     * Crash_CaptureEntry() before any C code could disturb them.  r4_r11[3]
+     * is R7 = the frame pointer the unwinder needs. */
+    uint32_t    r4_r11[8];
+    /* Return-address candidates scanned out of the faulting stack — a call
+     * path that does NOT depend on an intact frame chain (see crash.c). */
+    uint32_t    scan_lr[CRASH_LOG_MAX_SCAN];
+    uint8_t     scan_count;
+    uint8_t     frame_on_msp;   /* 1 = fault taken in handler mode          */
+    uint8_t     reserved2[2];
     /* Task name (for watchdog) */
     char        task_name[16];
     /* Task snapshots */
@@ -77,6 +93,21 @@ typedef struct {
  * @brief Generate crash report (Trice output) and save to flash
  * @param type  Crash type (affects header message)
  */
+/**
+ * @brief Latch the faulting context's callee-saved registers and both stack
+ *        pointers.
+ *
+ * MUST be the FIRST statement of a fault handler.  On exception entry the core
+ * stacks only R0-R3, R12, LR, PC and xPSR — R4-R11 are callee-saved and still
+ * hold the faulting context's values, so they are recoverable only before C
+ * code reuses them.  R7 among them is the frame pointer, without which the
+ * unwinder can produce nothing past pc/lr for the frame that actually crashed.
+ *
+ * Naked: no prologue may run ahead of the capture.  Clobbers only r0/r1, which
+ * AAPCS already lets a callee destroy.
+ */
+void Crash_CaptureEntry(void);
+
 void Crash_GenerateReport(eCrashType type);
 
 /**

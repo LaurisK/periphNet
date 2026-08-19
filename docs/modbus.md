@@ -2495,7 +2495,178 @@ devices in one plan: **60 reads each, 0 failures.** So the turnaround fix is
 not a two-device workaround — any config with more than one transaction per
 lap needs it.
 
-### 11a.6 Bus inventory
+### 11a.7 Fat time tables are SILENTLY truncated
+
+Reading all 87 registers exposed this. An 87-point config split into three fat
+time tables returned **65–77 of 87 points, with ZERO failed transactions** —
+the missing ones always the *tail of that table's address range*
+(`dsg_otp`…`balance_start_voltage`, `temp_bat3/4/5`, `cell_minmax_nbr`).
+Re-chunked to **8 points per table** the same 87 points return **87/87 on all
+three BMS**, still zero failures.
+
+The engine derives one read set per (device, plan, table) into a fixed working
+array of `MB_MAX_TT_ENTRIES_PER_TABLE` (64) and clamps to it in two places
+without recording anything:
+
+- `modbus_engine.c:249` — `take = (tt.entryCount > MAX) ? MAX : tt.entryCount`
+- `modbus_engine.c:385` — `spanCount < MB_MAX_TT_ENTRIES_PER_TABLE` guards the
+  span-append loop, so surplus points are dropped on the floor
+
+**This is the worst failure mode a telemetry path can have**: a consumer sees a
+smaller register set and no indication anything was lost. `/api/modbus/config/*`
+happily reports `points: 87`, every transaction succeeds, and the values simply
+never arrive. Note the observed cut is well below 64 entries, so the effective
+limit is whatever the derivation produces, not the constant — chunk small and
+verify by counting distinct points, do not reason from the constant.
+
+`configs/gen_jk_config.py` therefore chunks every table to
+`MAX_PTS_PER_TABLE = 8`. It should be a compile-time rejection instead: the
+compiler knows `entryCount` and could refuse rather than let the engine drop.
+
+### 11a.8 A config swap can leave a subscribed device with no armed timers
+
+After uploading + applying a config while the Trice sink was already
+subscribed, board #1 went completely silent: no transactions, no failures,
+`modbus` task alive and checking in (12438 check-ins, not stale), `port_up:
+true` and **`polled: true`** — but nothing on the wire for minutes.
+
+`POST /api/modbus/dump/off` then `/on` restored it instantly (223 dump lines in
+45 s). The sink's `Set(1)` returns early when `s_handle >= 0`, so re-issuing
+`/on` alone is NOT enough — the subscription has to be dropped and retaken to
+re-arm timers against the new config.
+
+**`polled: true` is therefore not evidence that polling happens.** It survived
+across the whole silent period. Until this is fixed, treat *cycle the
+subscription after every apply* as part of the apply procedure.
+
+### 11a.9 Correction: six realtime addresses were mis-added by hand
+
+Recorded because the symptom was mild enough to have shipped: in the first
+"read everything" pass, `pack_voltage_alt`, `heat_current`, `sys_run_ticks` and
+`temp_bat3/4/5` were computed with the wrong base+offset sums (e.g. `temp_bat3`
+= 4864 instead of `0x1200 + 0x00F8` = 4856). They produced *plausible-looking*
+output: `temp_bat3` read **319.2 °C** on one unit and `heat_current` read an
+identical **0.257 A** on all three — a constant across three devices being the
+tell.
+
+Fixed, and the generator now writes these as `RT+0x00F8` rather than a
+pre-computed decimal, so an address can be checked against the PDF by eye.
+Verified after the fix: `pack_voltage_alt` 52.50 V against `pack_voltage`
+52.502 V (the same quantity from a different register), `temp_bat3` 22.6 °C
+alongside `temp_bat1/2` 19.0/20.8, `heat_current` 0.000 A.
+
+**The cross-check is the method, not the map.** Every field that could be
+verified against another was: cell voltages sum to `pack_voltage` within 1 mV
+on all three units, the BMS's own `cell_vol_diff_max` equals the computed
+spread (3 / 21 / 6 mV), `BatWatt` equals `BatVol × BatCurrent`, the SOC byte
+equals `CapRemain / FullChargeCap`, and `design_capacity` equals
+`SOCFullChargeCap` from a different block.
+
+### 11a.10 Fleet comparison, 3 BMS, 2026-08-18
+
+Full 87-point readout in `configs/readout_2026-08-18.tsv`. What matters:
+
+**Within board #2's parallel pair — these two share a bus and a DC bus, so a
+mismatch is a real finding, not a preference:**
+
+| | `bms2` (slave 2) | `bms15` (slave 15) |
+|---|---|---|
+| **`cell_ovp`** | **3.500 V** | **3.650 V** |
+| `design_capacity` | 660.000 Ah | 300.000 Ah |
+| `full_capacity` (learned) | 594.738 Ah | 300.000 Ah |
+| SOC / SOH | 7 % / 90 % | 1 % / 100 % |
+| `cycle_capacity` | 17287 Ah | 7693 Ah |
+
+`cell_ovp` differing by **150 mV** between two packs on one DC bus means the
+lower-set pack (`bms2`) trips overvoltage first and stops accepting charge
+while its partner keeps going. Everything else in the protection table matches
+between them, which is what makes this one look like an oversight rather than
+intent.
+
+The SOC disagreement is the second thing to look at: `bms15` reports **1 %**
+while sitting at 3.201 V/cell average — mid-range for LiFePO4, not empty. Its
+`remaining_capacity` (2.998 Ah of 300) disagrees with its own cell voltages,
+so its coulomb counter has drifted. `bms2` reports 7 % at 3.200 V/cell with a
+`full_capacity` of 594.738 Ah against a 660 Ah design — also drifted, and its
+SOH has dropped to 90 %.
+
+**Board #1 vs board #2** — different model, so most differences are expected:
+`JK_PB2A16S15P` sw 19.04 at 150 A limits vs `JK-PB2A16S30P` sw 19.30 at 300 A.
+Worth noting anyway: board #1 runs a **tighter** protection window
+(`cell_uvp` 2.750 vs 2.500 V, `cell_ovp` 3.550, `charge_voltage` 3.500 vs
+3.450), `balance_start_voltage` 3.450 vs 3.000 V, `scp_recover` 30 vs 5 s, and
+`feature_flags` `0x3210` vs `0x0010` — bit 9 `ChargingFloatMode` is **on** for
+board #1 and off for both board #2 packs (bits 12–13 are set on board #1 and
+are undocumented in the PDF, which stops at BIT9).
+
+Both board #2 packs raise **alarm bit 19** = *"Modify PWD. in time"*, a
+password-nag, not a fault. Board #1 is clear. Cell balance is healthy
+everywhere (3 / 21 / 6 mV spread, all 16 cells present on all three).
+
+### 11a.12 Write API — `POST /api/modbus/write` (`Pd1.1.14`)
+
+The module could always write: `Modbus_Request` writes when the point is `w`
+or `rw`, enforces the authored bounds and reads `rw` back. What was missing
+was any way in — no HTTP route, and the CLI deliberately has no raw write.
+
+**The route's own job is refusal.** The module's contract is that THE CONFIG
+decides what an item means, so submitting a read-only point *reads* it and
+ignores the value. A route called `/write` that passed that through would
+report a successful read as a successful write. It therefore validates every
+item first and 422s a non-writable point **by name**, and only then submits —
+a batch that will be refused puts nothing on the wire.
+
+That validation needed `Modbus_PointInfo(devOrd, ptOrd, sModbusPointMeta *)`,
+added for it. The catalogue's `sModbusPointDesc` is borrowed and dies with the
+callback, so it cannot answer "may I write this?" for a non-subscriber; the new
+call **copies**, name included. Like every lookup here it is a flash walk.
+
+**Values are scaled integers**, the same domain as `writeMin`/`writeMax` and
+samples — `cell_ovp` is `3550`, not `3.550`. No float is parsed anywhere on
+this path: a threshold that silently became 3.549 V through a decimal round
+trip is precisely the failure a protection-parameter endpoint may not have.
+Bounds are NOT re-checked in HTTP — the module owns that rule (§4.6) and a
+second copy would drift.
+
+| Case | Answer |
+|---|---|
+| read-only point | `422` `{"error":"point is read-only","id":84,"name":"device_address"}` |
+| no such point/device | `422 {"error":"no such point"}` |
+| value outside bounds | `200`, item `result: -13` (`mbErr_outOfRange`) — no frame formed |
+| slave silent | `200`, item `result: -4` (`mbErr_timeout`) |
+| >16 items / bad shape | `422` |
+| FIFO full | `409` |
+
+Per-item results ride a **200** because the batch contract is per item — every
+item is attempted and each gets its own verdict. **A caller that checks only
+the HTTP status will miss a rejected write.**
+
+**Verified on hardware (board #2, `JK-PB2A16S30P` sw 19.30):** the decisive
+test is one ordered batch that changes a register and puts it back —
+`cell_ovp_recover` `3400 → 3410 → 3400`, both items `result: 0` with
+read-backs of 3410 then 3400. An idempotent write cannot distinguish writing
+from reading; this can. (Chosen because the pack sat at 3.20 V/cell, ~200 mV
+below that threshold, and the value is restored inside the same request.)
+
+The addressing is confirmed correct by `JK_BMS/FW/decompiled/`: the FC10
+whitelist dumped from the firmware is **block base + BYTE offset**, which is
+exactly the authored read address PeriphNet writes to — the settings u32
+fields are whitelisted 4 apart, each expecting 2 registers, so `cell_ovp` at
+`0x100C` with a u32 matches exactly. Note the whitelist is *exact-match*: an
+address or quantity that is not in it is refused.
+
+**OPEN: board #1's BMS does not answer FC 0x10.** `JK_PB2A16S15P` **sw 19.04**
+returns nothing at all to a write — not an Illegal Data Address exception,
+silence — while the same board reads 181/181 points with zero failures and an
+otherwise idle bus. So it is not the §11a.1 turnaround and not a dead bus.
+Leads, in the decompiled docs and not chased: the `0x1620` **SessionKeepAlive
+write-unlock heartbeat** the vendor app sends every ~800 ms, which "other
+Settings/Command writes are believed to depend on", and a possible whitelist
+difference in the older image. **Writes are therefore proven on sw 19.30 and
+unavailable on sw 19.04** until that is understood — do not assume a write
+took because the API returned 200; the `result` says `-4` when it did not.
+
+### 11a.11 Bus inventory
 
 Scanned slaves 1–16 on both boards (in batches, since `MB_MAX_DEVICES` is 8).
 Board #2 has exactly **two** BMS, at addresses **2 and 15** — not 1 and 2.

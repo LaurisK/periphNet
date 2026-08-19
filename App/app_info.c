@@ -10,7 +10,7 @@
 #define APP_FW_TARGET       fwTarget_dev
 #define APP_FW_MAJOR        1
 #define APP_FW_MINOR        1
-#define APP_FW_PATCH        13
+#define APP_FW_PATCH        16
 #define APP_FW_HW_ID        0
 
 __attribute__((section(".app_header")))

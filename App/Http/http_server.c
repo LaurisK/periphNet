@@ -39,6 +39,7 @@
 #include "FreeRTOS.h"
 #include "trice.h"
 #include <string.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -811,9 +812,42 @@ static const char * const task_state_names[] = {
     "Run", "Rdy", "Blk", "Sus", "Del"
 };
 
+/* The crash report outgrew resp_buf once CRASH_LOG_MAX_TASKS went to 16 (~1.6 kB
+ * of JSON), so it is built in a transient heap block instead of enlarging a CCM
+ * buffer -- the same trade /api/system/status makes, and CCM is the scarce
+ * region here.
+ *
+ * The old builder also accumulated snprintf()'s return, which is the length it
+ * WOULD have written.  Past the end that makes `pos` exceed the buffer and
+ * `cap - pos` underflow to a huge size_t -- i.e. the first truncated field
+ * turned into an overflowing write.  Every append below clamps instead. */
+#define CRASH_JSON_CAP  2560u
+
+static size_t json_cat(char *buf, size_t cap, size_t pos, const char *fmt, ...)
+{
+    va_list ap;
+    int     n;
+
+    if (pos >= cap) {
+        return cap;          /* full: swallow, never wrap */
+    }
+    va_start(ap, fmt);
+    n = vsnprintf(buf + pos, cap - pos, fmt, ap);
+    va_end(ap);
+
+    if (n < 0) {
+        return pos;
+    }
+    pos += (size_t)n;
+    return (pos > cap) ? cap : pos;   /* truncated is fine; overrunning is not */
+}
+
 static void handle_crash_get(struct netconn *conn)
 {
     sCrashLog *log = (sCrashLog *)pvPortMalloc(sizeof(sCrashLog));
+    char      *js;
+    size_t     pos = 0u;
+
     if (log == NULL) {
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
@@ -825,45 +859,54 @@ static void handle_crash_get(struct netconn *conn)
         return;
     }
 
+    js = (char *)pvPortMalloc(CRASH_JSON_CAP);
+    if (js == NULL) {
+        vPortFree(log);
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+
     const char *type_str = (log->crash_type < 6)
         ? crash_type_names[log->crash_type] : "Unknown";
-    int pos = snprintf(resp_buf, sizeof(resp_buf),
+
+    pos = json_cat(js, CRASH_JSON_CAP, pos,
         "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
         "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"sp\":\"%08lX\","
         "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
         "\"cfsr\":\"%08lX\",\"hfsr\":\"%08lX\","
         "\"mmfar\":\"%08lX\",\"bfar\":\"%08lX\","
-        "\"task\":\"%s\",\"backtrace\":[",
+        "\"task\":\"%s\",\"task_count\":%u,\"backtrace\":[",
         type_str, (unsigned long)log->tick,
         (unsigned long)log->pc, (unsigned long)log->lr,
         (unsigned long)log->sp, (unsigned long)log->r0,
         (unsigned long)log->r12, (unsigned long)log->psr,
         (unsigned long)log->cfsr, (unsigned long)log->hfsr,
         (unsigned long)log->mmfar, (unsigned long)log->bfar,
-        log->task_name);
+        log->task_name, (unsigned)log->task_count);
 
     for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
-        pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "%s\"%08lX\"",
-            i > 0 ? "," : "", (unsigned long)log->bt_addr[i]);
+        pos = json_cat(js, CRASH_JSON_CAP, pos, "%s\"%08lX\"",
+                       (i > 0) ? "," : "", (unsigned long)log->bt_addr[i]);
     }
 
-    pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "],\"tasks\":[");
+    pos = json_cat(js, CRASH_JSON_CAP, pos, "],\"tasks\":[");
     for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
         const char *st = (log->tasks[i].state < 5)
             ? task_state_names[log->tasks[i].state] : "???";
-        pos += snprintf(resp_buf + pos, sizeof(resp_buf) - pos,
+        pos = json_cat(js, CRASH_JSON_CAP, pos,
             "%s{\"name\":\"%s\",\"state\":\"%s\","
             "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
-            i > 0 ? "," : "",
+            (i > 0) ? "," : "",
             log->tasks[i].name, st,
             (unsigned long)log->tasks[i].pc,
             (unsigned long)log->tasks[i].lr,
             log->tasks[i].free_stack);
     }
-    snprintf(resp_buf + pos, sizeof(resp_buf) - pos, "]}");
+    (void)json_cat(js, CRASH_JSON_CAP, pos, "]}");
 
     vPortFree(log);
-    send_json(conn, "200 OK", resp_buf);
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
 }
 
 static void handle_crash_delete(struct netconn *conn)
@@ -1005,6 +1048,246 @@ static void handle_modbus_monitor(struct netconn *conn, int enable)
     Modbus_SetMonitor(enable);
     snprintf(resp_buf, sizeof(resp_buf), "{\"monitor\":%s}",
              Modbus_GetMonitor() ? "true" : "false");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* --------------------------------------------------------------------------
+ * Modbus writes (/api/modbus/write)
+ *
+ * The module API is Modbus_Request, not Modbus_Write, because THE CONFIG
+ * decides what an item means: r reads and ignores the value, w writes, rw
+ * writes and reads back.  A route called /write therefore has one obligation
+ * the module cannot discharge for it -- REFUSE a point the config did not
+ * make writable, instead of submitting it and reporting the read that comes
+ * back as a successful write.  That is what Modbus_PointInfo is for, and it
+ * is why validation happens here before anything is submitted.
+ *
+ * Values are in the SCALED-INTEGER domain -- the same domain samples arrive in
+ * and writeMin/writeMax are authored in, i.e. cell_ovp at scale 0.001 is
+ * written as 3550, not 3.550.  No float is accepted anywhere on this path: a
+ * threshold that silently became 3.549 V because of a decimal round trip is
+ * exactly the failure this endpoint must not have.  Bounds are NOT re-checked
+ * here -- the module owns that rule and enforces it per item (docs/modbus.md
+ * 4.6); duplicating it would be a second copy to drift.
+ * -------------------------------------------------------------------------- */
+
+/* Defined with the wg handlers further down; the modbus handlers are kept
+ * together here rather than moved to follow it. */
+static int json_uint(const char *body, const char *key, uint32_t *out);
+
+/* 16 items covers aligning a pack pair or pushing a corrected profile in one
+ * call, and keeps the reply inside resp_buf.  Larger batches are a 422 rather
+ * than a truncated answer. */
+#define HTTP_WRITE_MAX_ITEMS   16u
+#define HTTP_WRITE_BODY_MAX    1024u
+
+static sModbusReqItem s_wrItems[HTTP_WRITE_MAX_ITEMS] CCMRAM_BSS;
+static char           s_wrBody[HTTP_WRITE_BODY_MAX] CCMRAM_BSS;
+static osSemaphoreId_t s_wrSem;
+/* Set only if a completion callback failed to arrive, which the API forbids.
+ * The item array stays borrowed forever in that case, so the endpoint retires
+ * rather than hand the same memory to a second request. */
+static int             s_wrPoisoned;
+
+static void write_done_cb(const sModbusReqReply *rep, void *ctx)
+{
+    (void)rep; (void)ctx;
+    /* Runs on the modbus task under the non-blocking rule: signal only. The
+     * items are this file's array and are read after the wait returns. */
+    (void)osSemaphoreRelease(s_wrSem);
+}
+
+/* Bounded key lookup INSIDE one object.  Unbounded scanning would let the
+ * "id" of the next item answer for this one's missing field. */
+static int obj_int(const char *p, const char *end, const char *key, int32_t *out)
+{
+    size_t klen = strlen(key);
+
+    while (p < end) {
+        if (*p == '"' && (size_t)(end - p) > klen + 1u &&
+            strncmp(p + 1, key, klen) == 0 && p[1 + klen] == '"') {
+            const char *q = p + 2 + klen;
+            while (q < end && (*q == ' ' || *q == ':' || *q == '\t')) q++;
+            if (q >= end || (*q != '-' && (*q < '0' || *q > '9'))) return 0;
+            *out = (int32_t)strtol(q, NULL, 10);
+            return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static void handle_modbus_write(struct netconn *conn, sConnStream *s)
+{
+    uint32_t content_length = parse_content_length(req_buf);
+    uint32_t got = 0u;
+    uint32_t device = 0u, timeout_ms = 5000u;
+    uint16_t count = 0u;
+    const char *p, *end;
+    size_t off;
+    int rc;
+
+    if (s_wrPoisoned) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"write path retired: a completion callback was "
+                  "lost and the request buffer can never be reused\"}");
+        return;
+    }
+    if (content_length == 0u || content_length >= sizeof(s_wrBody)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"JSON body required (max 1023 bytes)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+    while (got < content_length) {
+        int ch = cs_read_byte(s);
+        if (ch < 0) {
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"incomplete body\"}");
+            return;
+        }
+        s_wrBody[got++] = (char)ch;
+    }
+    s_wrBody[got] = '\0';
+
+    if (!json_uint(s_wrBody, "device", &device) || device > 255u) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"missing or invalid \\\"device\\\"\"}");
+        return;
+    }
+    (void)json_uint(s_wrBody, "timeout_ms", &timeout_ms);
+    if (timeout_ms < MB_REQ_TIMEOUT_MIN_MS || timeout_ms > MB_REQ_TIMEOUT_MAX_MS) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"timeout_ms out of range\"}");
+        return;
+    }
+
+    p = strstr(s_wrBody, "\"items\"");
+    if (p != NULL) p = strchr(p, '[');
+    if (p == NULL) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"missing \\\"items\\\" array\"}");
+        return;
+    }
+    end = strchr(p, ']');
+    if (end == NULL) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"unterminated \\\"items\\\" array\"}");
+        return;
+    }
+
+    /* Parse and validate EVERY item before submitting any of them: a batch
+     * that is going to be refused should change nothing on the wire. */
+    while ((p = strchr(p, '{')) != NULL && p < end) {
+        const char      *objEnd = strchr(p, '}');
+        int32_t          id = 0, value = 0;
+        sModbusPointMeta meta;
+
+        if (objEnd == NULL || objEnd > end) break;
+        if (count >= HTTP_WRITE_MAX_ITEMS) {
+            snprintf(resp_buf, sizeof(resp_buf),
+                     "{\"error\":\"too many items (max %u)\"}",
+                     (unsigned)HTTP_WRITE_MAX_ITEMS);
+            send_json(conn, "422 Unprocessable Entity", resp_buf);
+            return;
+        }
+        if (!obj_int(p, objEnd, "id", &id) ||
+            !obj_int(p, objEnd, "value", &value) ||
+            id < 0 || id > 65535) {
+            snprintf(resp_buf, sizeof(resp_buf),
+                     "{\"error\":\"item %u needs integer \\\"id\\\" and "
+                     "\\\"value\\\"\",\"index\":%u}",
+                     (unsigned)count, (unsigned)count);
+            send_json(conn, "422 Unprocessable Entity", resp_buf);
+            return;
+        }
+
+        rc = Modbus_PointInfo((uint8_t)device, (uint16_t)id, &meta);
+        if (rc != 0) {
+            snprintf(resp_buf, sizeof(resp_buf),
+                     "{\"error\":\"no such point\",\"device\":%u,\"id\":%d}",
+                     (unsigned)device, (int)id);
+            send_json(conn, "422 Unprocessable Entity", resp_buf);
+            return;
+        }
+        if ((meta.flags & MB_PT_WRITE) == 0u) {
+            /* The whole point of the endpoint: say no, name it, and do not
+             * let a read masquerade as a write. */
+            snprintf(resp_buf, sizeof(resp_buf),
+                     "{\"error\":\"point is read-only\",\"device\":%u,"
+                     "\"id\":%d,\"name\":\"%s\"}",
+                     (unsigned)device, (int)id, meta.name);
+            send_json(conn, "422 Unprocessable Entity", resp_buf);
+            return;
+        }
+
+        s_wrItems[count].id     = (uint16_t)id;
+        s_wrItems[count].value  = value;
+        s_wrItems[count].result = mbErr_pending;
+        count++;
+        p = objEnd + 1;
+    }
+
+    if (count == 0u) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"no items\"}");
+        return;
+    }
+
+    if (s_wrSem == NULL) {
+        s_wrSem = osSemaphoreNew(1, 0, NULL);
+        if (s_wrSem == NULL) {
+            send_json(conn, "500 Internal Server Error",
+                      "{\"error\":\"no semaphore\"}");
+            return;
+        }
+    }
+
+    rc = Modbus_Request((uint8_t)device, s_wrItems, count, timeout_ms,
+                        write_done_cb, NULL);
+    if (rc != 0) {
+        const char *why = (rc == mbErr_full)   ? "request FIFO full"
+                        : (rc == mbErr_config) ? "engine not running "
+                                                 "(unprovisioned config?)"
+                                               : "rejected";
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"error\":\"%s\",\"result\":%d}", why, rc);
+        send_json(conn, (rc == mbErr_full) ? "409 Conflict"
+                                           : "422 Unprocessable Entity",
+                  resp_buf);
+        return;
+    }
+
+    /* The callback is contracted to fire within timeout_ms; the margin covers
+     * scheduling only.  If it does not, the module still owns s_wrItems and
+     * this endpoint must never lend that memory again. */
+    if (osSemaphoreAcquire(s_wrSem, timeout_ms + 2000u) != osOK) {
+        s_wrPoisoned = 1;
+        send_json(conn, "504 Gateway Timeout",
+                  "{\"error\":\"no completion callback; write path retired\"}");
+        return;
+    }
+
+    off = (size_t)snprintf(resp_buf, sizeof(resp_buf),
+                           "{\"device\":%u,\"count\":%u,\"items\":[",
+                           (unsigned)device, (unsigned)count);
+    for (uint16_t i = 0; i < count; i++) {
+        sModbusPointMeta meta;
+        const char *nm = (Modbus_PointInfo((uint8_t)device, s_wrItems[i].id,
+                                           &meta) == 0) ? meta.name : "";
+
+        if (off + 96u >= sizeof(resp_buf)) break;
+        off += (size_t)snprintf(resp_buf + off, sizeof(resp_buf) - off,
+                                "%s{\"id\":%u,\"name\":\"%s\",\"value\":%ld,"
+                                "\"result\":%d}",
+                                (i == 0u) ? "" : ",",
+                                (unsigned)s_wrItems[i].id, nm,
+                                (long)s_wrItems[i].value,
+                                (int)s_wrItems[i].result);
+    }
+    snprintf(resp_buf + off, sizeof(resp_buf) - off, "]}");
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -1950,6 +2233,8 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_monitor(conn, 1);
     } else if (route_is("POST /api/modbus/monitor/off")) {
         handle_modbus_monitor(conn, 0);
+    } else if (route_is("POST /api/modbus/write")) {
+        handle_modbus_write(conn, &stream);
     } else if (route_is("POST /api/modbus/config/upload")) {
         handle_modbus_cfg_upload(conn, &stream);
     } else if (route_is("POST /api/modbus/config/verify")) {

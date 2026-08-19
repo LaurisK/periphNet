@@ -198,6 +198,14 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
              └───────────────────┘
 ```
 
+**Every address above is hand-assigned in `Shared/Fwu/bl_app_contract.h` with
+no overlap check beyond review, and ten files in `App/`+`Shared/` call
+`W25Q128_*` directly.** [docs/task_nv_db.md](docs/task_nv_db.md) is the
+approved design that replaces this: `nvDb` becomes the only authority over
+the external flash address space, each client ("user") gets a flat
+bounds-checked span starting at `0x00`, and placement/relocation/isolation
+move into one module. **Not implemented — the map above is what ships.**
+
 ## Project Structure
 
 ```
@@ -562,6 +570,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
 | `/api/modbus/config` | DELETE | Erase the config — the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
+| `/api/modbus/write` | POST | Write points on one device: `{"device":N,"items":[{"id":P,"value":V}],"timeout_ms":T}`. Values are **scaled integers** (the `writeMin`/`writeMax` domain — `cell_ovp` is `3550`, not `3.550`); no floats accepted. **422 refuses a point the config did not mark writable** — a `/write` must never let a read masquerade as a write. Per-item `result` (0 = ok, `-13` = out of bounds, `-4` = no reply) rides a **200**, so check items, not just status. Max 16 items; `rw` points report the register read back after writing |
 | `/api/modbus/plans` | GET | Every plan slot: name, capability, device set, time tables, live subscriber count |
 | `/api/modbus/plans` | POST | Create a plan (201 + `{"id":N}`); body is one element of the config's `plans[]`, so one schema, one validator |
 | `/api/modbus/plans/N` | PUT | Modify a plan — **409 if a subscription named it** (`MB_PLAN_ALL` subscribers do not lock a plan) |

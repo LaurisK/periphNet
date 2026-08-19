@@ -721,7 +721,40 @@ before this was noticed. Sequential probes only.
 9b. **Board #1 is one release behind** — `Pd1.1.11`, i.e. it lacks the §3.14
     ephemeral-port fix and still depends on the §3.9 workaround. See 6b.
 
-10. **Board #1 HardFault on the shipped `Pd1.1.6`.** Crash log read
+10. **Board #1 HardFault — RECURRED 2026-08-19, still unexplained.**
+    Second occurrence, on `Pd1.1.14`, at `tick 4081472` ≈ **68 min** (the first
+    was ≈ 24 h). Same fault site and signature: `pc 0804DBDE` →
+    `vTaskDelay+0x3E`, `lr 0804DE9E` → `xTaskResumeAll+0xFA`, `cfsr 0x00008200`
+    (PRECISERR+BFARVALID), `bfar 0x001D803C` (not valid memory),
+    `r12 0xA5A5A5A5` (FreeRTOS stack fill). The IWDG reset it ~16 s later
+    (`reset_cause 0x24000003`, bit 29) and it ran 6.9 h afterwards without
+    incident. Raw log kept in
+    `docs/crashlogs/board1_2026-08-19_hardfault_Pd1.1.14.json`.
+
+    **New: the faulting context was a TASK, not an ISR** — the stacked
+    `psr 0x61000000` has IPSR = 0, i.e. thread mode. So `pcTaskGetName(NULL)`
+    would have named the offender, and did not, because of the bug below.
+
+    **Why two occurrences taught us nothing about which task:** the crash log's
+    per-task snapshot was silently empty. `CRASH_LOG_MAX_TASKS` was **8** while
+    the system has **11** tasks, and `uxTaskGetSystemState()` returns ZERO when
+    its array is too small — so `task_count` was 0 and every task's pc / lr /
+    state / stack went unrecorded. It broke by GROWTH, not by an edit, and
+    nothing reported it. `printTaskList()` (Trice-only) uses `tasks[16]` and
+    kept working the whole time, which is why the live output looked fine and
+    only the durable record was blind. Fixed in `Pd1.1.15`: capacity 16, and
+    `task_name` is now recorded for every crash type rather than only for
+    watchdog/assert/stack-overflow. The record grew to ~572 B, still one
+    quarter of its 4 KB sector; the layout change invalidates previously
+    stored logs by CRC, which is why the one above was saved off first.
+
+    Two samples is not a trend, but the interval fell from ~24 h to ~68 min
+    across a firmware that grew substantially in tasks and CCM pressure — worth
+    holding as a lead, not a conclusion. Leading suspect remains list/TCB
+    corruption, with the thin stacks (`tudp` 53–60 free words of 512,
+    `EthLink` 79, `IDLE` 104) the obvious candidate source.
+
+10b. **Original entry — board #1 HardFault on `Pd1.1.6`.** Crash log read
     2026-08-17: `pc 0804AF7E` → `vTaskDelay`, `lr 0804B23B` →
     `xTaskResumeAll`, `cfsr 0x00008200` (PRECISERR + BFARVALID),
     `bfar 0x0083002D` (not valid memory), `r12 0xA5A5A5A5` (FreeRTOS stack

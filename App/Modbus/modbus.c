@@ -1164,6 +1164,30 @@ int Modbus_Request(uint8_t devOrd, sModbusReqItem *items, uint16_t count,
     return 0;
 }
 
+int Modbus_PointInfo(uint8_t devOrd, uint16_t ptOrd, sModbusPointMeta *out)
+{
+    sMbPointLookup lk;
+
+    if (out == NULL) {
+        return mbErr_badArg;
+    }
+    if (MbCfg_ResolvePoint(devOrd, ptOrd, &lk) != 0) {
+        return mbErr_idNotFound;
+    }
+
+    /* Copied, not borrowed: lk is this frame's and the record it holds is a
+     * flash read, so nothing here survives the return except what `out` owns. */
+    (void)memcpy(out->name, lk.point.name, sizeof(out->name));
+    out->name[sizeof(out->name) - 1u] = '\0';
+    out->writeMin   = lk.point.writeMin;
+    out->writeMax   = lk.point.writeMax;
+    out->decodeType = lk.point.decodeType;
+    out->unit       = lk.point.unit;
+    out->scalePow10 = lk.point.scalePow10;
+    out->flags      = lk.point.flags;
+    return 0;
+}
+
 /* --------------------------------------------------------------------------
  * Public API — lifecycle
  * -------------------------------------------------------------------------- */

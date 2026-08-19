@@ -38,9 +38,11 @@ typedef struct {
     uint32_t lr;
     uint32_t pc;
     uint32_t psr;
-    uint32_t sp;      /*!< PSP value at fault time   */
+    uint32_t sp;      /*!< stack pointer at fault time                  */
     uint32_t control;
     uint32_t primask;
+    uint32_t fp;      /*!< R7 of the faulting context = frame pointer    */
+    uint8_t  frameOnMsp;
 } sCrashRegs;
 
 /* --------------------------------------------------------------------------
@@ -180,13 +182,218 @@ static void printTaskList(void)
  * Valid when the fault originated in Thread mode (FreeRTOS task), which is
  * the expected case for all button-triggered and watchdog faults.
  */
+/* Memory map of this part, used to tell a plausible code/stack address from
+ * noise.  Flash spans bootloader + application; task stacks live in the CCM
+ * heap, which is why CCM must be accepted as "stack RAM" here — on the Zhaga
+ * M0+ original only main SRAM existed and the check was one range. */
+#define CRASH_FLASH_BEGIN   0x08000000UL
+#define CRASH_FLASH_END     0x08080000UL
+#define CRASH_SRAM_BEGIN    0x20000000UL
+#define CRASH_SRAM_END      0x20020000UL
+#define CRASH_CCM_BEGIN     0x10000000UL
+#define CRASH_CCM_END       0x10010000UL
+#define SCAN_WORDS    128U
+
+/* Latched by Crash_CaptureEntry() on exception entry.  volatile: written from
+ * assembly, read by C, and nothing must hoist the reads. */
+typedef struct {
+    uint32_t r4_r11[8];
+    uint32_t msp;
+    uint32_t psp;
+    uint32_t caller_r7;   /*!< faulting context's R7 = its frame pointer */
+    uint32_t valid;       /*!< CRASH_ENTRY_MAGIC when the shim ran        */
+} sCrashEntryRegs;
+
+/* Only the five fault handlers run the shim.  The software-watchdog, assert
+ * and stack-overflow paths call Crash_GenerateReport() directly from ordinary
+ * C, where there is no exception frame to latch — so the struct must announce
+ * whether it holds anything, or those three reports would decode a stale or
+ * zeroed snapshot as if it were real. */
+#define CRASH_ENTRY_MAGIC   0xC5A1BEEFUL
+
+volatile sCrashEntryRegs g_crashEntry __attribute__((used));
+
+__attribute__((naked, used)) void Crash_CaptureEntry(void)
+{
+    /* R7 is the one register that is already GONE by the time this runs: the
+     * calling handler's prologue does `push {r7, lr}` then `add r7, sp, #0`,
+     * so r7 now holds the handler's own frame pointer.  The faulting context's
+     * R7 is the word the prologue pushed, i.e. *MSP — and it is worth
+     * recovering because R7 is a real frame pointer here: the build sets
+     * -fno-omit-frame-pointer (CMakeLists.txt), which both guarantees that
+     * prologue shape and makes the FP chain walkable in the first place.
+     * captureRegs() range-checks the result before trusting it.
+     *
+     * Clobbers r0-r2 only, which AAPCS already lets a callee destroy. */
+    __asm volatile (
+        "ldr   r0, =g_crashEntry   \n"
+        "stm   r0, {r4-r11}        \n"   /* 32-bit STM: Cortex-M4 only       */
+        "mrs   r1, msp             \n"
+        "str   r1, [r0, #32]       \n"
+        "mrs   r2, psp             \n"
+        "str   r2, [r0, #36]       \n"
+        "ldr   r2, [r1]            \n"   /* *MSP = R7 pushed by the prologue */
+        "str   r2, [r0, #40]       \n"
+        "ldr   r2, =0xC5A1BEEF     \n"
+        "str   r2, [r0, #44]       \n"
+        "bx    lr                  \n"
+    );
+}
+
+static int addr_in_flash(uint32_t a)
+{
+    return (a >= CRASH_FLASH_BEGIN) && (a < CRASH_FLASH_END);
+}
+
+static int sp_in_ram(uint32_t a)
+{
+    if ((a & 3U) != 0U) {
+        return 0;
+    }
+    return ((a >= CRASH_SRAM_BEGIN) && (a < CRASH_SRAM_END)) ||
+           ((a >= CRASH_CCM_BEGIN)  && (a < CRASH_CCM_END));
+}
+
+/* Does this look like a live exception frame?  A stacked PC in flash and a
+ * stacked xPSR with a sane Thumb bit is enough to pick PSP from MSP without
+ * EXC_RETURN, which a called function cannot see. */
+static int frame_looks_valid(uint32_t sp)
+{
+    const uint32_t *f = (const uint32_t *)sp;
+
+    if (!sp_in_ram(sp)) {
+        return 0;
+    }
+    return addr_in_flash(f[6] & ~1UL) && ((f[7] & (1UL << 24)) != 0U);
+}
+
+/* Cortex-M0+ cannot unwind, so the Zhaga handler scans each stack for words
+ * that LOOK like return addresses and lets the host symbolise them.  That idea
+ * is worth borrowing here for a reason unrelated to the core: a frame-pointer
+ * walk trusts the frame chain, and the fault this exists to diagnose is memory
+ * corruption — exactly the case where the chain cannot be trusted.  A scan
+ * depends on nothing but the stack bytes.
+ *
+ * False positives are expected and are the caller's problem to filter; a
+ * missing frame is worse than a spurious one here. */
+static uint8_t scan_stack(const char *name, uint32_t sp, uint32_t skipWords,
+                          uint32_t *out, uint8_t outMax)
+{
+    const uint32_t *p;
+    const uint32_t *end;
+    uint8_t         n = 0U;
+
+    if (!sp_in_ram(sp)) {
+        return 0U;
+    }
+    p   = (const uint32_t *)sp + skipWords;
+    end = p + SCAN_WORDS;
+
+    if (name != NULL) {
+        TRiceS("err:[%s]\n", (char *)name);
+    }
+    for (; p < end; p++) {
+        uint32_t v;
+
+        if (!sp_in_ram((uint32_t)p)) {
+            break;                      /* ran off the end of RAM */
+        }
+        v = *p;
+        if (((v & 1U) != 0U) && addr_in_flash(v & ~1UL)) {
+            if (name != NULL) {
+                trice("err:  LR 0x%08X\n", v);
+            }
+            if ((out != NULL) && (n < outMax)) {
+                out[n] = v;
+            }
+            n = (uint8_t)((n < 255U) ? (n + 1U) : n);
+        }
+    }
+    return (n > outMax) ? outMax : n;
+}
+
+/* Every stack in the system, the faulting one first.  This is the part that
+ * survives corruption of the FreeRTOS lists only partially: uxTaskGetSystemState
+ * walks those same lists, so if it returns nothing the scan below is limited to
+ * MSP/PSP — which is itself a signal worth seeing. */
+static void scanAllStacks(int frameOnMsp)
+{
+    static TaskStatus_t tasks[CRASH_LOG_MAX_TASKS];  /* static: exception ctx */
+    UBaseType_t         n;
+    TaskHandle_t        current;
+
+    trice("err:=== LR scan (candidates, filter host-side) ===\n");
+
+    if (frameOnMsp) {
+        (void)scan_stack("faulting (MSP)", g_crashEntry.msp, 8U, NULL, 0U);
+        (void)scan_stack("thread (PSP)",   g_crashEntry.psp, 0U, NULL, 0U);
+    } else {
+        (void)scan_stack("faulting task (PSP)", g_crashEntry.psp, 8U, NULL, 0U);
+        (void)scan_stack("IRQ (MSP)",           g_crashEntry.msp, 0U, NULL, 0U);
+    }
+    flushTrice();
+
+    n       = uxTaskGetSystemState(tasks, CRASH_LOG_MAX_TASKS, NULL);
+    current = xTaskGetCurrentTaskHandle();
+
+    for (UBaseType_t i = 0; i < n; i++) {
+        uint32_t task_sp;
+
+        if (tasks[i].xHandle == current) {
+            continue;                   /* covered by the PSP scan above */
+        }
+        /* pxTopOfStack is the first member of the TCB. */
+        task_sp = (uint32_t)(*(uint32_t *volatile *)tasks[i].xHandle);
+        (void)scan_stack(tasks[i].pcTaskName, task_sp, 0U, NULL, 0U);
+        flushTrice();
+    }
+
+    trice("err:=== end LR scan ===\n");
+}
+
 static void captureRegs(sCrashRegs *regs)
 {
     uint32_t *frame;
 
-    __asm volatile ("MRS %0, PSP\n"     : "=r"(frame)         );
     __asm volatile ("MRS %0, CONTROL\n" : "=r"(regs->control) );
     __asm volatile ("MRS %0, PRIMASK\n" : "=r"(regs->primask) );
+
+    /* No shim ran: this is a watchdog/assert/stack-overflow report, not a
+     * fault.  There is no exception frame, so read the stacks live and make no
+     * claim about a frame pointer or callee-saved registers. */
+    if (g_crashEntry.valid != CRASH_ENTRY_MAGIC) {
+        uint32_t livePsp;
+
+        __asm volatile ("MRS %0, PSP\n" : "=r"(livePsp));
+        memset((void *)&g_crashEntry, 0, sizeof(g_crashEntry));
+        regs->sp         = livePsp;
+        regs->fp         = livePsp;
+        regs->frameOnMsp = 0U;
+        regs->r0 = regs->r1 = regs->r2 = regs->r3 = 0U;
+        regs->r12 = regs->lr = regs->pc = regs->psr = 0U;
+        return;
+    }
+
+    /* This used to read PSP unconditionally, which silently decoded garbage
+     * for a fault taken in handler mode — where the frame is on MSP.  Pick the
+     * stack whose frame validates instead; PSP first, since a task fault is
+     * the common case and FreeRTOS runs tasks on PSP. */
+    if (frame_looks_valid(g_crashEntry.psp)) {
+        frame            = (uint32_t *)g_crashEntry.psp;
+        regs->frameOnMsp = 0U;
+    } else if (frame_looks_valid(g_crashEntry.msp)) {
+        frame            = (uint32_t *)g_crashEntry.msp;
+        regs->frameOnMsp = 1U;
+    } else {
+        frame            = (uint32_t *)g_crashEntry.psp;   /* best effort */
+        regs->frameOnMsp = 0U;
+    }
+
+    /* Frame pointer of the faulting context.  Only trusted if it points into
+     * a stack; anything else means the prologue was not what we assumed, and a
+     * WRONG fp is worse than none — it walks the unwinder into noise. */
+    regs->fp  = sp_in_ram(g_crashEntry.caller_r7) ? g_crashEntry.caller_r7
+                                                  : regs->sp;
 
     regs->sp  = (uint32_t)frame;
     regs->r0  = frame[0];
@@ -268,6 +475,18 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
     log.control = regs->control;
     log.primask = regs->primask;
 
+    for (int i = 0; i < 8; i++) {
+        log.r4_r11[i] = g_crashEntry.r4_r11[i];
+    }
+    log.frame_on_msp = regs->frameOnMsp;
+
+    /* A call path that survives a broken frame chain — the faulting stack only,
+     * because that is the one worth the flash and the other stacks go to Trice. */
+    log.scan_count = scan_stack(NULL,
+                                regs->frameOnMsp ? g_crashEntry.msp
+                                                 : g_crashEntry.psp,
+                                8U, log.scan_lr, CRASH_LOG_MAX_SCAN);
+
     /* Fault status */
     log.cfsr  = SCB->CFSR;
     log.hfsr  = SCB->HFSR;
@@ -277,7 +496,7 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
     /* Backtrace */
     backtrace_frame_t frame = {
         .pc = regs->pc, .lr = regs->lr,
-        .sp = regs->sp, .fp = regs->sp
+        .sp = regs->sp, .fp = regs->fp
     };
     backtrace_t bt[CRASH_LOG_MAX_BT_DEPTH];
     int depth = _backtrace_unwind(bt, CRASH_LOG_MAX_BT_DEPTH, &frame);
@@ -286,9 +505,15 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
         log.bt_addr[i] = (uint32_t)bt[i].address;
     }
 
-    /* Task name (current task is the offender for these types) */
-    if (type == crashType_swWatchdog || type == crashType_stackOverflow ||
-        type == crashType_assert) {
+    /* Recorded for EVERY type, faults included.  It used to be limited to the
+     * types where the current task is provably the offender, which left a
+     * HardFault report with no task at all -- and "which task faulted" is the
+     * first question asked of one.  For a fault in task context this IS the
+     * offender; for a fault in ISR context it is the task that was interrupted,
+     * which is still worth having.  Tell the two apart from the stacked PSR:
+     * IPSR (bits 8:0 of `psr`) is nonzero when the faulting context was an
+     * exception handler. */
+    {
         const char *name = pcTaskGetName(NULL);
         if (name) {
             strncpy(log.task_name, name, sizeof(log.task_name) - 1);
@@ -357,9 +582,10 @@ void Crash_GenerateReport(eCrashType type)
     printRegisters(type, &regs);
     flushTrice();
 
-    /* Backtrace for the faulting context (PC + LR from exception frame;
-       FP chain walk not available here since R7 was not saved) */
-    printBacktrace(regs.pc, regs.lr, regs.sp, regs.sp);
+    /* The FP chain walk IS available now: Crash_CaptureEntry() latches R4-R11
+     * on exception entry, so R7 of the faulting context is real.  This used to
+     * pass `sp` as the frame pointer and could never produce more than pc+lr. */
+    printBacktrace(regs.pc, regs.lr, regs.sp, regs.fp);
     flushTrice();
 
     /* Save to external flash before printing task list (which takes longer) */
@@ -368,6 +594,14 @@ void Crash_GenerateReport(eCrashType type)
     /* Print all tasks with individual backtraces */
     printTaskList();
     flushTrice();
+
+    /* Chain-independent view, last because it is the most verbose and the
+     * durable record is already in flash by now. */
+    scanAllStacks(regs.frameOnMsp);
+    flushTrice();
+
+    /* Consumed: a second report must not inherit this one's snapshot. */
+    g_crashEntry.valid = 0U;
 }
 
 bool Crash_ReadFromFlash(sCrashLog *log)

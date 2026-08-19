@@ -464,6 +464,33 @@ typedef void (*fModbusReqDone)(const sModbusReqReply *rep, void *ctx);
 int Modbus_Request(uint8_t devOrd, sModbusReqItem *items, uint16_t count,
                    uint32_t timeout_ms, fModbusReqDone cb, void *ctx);
 
+/* The catalogue's sModbusPointDesc is BORROWED and dies with the callback, so
+ * it cannot answer "may I write this?" for a caller that is not a subscriber.
+ * This COPIES instead — `out` is the caller's, including the name.
+ *
+ * It exists because access is authored, not requested (see the block comment
+ * above): a would-be writer has to be able to ask what a point permits BEFORE
+ * submitting, or it cannot tell "wrote it" from "read it and ignored my
+ * value".  Like every other lookup here it is a flash walk, so it belongs on a
+ * control path and not in a loop. */
+typedef struct {
+    char     name[MB_POINT_NAME_LEN];
+    int32_t  writeMin, writeMax;   /* scaled-int; valid if MB_PT_BOUNDED     */
+    uint8_t  decodeType;           /* eModbusDecodeType                      */
+    uint8_t  unit;                 /* DLMS/COSEM physical-unit code          */
+    int8_t   scalePow10;           /* real value = scaled * 10^scalePow10    */
+    uint8_t  flags;                /* MB_PT_READ|WRITE|BOUNDED               */
+} sModbusPointMeta;
+
+/**
+ * @brief  Metadata of one point of one device, copied out.
+ * @param  devOrd  device id (position in the config's devices[])
+ * @param  ptOrd   point id within that device's capability
+ * @param  out     filled on success; untouched otherwise
+ * @return 0, or mbErr_badArg / mbErr_idNotFound.
+ */
+int Modbus_PointInfo(uint8_t devOrd, uint16_t ptOrd, sModbusPointMeta *out);
+
 /* ==========================================================================
  * Configuration (docs/modbus.md §4.9)
  *
