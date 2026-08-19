@@ -15,7 +15,7 @@ memory map, HTTP API, task table, coding standards.
 | [pylontech_can_protocol.md](pylontech_can_protocol.md) | current | Pylontech CAN frame layout used by `App/Can/` |
 | [issue_idle_iwdg_crashloop.md](issue_idle_iwdg_crashloop.md) | current | Post-mortem: EthIf stack overflow → IWDG crash loop; includes the halt-during-hang debug recipe |
 | [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md) | direction | Bridge → edge controller (BMS + CAN), WAN access across NAT, RS485 bus budget, open questions |
-| [task_nv_db.md](task_nv_db.md) | design | **`nvDb` — the application's only authority over the external flash address space.** Users get a flat, bounds-checked span from `0x00`; `nvDb` places, moves and isolates them and knows nothing of their content. API settled (§2), internals provisional (§4), not implemented |
+| [task_nv_db.md](task_nv_db.md) | design + plan | **`nvDb` — the application's only authority over the external flash address space.** Users get a flat, bounds-checked span from `0x00`; `nvDb` places, moves and isolates them and knows nothing of their content. API settled (§2), criteria (§3), internals provisional (§4), phased implementation plan (§7); not implemented |
 | [issue_doc_code_inconsistencies.md](issue_doc_code_inconsistencies.md) | current | Doc/code audit of 2026-08-03 and what was corrected (references several docs since merged into `modbus.md`) |
 | [archive/](archive/) | historical | Early project/milestone plans, the pre-encryption FWU architecture, and the 2026-03 `architecture.dot` state diagram |
 

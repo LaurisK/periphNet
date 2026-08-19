@@ -1,7 +1,8 @@
 # Task — `nvDb`, the application's only authority over non-volatile storage
 
-**Status:** design settled through the API surface (§2). Internals in §4 are
-provisional. Not implemented — no `nvDb` code exists yet.
+**Status:** design settled through the API surface (§2), criteria in §3,
+phased implementation plan in §7. Internals in §4 are provisional. **Not
+implemented — no `nvDb` code exists yet.**
 
 **Supersedes** the design note on `dev_work` (`git show
 origin/dev_work:docs/task_nv_db.md`), which described `nvDb` as a parameter
@@ -399,47 +400,58 @@ can be diffed by eye.
 
 #### What is supplied
 
-```c
-typedef struct {
-    eNvDbUser user;
-    uint32_t  size_bytes;       /* as requested; rounding is internal       */
-} sNvDbUserEntry;
+**The enum is the index.** There is no per-entry id and no count: the array
+is `nvdbUser_last` long and a user's own value is its position, the same
+pattern used elsewhere in this project. A user that is not allocated is
+simply `0`, which is the same fact `NvDb_GetSize` reports (§2.4) said in the
+same way.
 
+```c
 typedef struct {
     char            name[NVDB_LAYOUT_NAME_LEN];
     uint16_t        version;
-    eNvDbApplyMode  operation;          /* normal | forced                  */
-    uint8_t         userCnt;
-    sNvDbUserEntry  users[];
+    eNvDbApplyMode  operation;              /* normal | forced              */
+    uint32_t        size_bytes[nvdbUser_last];
 } sNvDbLayoutCfg;
 ```
+
+`size_bytes[nvdbUser_undefined]` is unused and must be `0`.
+
+**The stored form carries its own entry count.** `nvdbUser_last` is a
+compile-time constant that *grows* when a user is added, so a layout written
+by an older image has fewer entries than a newer image expects. The record on
+the medium therefore states how many it holds; the in-memory structure does
+not need to. JSON is unaffected, being keyed by name.
+
+**`eNvDbUser` is append-only for now.** Adding a user is an ordinary layout
+change. **Removing one is not yet designed** — the id is persisted, the array
+is indexed by it, and reclaiming a retired slot interacts with both. Deferred
+deliberately (§6).
 
 ```json
 {
   "name": "periphnet",
   "version": 3,
   "operation": "normal",
-  "users": [
-    { "user": "crashLog",  "size": 4096 },
-    { "user": "fwuStored", "size": 499712 }
-  ]
+  "users": { "crashLog": 4096, "fwuStored": 499712 }
 }
 ```
 
+The JSON is keyed by user name because a human writes it; a user left out is
+size 0. The compiled form is the array, so the two map one to one.
+
 #### What is read back
 
-The same structure, with four differences:
+The same structure, with three differences:
 
 1. **No `operation`.** Once a layout is in force the mode is history; the
    status (§2.6) carries `lastApplyMode`.
-2. **Every user the image knows is listed.** One that the layout in force does
-   not place appears with `"size": 0` — the same fact `NvDb_GetSize` reports
-   (§2.4), said in the same way.
-3. **A final `freeSpace` entry**, in the ordinary entry shape. It is
-   **read-only**: supplying it is a parse error.
-4. **An onboarding state**, and when a configuration has been taken aboard but
+2. **`freeSpace` alongside it — not inside it.** Free space is not a user; it
+   is an answer to the consumer, so it is a field of the reply and never an
+   entry in the array. It is read-only: supplying it is a parse error.
+3. **An onboarding state**, and when a configuration has been taken aboard but
    not yet applied, its header — **name, version and operation only**, with no
-   user list and no free space of its own.
+   sizes and no free space of its own.
 
 ```c
 typedef enum {
@@ -455,11 +467,8 @@ typedef enum {
 {
   "name": "periphnet",
   "version": 3,
-  "users": [
-    { "user": "crashLog",  "size": 4096 },
-    { "user": "mqtt",      "size": 0 },
-    { "user": "freeSpace", "size": 7340032 }
-  ],
+  "users": { "crashLog": 4096, "mqtt": 0, "fwuStored": 499712 },
+  "freeSpace": 7340032,
   "onboarding": "validated",
   "received": { "name": "periphnet", "version": 4, "operation": "normal" }
 }
@@ -786,10 +795,12 @@ sector-erase behaviour is preserved rather than regressed.
   HTTP endpoint plus a CLI command, with JSON parse errors pointing at the
   offending field and the structural check reported separately. The schema is
   settled (§2.7); the transport is not.
-- **Whether `freeSpace` gets a reserved `eNvDbUser` id.** It appears in the
-  read-back in the ordinary entry shape but is never supplied and never
-  stored, so a reserved id keeps the shape uniform at the cost of a value in
-  a persisted enum that names nothing on the medium.
+
+- **Removing a user.** Adding is settled and cheap; retiring one is not
+  designed. `eNvDbUser` values are persisted and index the size array, so a
+  removal has to decide whether the slot is reserved forever, reused, or
+  compacted — and what happens to a stored layout that still names it. To be
+  taken up separately.
 
 **Belongs to another module, parked with its owner:**
 
@@ -817,3 +828,88 @@ signature, so none of them blocks the header:
   price of a byte-addressed interface, and it is the right price.
 - A guaranteed erase is the user's own problem. `nvDb` reports when an erase
   completed (§2.1) and never promises that one will.
+
+---
+
+## 7. Implementation plan
+
+**Placement.** `Shared/NvDb/` — application-only `Shared` code, host-testable,
+kept out of `${SHARED_SOURCES}` in its own `SHARED_NVDB_SOURCES` list exactly
+as `Shared/Modbus/` is, so it can never reach the 32 KB bootloader (C20). The
+RTOS glue lives in `App/NvDb/` and is the only part that knows FreeRTOS
+exists (C19).
+
+```
+Shared/NvDb/
+  nvdb.c/h              core: init, bounds, read, write, delete, wipe, size
+  nvdb_exceptions.h     NvDb_GetAbsoluteAddress — crash handler and FWU only
+  nvdb_layout.c/h       layout record: load, validate, apply, relayout
+  nvdb_config.c/h       JSON <-> sNvDbLayoutCfg, status rendering
+  nvdb_port.h           the port interface the core requires
+App/NvDb/
+  nvdb_platform.c/h     port implementation: mutex + lowest-priority collector
+tests/
+  test_nvdb_*.c         one per phase, over the NOR-faithful flash mock
+```
+
+**Phase 0 — raise the mock.** `tests/mocks/w25q128_mock.h` caps the mock at
+`0x110000`. The relayout and blob-area tests need the full 8 MB. One line, and
+it blocks phases 2, 5 and 7.
+
+**Phase 1 — addressing, no writes.** `NvDb_Init`, `NvDb_GetSize`, `NvDb_Read`,
+`NvDb_GetAbsoluteAddress`, the result set, the layout struct and its
+validation. Tests: bounds rejection at every edge, `len_bytes == 0`,
+`offset_bytes == size`, unknown user, size-0 user, reads of never-written
+space, calls before `Init`. **Deliverable: a user can read.**
+
+**Phase 2 — the write path.** Content check, read-modify-write, the erased
+fast path, the 4 KB main-SRAM buffer. Tests: write into erased space performs
+no erase (assert against the mock's erase counter — this is C12 and it is the
+one property most worth pinning early), write across an erasable-unit
+boundary, write that preserves neighbours, torn write at every step.
+**Deliverable: a user can persist.**
+
+**Phase 3 — delete, wipe, collector.** Byte-range marks, coalescing, the
+bounded list with inline erase on overflow, `fNvDbEraseDone`, and a write
+waiting on a pending delete. Tests: delete then read still sees old bytes;
+delete then collect then read sees erased; a write into pending space pulls
+its erase forward; mark-list overflow does the work inline and still fires the
+callback before returning. **Deliverable: the fast path stays fast.**
+
+**Phase 4 — configuration and status.** JSON parse and render, the staged
+layout, `NvDb_GetStatus`, apply modes. Tests: the accept/reject matrix,
+round-trip JSON -> struct -> JSON, an unknown user name, `freeSpace` supplied
+(must be a parse error), stored form read back with fewer entries than
+`nvdbUser_last`. **Deliverable: a layout can be authored and inspected.**
+
+**Phase 5 — relayout.** Move, grow, shrink against observed occupancy,
+feasibility rule (a), refusal leaving the current layout untouched, forced
+truncation, and first adoption (§4.4.1). Tests: every row of that behaviour,
+plus a torn relayout resumed at the next init, plus a layout that misplaces
+`nvDb`'s own areas being refused in **both** modes. **This is the bulk of the
+test effort** and all of it is host-side with no board.
+
+**Phase 6 — the port and first hardware run.** `App/NvDb/nvdb_platform.c`,
+`NvDb_Init()` next to `W25Q128_Init()` in `defaultTask`, the collector task at
+lowest priority with a priority-inheriting mutex. First on-device check: IWDG
+margin during a large wipe, and worst-case write latency under a concurrent
+reader.
+
+**Phase 7 — migrate users, cheapest first.**
+
+| Order | User | Why here |
+|-------|------|----------|
+| 1 | MQTT broker/prefix, Trice UDP destination | New users with nothing to migrate — they are RAM-only today, so this *fixes* a live defect rather than risking one |
+| 2 | `wg_cfg` | Small, already versioned and CRC'd, retires a region |
+| 3 | `wg_time` | Append-shaped; the first real exercise of the erased fast path |
+| 4 | Crash log | First `NvDb_GetAbsoluteAddress` client; fault-context write is unchanged |
+| 5 | Modbus config A/B + selector | Large, and the swap policy stays in the module |
+| 6 | FWU blobs + image meta + boot status | **Last.** Needs the FWU->BL handoff (§6), and a mistake here costs the ability to boot |
+
+**Phase 8 — operator surface.** Wear counting, occupancy reporting, the HTTP
+endpoint and CLI command for supplying and reading a layout. None of it
+changes a signature, which is why it is last rather than first.
+
+**What is deliberately not in the plan:** removing a user (§6), and the
+FWU->BL handoff, which is FWU's design and gates phase 7 step 6 rather than
+being part of it.
