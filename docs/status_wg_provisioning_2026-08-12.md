@@ -718,8 +718,12 @@ before this was noticed. Sequential probes only.
    history and in every `.bin` ever built from it, and the 2026-08-17
    dashboard `.conf` **reused it** (§3.7). Fix: `POST /api/wg/keygen`, then
    paste the new public key into WGDashboard. Tunnel is down in between.
-9b. **Board #1 is one release behind** — `Pd1.1.11`, i.e. it lacks the §3.14
-    ephemeral-port fix and still depends on the §3.9 workaround. See 6b.
+9b. ~~**Board #1 is one release behind**~~ — **RESOLVED 2026-08-20**: board #1
+    now runs `Pd1.1.17` (golden promoted to the same), so it HAS the §3.14
+    ephemeral-port fix. Its endpoint is still the §3.9 workaround
+    (`192.168.0.161:51820`, the hub's LAN address), so 6b's validation — point
+    it at the public IP and confirm the tunnel survives the hairpin — is now
+    unblocked and still to do.
 
 10. **Board #1 HardFault — RECURRED 2026-08-19, still unexplained.**
     Second occurrence, on `Pd1.1.14`, at `tick 4081472` ≈ **68 min** (the first
@@ -763,6 +767,77 @@ before this was noticed. Sequential probes only.
     corruption. `sp 0x10006700` is in CCM, where the 48 KB heap lives. Not a
     WG or Trice fault; it is in the firmware currently deployed to both
     boards.
+
+10c. **Third occurrence, board #1, 2026-08-20 ~01:56 — an IWDG reset that left
+    NO crash record at all.** Established 2026-08-20 while putting `Pd1.1.17`
+    on the board.
+
+    Timeline, from `crashwatch.sh`'s log and the board's own counters. Board #1
+    booted 2026-08-19 ~10:14 on `Pd1.1.16` with `reset_cause 0x14000003`
+    (SFT+PIN — the OTA install). It was still up at 23:50 with `uptime 49042`.
+    At 10:36 on 2026-08-20 its uptime was `30964`, i.e. it had booted at
+    **~01:56:47**, with `reset_cause 0x24000003` — **IWDGRSTF set, PORRSTF
+    clear**, so a watchdog reset and definitely not a power cut. `RCC->CSR` is
+    read and cleared at every boot (`System_Init`), so that flag is the last
+    reset only. Run length ≈ **15 h 43 min**.
+
+    `GET /api/crash/latest` answered `{"valid":false}` at 10:36 (crashwatch)
+    and again at 10:45 before anything was flashed. Nothing clears that record
+    but `DELETE /api/crash/latest`, and no session touched the board between
+    01:56 and 10:36. So the record is not stale or overwritten — **it was never
+    written**. `Pd1.1.16` already carried the `CRASH_LOG_MAX_TASKS = 16` fix,
+    so this is not item 10's earlier blindness recurring.
+
+    That is a different signature from 10 and 10b, where the HardFault handler
+    *did* write a record and the IWDG only cleaned up afterwards. Two things
+    could produce a bare IWDG reset with nothing recorded, and the second is a
+    defect in its own right:
+
+    - Nothing ran the fault path: the CPU spun ≥16 s with interrupts masked at
+      or above `configLIBRARY_LOWEST_INTERRUPT_PRIORITY` (a spin inside a
+      critical section), or a fault escalated to lockup.
+      `TIM14_PeriodElapsed_Callback` is the 12 s pre-IWDG warning and writes
+      `crashType_swWatchdog`;
+      it is at the LOWEST NVIC priority, so a `taskENTER_CRITICAL` spin masks
+      it and the software watchdog is silent exactly when it is needed.
+    - **The recorder ran and hung — and it can, because its timeouts cannot
+      expire in fault context.** `Crash_GenerateReport` → `saveToFlash` →
+      `W25Q128_EraseSector` / `W25Q128_WaitReady` / `HAL_SPI_Transmit`, and
+      every one of those bounds itself with `HAL_GetTick()`. The HAL tick is
+      **TIM6** (`Core/Src/stm32f4xx_hal_timebase_tim.c`) at priority 15. Inside
+      `HardFault_Handler` (priority −1) TIM6 cannot preempt; inside the TIM14
+      handler (also priority 15) it cannot preempt either. **`HAL_GetTick()` is
+      frozen in both crash-recording contexts**, so `(HAL_GetTick() - start) >
+      timeout_ms` is always false and every "bounded" wait is unbounded. If the
+      W25Q64 is mid program/erase, or SPI2 is left wedged by the transaction
+      the fault interrupted, the recorder spins until the IWDG fires — and the
+      evidence is destroyed by the very code meant to preserve it. The DMA
+      waits in `flushTrice()` are counter-based and do not have this problem;
+      only the flash path does.
+
+    Which of the two happened here cannot be decided from the board. Fixing the
+    second is worth doing regardless: give the fault-context flash path a
+    **cycle-counted** bound (DWT, already enabled for
+    `configGENERATE_RUN_TIME_STATS`) or a plain spin counter, like
+    `flushTrice()` already does. That is now a task of its own —
+    **[task_fault_context_flash.md](task_fault_context_flash.md)** — which
+    also records which HAL waits actually hang and which quietly escape via
+    ST's software-loop fallback.
+
+    **Workload correlation, held as a lead only.** The run that ended in this
+    reset was the only recent one with Modbus/RS485 actually polling: at 23:50
+    the `modbus` task had `run_ms 890886` (≈1.8 % of 13.6 h) with
+    `cpu_peak_permille 852` and its stack down to **237 free words of 640**. The
+    two runs since — the 8.6 h one after the reset, and `Pd1.1.17` now —
+    have no subscriber at all (`devices_state[0].polled = false`, `run_ms`
+    ≈ 16 s) and have been quiet. Both prior occurrences were also on boards
+    doing work.
+    Reproducing item 10 therefore probably requires putting the BMS polling back
+    on, not just leaving the board idle.
+
+    Raw evidence: `docs/crashlogs/board1_2026-08-19T235055_returned_sysmon.json`
+    (the run that died) and `board1_2026-08-20T103651_returned_sysmon.json` (the
+    run after it).
 
 **Hygiene**
 
