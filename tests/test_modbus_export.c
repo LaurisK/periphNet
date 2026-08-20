@@ -126,9 +126,10 @@ static void test_export_round_trip(void)
     sStrSink         json1 = {0};
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     /* compile original -> region A */
-    TEST_ASSERT(compile_to(FULL_FEATURED, EXT_FLASH_MODBUS_LUT_A_ADDR,
+    TEST_ASSERT(compile_to(FULL_FEATURED, nvdbUser_modbusLutA,
                            &res) == 0);
     TEST_ASSERT(res.counts.capabilities == 2);
     TEST_ASSERT(res.counts.devices == 3);
@@ -136,32 +137,30 @@ static void test_export_round_trip(void)
     TEST_ASSERT(res.counts.points == 11);
 
     /* export region A */
-    TEST_ASSERT(MbCfgExport(EXT_FLASH_MODBUS_LUT_A_ADDR,
+    TEST_ASSERT(MbCfgExport(nvdbUser_modbusLutA,
                             str_sink, &json1) == 0);
     TEST_ASSERT(json1.len > 0);
 
     /* re-compile the export -> region B */
-    TEST_ASSERT(compile_to(json1.buf, EXT_FLASH_MODBUS_LUT_B_ADDR,
+    TEST_ASSERT(compile_to(json1.buf, nvdbUser_modbusLutB,
                            &res) == 0);
 
     /* record streams must be byte-identical */
     sModbusLutHeader ha, hb;
-    W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR, (uint8_t *)&ha, sizeof(ha));
-    W25Q128_Read(EXT_FLASH_MODBUS_LUT_B_ADDR, (uint8_t *)&hb, sizeof(hb));
+    NvDb_Read(nvdbUser_modbusLutA, &ha, 0u, sizeof(ha));
+    NvDb_Read(nvdbUser_modbusLutB, &hb, 0u, sizeof(hb));
     TEST_ASSERT(ha.streamLen == hb.streamLen);
     TEST_ASSERT(ha.crc32 == hb.crc32);
 
     static uint8_t sa[8192], sb[8192];
     TEST_ASSERT(ha.streamLen <= sizeof(sa));
-    W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR + MODBUS_LUT_HEADER_SIZE,
-                 sa, ha.streamLen);
-    W25Q128_Read(EXT_FLASH_MODBUS_LUT_B_ADDR + MODBUS_LUT_HEADER_SIZE,
-                 sb, hb.streamLen);
+    NvDb_Read(nvdbUser_modbusLutA, sa, MODBUS_LUT_HEADER_SIZE, ha.streamLen);
+    NvDb_Read(nvdbUser_modbusLutB, sb, MODBUS_LUT_HEADER_SIZE, hb.streamLen);
     TEST_ASSERT_MEM_EQ(sa, sb, ha.streamLen);
 
     /* and a second export must reproduce the same JSON */
     sStrSink json2 = {0};
-    TEST_ASSERT(MbCfgExport(EXT_FLASH_MODBUS_LUT_B_ADDR,
+    TEST_ASSERT(MbCfgExport(nvdbUser_modbusLutB,
                             str_sink, &json2) == 0);
     TEST_ASSERT(json1.len == json2.len);
     TEST_ASSERT(strcmp(json1.buf, json2.buf) == 0);
@@ -171,7 +170,8 @@ static void test_export_invalid_region(void)
 {
     sStrSink out = {0};
     mock_flash_reset();
-    TEST_ASSERT(MbCfgExport(EXT_FLASH_MODBUS_LUT_A_ADDR, str_sink, &out) != 0);
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
+    TEST_ASSERT(MbCfgExport(nvdbUser_modbusLutA, str_sink, &out) != 0);
 }
 
 /* ============================================================================

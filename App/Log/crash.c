@@ -12,8 +12,9 @@
 
 #include "App/Log/crash.h"
 #include "App/Log/trice_consumer.h"
-#include "bl_app_contract.h"
 #include "image_mgmt.h"
+#include "nvdb.h"
+#include "nvdb_exceptions.h"
 #include "w25q128.h"
 #include "trice.h"
 #include "usart.h"
@@ -544,15 +545,30 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
     log.crc32 = ImgMgmt_Crc32((const uint8_t *)&log,
                                offsetof(sCrashLog, crc32));
 
-    /* Write to external flash */
+    /* Where to put it comes from nvDb; putting it there does not.  This runs
+     * in fault context, where the RTOS may be dead and an SPI transaction may
+     * have been in flight, so it resets the peripheral by hand and writes
+     * directly — one of the two clients nvdb_exceptions.h exists for.
+     *
+     * Before nvDb has run there is nowhere to write: the flash driver has not
+     * been brought up either at that point, so nothing is lost that could
+     * have been saved. */
+    uint32_t base = 0U;
+    uint32_t area = 0U;
+
+    if (NvDb_GetAbsoluteAddress(nvdbUser_crashLog, &base, &area) != nvdbRes_ok ||
+        area < sizeof(sCrashLog)) {
+        return;
+    }
+
     flash_force_ready();
-    W25Q128_EraseSector(EXT_FLASH_CRASH_LOG_ADDR);
+    W25Q128_EraseSector(base);
     W25Q128_WaitReady(W25Q128_ERASE_TIMEOUT_MS);
 
     /* Write in 256-byte pages */
     const uint8_t *src = (const uint8_t *)&log;
     uint32_t remaining = sizeof(sCrashLog);
-    uint32_t addr = EXT_FLASH_CRASH_LOG_ADDR;
+    uint32_t addr = base;
     while (remaining > 0) {
         uint32_t chunk = (remaining > W25Q128_PAGE_SIZE) ? W25Q128_PAGE_SIZE : remaining;
         W25Q128_WritePage(addr, src, chunk);
@@ -608,8 +624,9 @@ bool Crash_ReadFromFlash(sCrashLog *log)
 {
     if (!log) return false;
 
-    if (W25Q128_Read(EXT_FLASH_CRASH_LOG_ADDR,
-                     (uint8_t *)log, sizeof(sCrashLog)) != w25q_ok) {
+    /* Reading happens in a task, so it goes through the front door. */
+    if (NvDb_Read(nvdbUser_crashLog, log, 0U,
+                  sizeof(sCrashLog)) != nvdbRes_ok) {
         return false;
     }
 
@@ -624,5 +641,14 @@ bool Crash_ReadFromFlash(sCrashLog *log)
 
 void Crash_ClearFlash(void)
 {
-    W25Q128_EraseSector(EXT_FLASH_CRASH_LOG_ADDR);
+    /* nvDb's delete is eventual, and an operator who just cleared the log
+     * expects the next read to say so.  Clearing the magic is a bit-clear, so
+     * it lands synchronously and costs no erase; the wipe then reclaims the
+     * space in the background, which is what makes the NEXT crash write
+     * cheap. */
+    uint32_t magic = 0U;
+
+    (void)NvDb_Write(nvdbUser_crashLog, &magic, offsetof(sCrashLog, magic),
+                     sizeof(magic));
+    (void)NvDb_Wipe(nvdbUser_crashLog, NULL);
 }

@@ -29,6 +29,7 @@
 #define MODBUS_CONFIG_PLANS_H_
 
 #include "modbus_records.h"
+#include "nvdb.h"
 
 #include <stdint.h>
 
@@ -63,10 +64,10 @@ typedef enum {
  *         capability and readable; no point appears in two of this plan's time
  *         tables; every period >= 1; table and entry counts within bounds.
  */
-eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec);
+eModbusPlanErr MbCfgPlans_Validate(eNvDbUser region, const sModbusPlanSpec *spec);
 
 /**
- * @brief  Rewrite `srcBase` into `dstBase` with one plan slot replaced.
+ * @brief  Rewrite `srcRegion` into `dstRegion` with one plan slot replaced.
  *
  *         `spec == NULL` deletes the slot.  Plans are written in ascending
  *         slot order, skipping free ones, so the section stays
@@ -80,7 +81,7 @@ eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec);
  *
  * @param  kick  called before each sector erase (IWDG); may be NULL
  */
-eModbusPlanErr MbCfgPlans_Rewrite(uint32_t srcBase, uint32_t dstBase,
+eModbusPlanErr MbCfgPlans_Rewrite(eNvDbUser srcRegion, eNvDbUser dstRegion,
                                   uint8_t slot, const sModbusPlanSpec *spec,
                                   void (*kick)(void));
 

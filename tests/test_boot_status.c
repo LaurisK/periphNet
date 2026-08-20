@@ -8,6 +8,7 @@
 
 #include "boot_status.h"
 #include "image_mgmt.h"
+#include "nvdb.h"
 #include "w25q128_mock.h"
 
 #include <stdlib.h>
@@ -35,6 +36,7 @@ static void test_crc32(void)
 static void test_ensure_valid_on_blank_flash(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     sBootStatus st;
     TEST_ASSERT(BootStatus_Read(&st) != 0);         /* blank → invalid */
@@ -50,6 +52,7 @@ static void test_ensure_valid_on_blank_flash(void)
 static void test_request_fwu_arms_install(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(BootStatus_EnsureValid() == 0);
 
     TEST_ASSERT(BootStatus_RequestFwu() == 0);
@@ -64,6 +67,7 @@ static void test_request_fwu_arms_install(void)
 static void test_unconfirmed_attempts_to_rollback(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     /* Successful install leaves the image unconfirmed */
     TEST_ASSERT(BootStatus_FinishFwu(fwuRes_ok, false) == 0);
@@ -90,6 +94,7 @@ static void test_unconfirmed_attempts_to_rollback(void)
 static void test_confirm_stops_attempt_counting(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     TEST_ASSERT(BootStatus_FinishFwu(fwuRes_ok, false) == 0);
     TEST_ASSERT(BootStatus_ConsumeBootAttempt() == 0);
@@ -105,6 +110,7 @@ static void test_confirm_stops_attempt_counting(void)
 static void test_finish_fwu_preconfirmed(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     /* Rollback restores golden image which is known-good → pre-confirmed */
     TEST_ASSERT(BootStatus_FinishFwu(fwuRes_rollback, true) == 0);
@@ -120,10 +126,18 @@ static void test_finish_fwu_preconfirmed(void)
 static void test_corrupt_header_detected_and_recovered(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(BootStatus_EnsureValid() == 0);
 
     /* Clear a bit inside the CRC-protected header region (NOR-legal) */
-    mock_flash[EXT_FLASH_FWU_STATUS_ADDR + 8] &= 0x7F;
+    {
+        /* A NOR-legal bit flip inside the CRC'd header, through the front
+         * door: clearing bits is exactly the write nvDb programs in place. */
+        uint8_t b = 0;
+        TEST_ASSERT(NvDb_Read(nvdbUser_bootStatus, &b, 8u, 1u) == nvdbRes_ok);
+        b &= 0x7Fu;
+        TEST_ASSERT(NvDb_Write(nvdbUser_bootStatus, &b, 8u, 1u) == nvdbRes_ok);
+    }
 
     sBootStatus st;
     TEST_ASSERT(BootStatus_Read(&st) != 0);

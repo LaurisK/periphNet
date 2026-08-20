@@ -11,9 +11,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "stm32f4xx_hal.h"
-#include "bl_app_contract.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
+#include "nvdb.h"
 
 /* --------------------------------------------------------------------------
  * Flash slot ring
@@ -27,7 +26,11 @@ typedef struct {
 } sWgTimeSlot;           /* 16 B → 256 slots per 4 KB sector         */
 
 #define WG_TIME_SLOT_SIZE   ((uint32_t)sizeof(sWgTimeSlot))
-#define WG_TIME_SLOT_COUNT  (EXT_FLASH_WG_TIME_SIZE / WG_TIME_SLOT_SIZE)
+
+/* How many slots the ring holds, learned from nvDb at init.  A user is told
+ * its own size and nothing else about the medium — no sector, no erase — so
+ * this is a runtime value now rather than a constant derived from a map. */
+static uint32_t s_slotCount;
 
 /* Slots read per flash transaction — keeps the stack footprint small enough
  * for defaultTask (16 slots = 256 B). */
@@ -83,13 +86,20 @@ static int ring_scan(uint32_t *outSeconds, uint32_t *outSeq,
     uint32_t    nextIdx     = 0u;
     int         found       = 0;
 
-    for (uint32_t i = 0u; i < WG_TIME_SLOT_COUNT; i += WG_TIME_SCAN_SLOTS) {
-        if (W25Q128_Read(EXT_FLASH_WG_TIME_ADDR + (i * WG_TIME_SLOT_SIZE),
-                         (uint8_t *)batch, sizeof(batch)) != w25q_ok) {
+    for (uint32_t i = 0u; i < s_slotCount; i += WG_TIME_SCAN_SLOTS) {
+        /* The ring is however many slots nvDb's area holds, which a layout
+         * change can make a number that does not divide evenly. */
+        uint32_t n = s_slotCount - i;
+
+        if (n > WG_TIME_SCAN_SLOTS) {
+            n = WG_TIME_SCAN_SLOTS;
+        }
+        if (NvDb_Read(nvdbUser_wgTime, batch, i * WG_TIME_SLOT_SIZE,
+                      n * WG_TIME_SLOT_SIZE) != nvdbRes_ok) {
             return -1;
         }
 
-        for (uint32_t j = 0u; j < WG_TIME_SCAN_SLOTS; j++) {
+        for (uint32_t j = 0u; j < n; j++) {
             if (!slot_valid(&batch[j])) {
                 continue;
             }
@@ -110,27 +120,31 @@ static int ring_scan(uint32_t *outSeconds, uint32_t *outSeq,
     return found;
 }
 
-/* Append one slot.  Erases and restarts the ring when it is full or when the
- * target slot is not blank (a torn write from a power cut). */
+/* Append one slot.  Restarts the ring when it is full, or when the target
+ * slot is not blank (a torn write from a power cut).
+ *
+ * Append-shaped by design: every write lands in never-written space, which is
+ * the case nvDb programs directly without an erase.  Restarting the ring is
+ * the one moment that costs anything, and it is declared as what it is — the
+ * old slots are no longer wanted. */
 static int ring_append(uint32_t seconds)
 {
     sWgTimeSlot slot;
     sWgTimeSlot existing;
-    uint32_t    addr;
 
-    if (s_slotIdx < WG_TIME_SLOT_COUNT) {
-        addr = EXT_FLASH_WG_TIME_ADDR + (s_slotIdx * WG_TIME_SLOT_SIZE);
-        if (W25Q128_Read(addr, (uint8_t *)&existing,
-                         WG_TIME_SLOT_SIZE) != w25q_ok) {
+    if (s_slotIdx < s_slotCount) {
+        if (NvDb_Read(nvdbUser_wgTime, &existing,
+                      s_slotIdx * WG_TIME_SLOT_SIZE,
+                      WG_TIME_SLOT_SIZE) != nvdbRes_ok) {
             return -1;
         }
         if (!slot_erased(&existing)) {
-            s_slotIdx = WG_TIME_SLOT_COUNT;   /* force a fresh sector */
+            s_slotIdx = s_slotCount;          /* force a fresh ring */
         }
     }
 
-    if (s_slotIdx >= WG_TIME_SLOT_COUNT) {
-        if (W25Q128_EraseSector(EXT_FLASH_WG_TIME_ADDR) != w25q_ok) {
+    if (s_slotIdx >= s_slotCount) {
+        if (NvDb_Wipe(nvdbUser_wgTime, NULL) != nvdbRes_ok) {
             return -1;
         }
         s_slotIdx = 0u;
@@ -141,9 +155,10 @@ static int ring_append(uint32_t seconds)
     slot.seq     = ++s_seq;
     slot.crc32   = slot_crc(&slot);
 
-    addr = EXT_FLASH_WG_TIME_ADDR + (s_slotIdx * WG_TIME_SLOT_SIZE);
-    if (W25Q128_WritePage(addr, (const uint8_t *)&slot,
-                          WG_TIME_SLOT_SIZE) != w25q_ok) {
+    /* The write into just-wiped space pulls that erase forward itself, so the
+     * slot is on the medium when this returns either way. */
+    if (NvDb_Write(nvdbUser_wgTime, &slot, s_slotIdx * WG_TIME_SLOT_SIZE,
+                   WG_TIME_SLOT_SIZE) != nvdbRes_ok) {
         return -1;
     }
 
@@ -171,6 +186,7 @@ int WgTime_Init(void)
     uint32_t stored  = 0u;
     uint32_t seq     = 0u;
     uint32_t nextIdx = 0u;
+    uint32_t size    = 0u;
     int      scan;
 
     if (s_initDone) {
@@ -179,6 +195,14 @@ int WgTime_Init(void)
     s_initDone = 1u;
 
     rebase((uint32_t)WG_TIME_BUILD_EPOCH);
+
+    /* How much room the ring has is nvDb's answer, and a layout change can
+     * make it a different one.  Nothing else about the medium is asked. */
+    if (NvDb_GetSize(nvdbUser_wgTime, &size) != nvdbRes_ok ||
+        size < WG_TIME_SLOT_SIZE) {
+        return -1;
+    }
+    s_slotCount = size / WG_TIME_SLOT_SIZE;
 
     scan = ring_scan(&stored, &seq, &nextIdx);
     if (scan < 0) {

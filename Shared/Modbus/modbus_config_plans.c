@@ -6,7 +6,7 @@
 #include "modbus_config_plans.h"
 #include "modbus_config_store.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
+#include "nvdb.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -16,6 +16,10 @@
 /* Static, like the compiler's: this runs on whichever task drives the edit and
  * nothing big may sit on its stack.  Serialized by the module — only one edit
  * is in flight at a time (docs/modbus.md §4.8). */
+/* How much rewritten stream is buffered before it goes to nvDb.  A buffer,
+ * not a page: where the medium's boundaries fall is nvDb's business. */
+#define MB_PLANS_WRITE_CHUNK 256u
+
 #if defined(STM32F407xx)
 #define MB_PLANS_BSS __attribute__((section(".ccmram")))
 #else
@@ -23,13 +27,13 @@
 #endif
 
 typedef struct {
-    uint32_t base;                   /* destination region                  */
-    uint32_t streamOff;
-    uint8_t  page[W25Q128_PAGE_SIZE];
-    uint32_t pageLen;
-    uint32_t nextEraseOff;
-    uint32_t crc;
-    void   (*kick)(void);
+    eNvDbUser region;                /* destination region                  */
+    uint32_t  regionMax;             /* bytes it can hold                   */
+    uint32_t  streamOff;
+    uint8_t   page[MB_PLANS_WRITE_CHUNK];
+    uint32_t  pageLen;
+    uint32_t  crc;
+    void    (*kick)(void);
 } sWriter;
 
 MB_PLANS_BSS static sWriter s_w;
@@ -49,7 +53,7 @@ static inline int bit_get(const uint8_t *bits, uint16_t i)
     return (bits[i / 8u] >> (i % 8u)) & 1u;
 }
 
-eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec)
+eModbusPlanErr MbCfgPlans_Validate(eNvDbUser region, const sModbusPlanSpec *spec)
 {
     sModbusConfigCounts     counts;
     sMbCfgCursor            c;
@@ -63,7 +67,7 @@ eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec)
         (spec->tableCount > 0u && spec->tables == NULL)) {
         return mbPlan_errBadArg;
     }
-    if (MbCfg_Count(base, &counts) != 0) {
+    if (MbCfg_Count(region, &counts) != 0) {
         return mbPlan_errStream;
     }
     if (spec->capId >= counts.capabilities) {
@@ -79,7 +83,7 @@ eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec)
         if ((spec->devices & (uint8_t)(1u << d)) == 0u) {
             continue;
         }
-        if (d >= counts.devices || MbCfg_FindDevice(base, d, &dev) != 0) {
+        if (d >= counts.devices || MbCfg_FindDevice(region, d, &dev) != 0) {
             return mbPlan_errNoDevice;
         }
         if (dev.capId != spec->capId) {
@@ -89,7 +93,7 @@ eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec)
 
     /* Count the capability's points, and remember which of them may be read. */
     memset(s_ptSeen, 0, sizeof(s_ptSeen));
-    if (MbCfg_OpenCapability(base, spec->capId, &c, &cap, NULL, 0) != 0) {
+    if (MbCfg_OpenCapability(region, spec->capId, &c, &cap, NULL, 0) != 0) {
         return mbPlan_errNoCap;
     }
 
@@ -138,20 +142,6 @@ eModbusPlanErr MbCfgPlans_Validate(uint32_t base, const sModbusPlanSpec *spec)
  * Region writer — the compiler's, minus the JSON
  * ========================================================================== */
 
-static int w_erase_up_to(uint32_t regionOff)
-{
-    while (s_w.nextEraseOff <= regionOff) {
-        if (s_w.kick) {
-            s_w.kick();
-        }
-        if (W25Q128_EraseSector(s_w.base + s_w.nextEraseOff) != w25q_ok) {
-            return -1;
-        }
-        s_w.nextEraseOff += W25Q128_SECTOR_SIZE;
-    }
-    return 0;
-}
-
 static int w_flush_page(void)
 {
     if (s_w.pageLen == 0u) {
@@ -160,11 +150,11 @@ static int w_flush_page(void)
 
     uint32_t regionOff = MODBUS_LUT_HEADER_SIZE + s_w.streamOff - s_w.pageLen;
 
-    if (w_erase_up_to(regionOff + s_w.pageLen) != 0) {
-        return -1;
+    if (s_w.kick) {
+        s_w.kick();
     }
-    if (W25Q128_WritePage(s_w.base + regionOff, s_w.page,
-                          s_w.pageLen) != w25q_ok) {
+    if (NvDb_Write(s_w.region, s_w.page, regionOff,
+                   s_w.pageLen) != nvdbRes_ok) {
         return -1;
     }
     s_w.pageLen = 0;
@@ -175,14 +165,13 @@ static int w_write(const void *data, uint32_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
 
-    if (MODBUS_LUT_HEADER_SIZE + s_w.streamOff + len >
-        EXT_FLASH_MODBUS_LUT_SIZE) {
+    if (MODBUS_LUT_HEADER_SIZE + s_w.streamOff + len > s_w.regionMax) {
         return -1;
     }
     s_w.crc = ImgMgmt_Crc32Update(s_w.crc, p, len);
 
     while (len > 0u) {
-        uint32_t n = W25Q128_PAGE_SIZE - s_w.pageLen;
+        uint32_t n = MB_PLANS_WRITE_CHUNK - s_w.pageLen;
         if (n > len) {
             n = len;
         }
@@ -191,7 +180,7 @@ static int w_write(const void *data, uint32_t len)
         s_w.streamOff += n;
         p   += n;
         len -= n;
-        if (s_w.pageLen == W25Q128_PAGE_SIZE && w_flush_page() != 0) {
+        if (s_w.pageLen == MB_PLANS_WRITE_CHUNK && w_flush_page() != 0) {
             return -1;
         }
     }
@@ -212,8 +201,8 @@ static int w_finish(void)
     hdr.streamLen = s_w.streamOff;
     hdr.crc32     = ImgMgmt_Crc32Final(s_w.crc);
 
-    return (W25Q128_WritePage(s_w.base, (const uint8_t *)&hdr,
-                              sizeof(hdr)) == w25q_ok) ? 0 : -1;
+    return (NvDb_Write(s_w.region, &hdr, 0u,
+                       (uint32_t)sizeof(hdr)) == nvdbRes_ok) ? 0 : -1;
 }
 
 /* ==========================================================================
@@ -221,15 +210,15 @@ static int w_finish(void)
  * ========================================================================== */
 
 /* Copy `len` bytes of the source region's stream, from offset `off`. */
-static int copy_span(uint32_t srcBase, uint32_t off, uint32_t len)
+static int copy_span(eNvDbUser srcRegion, uint32_t off, uint32_t len)
 {
     uint8_t buf[128];
 
     while (len > 0u) {
         uint32_t n = (len > sizeof(buf)) ? sizeof(buf) : len;
 
-        if (W25Q128_Read(srcBase + MODBUS_LUT_HEADER_SIZE + off,
-                         buf, n) != w25q_ok) {
+        if (NvDb_Read(srcRegion, buf, MODBUS_LUT_HEADER_SIZE + off,
+                      n) != nvdbRes_ok) {
             return -1;
         }
         if (w_write(buf, n) != 0) {
@@ -281,7 +270,7 @@ static int emit_spec(uint8_t slot, const sModbusPlanSpec *spec)
 }
 
 /* Copy one plan and its body verbatim from the source cursor. */
-static int copy_plan(uint32_t srcBase, sMbCfgCursor *c,
+static int copy_plan(eNvDbUser srcRegion, sMbCfgCursor *c,
                      const sModbusPlanRecord *rec)
 {
     sModbusTimeTableRecord tt;
@@ -296,7 +285,7 @@ static int copy_plan(uint32_t srcBase, sMbCfgCursor *c,
 
         if (MbCfg_ReadPointIds(c, NULL, tt.entryCount) != 0 ||
             w_write(&tt, sizeof(tt)) != 0 ||
-            copy_span(srcBase, idsOff, idsLen) != 0) {
+            copy_span(srcRegion, idsOff, idsLen) != 0) {
             return -1;
         }
     }
@@ -309,7 +298,7 @@ static int copy_plan(uint32_t srcBase, sMbCfgCursor *c,
     return w_write(&end, sizeof(end));
 }
 
-eModbusPlanErr MbCfgPlans_Rewrite(uint32_t srcBase, uint32_t dstBase,
+eModbusPlanErr MbCfgPlans_Rewrite(eNvDbUser srcRegion, eNvDbUser dstRegion,
                                   uint8_t slot, const sModbusPlanSpec *spec,
                                   void (*kick)(void))
 {
@@ -317,13 +306,14 @@ eModbusPlanErr MbCfgPlans_Rewrite(uint32_t srcBase, uint32_t dstBase,
     sModbusPlanRecord plan;
     uint32_t          planSectionOff;
     int               emitted = 0;
+    uint32_t          dstSize = 0u;
     int               r;
 
-    if (slot >= MB_MAX_PLANS || srcBase == dstBase) {
+    if (slot >= MB_MAX_PLANS || srcRegion == dstRegion) {
         return mbPlan_errBadArg;
     }
     if (spec != NULL) {
-        eModbusPlanErr v = MbCfgPlans_Validate(srcBase, spec);
+        eModbusPlanErr v = MbCfgPlans_Validate(srcRegion, spec);
         if (v != mbPlan_ok) {
             return v;
         }
@@ -331,25 +321,32 @@ eModbusPlanErr MbCfgPlans_Rewrite(uint32_t srcBase, uint32_t dstBase,
 
     /* Where the plan section starts: everything before it is copied byte for
      * byte, which is what makes an untouched section provably untouched. */
-    if (MbCfg_SeekPlans(srcBase, &c) != 0) {
+    if (MbCfg_SeekPlans(srcRegion, &c) != 0) {
         return mbPlan_errStream;
     }
     planSectionOff = c.off;
 
+    if (NvDb_GetSize(dstRegion, &dstSize) != nvdbRes_ok ||
+        dstSize <= MODBUS_LUT_HEADER_SIZE) {
+        return mbPlan_errFlash;
+    }
+
     memset(&s_w, 0, sizeof(s_w));
-    s_w.base = dstBase;
-    s_w.crc  = ImgMgmt_Crc32Init();
-    s_w.kick = kick;
+    s_w.region    = dstRegion;
+    s_w.regionMax = dstSize;
+    s_w.crc       = ImgMgmt_Crc32Init();
+    s_w.kick      = kick;
 
     if (kick) {
         kick();
     }
-    if (W25Q128_EraseSector(dstBase) != w25q_ok) {
+    /* Stops the destination validating before a single byte of the new
+     * stream is written, and hands its erases to the collector. */
+    if (MbCfgStore_EraseRegion(dstRegion) != 0) {
         return mbPlan_errFlash;
     }
-    s_w.nextEraseOff = W25Q128_SECTOR_SIZE;
 
-    if (copy_span(srcBase, 0u, planSectionOff) != 0) {
+    if (copy_span(srcRegion, 0u, planSectionOff) != 0) {
         return mbPlan_errFull;
     }
 
@@ -384,7 +381,7 @@ eModbusPlanErr MbCfgPlans_Rewrite(uint32_t srcBase, uint32_t dstBase,
             }
             emitted = 1;
         }
-        if (copy_plan(srcBase, &c, &plan) != 0) {
+        if (copy_plan(srcRegion, &c, &plan) != 0) {
             return mbPlan_errFull;
         }
     }

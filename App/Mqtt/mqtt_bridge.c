@@ -13,6 +13,7 @@
 #include "App/Mqtt/mqtt_bridge.h"
 #include "App/Modbus/modbus.h"
 #include "App/Mon/sysmon.h"
+#include "App/nv_record.h"
 #include "cmsis_os.h"
 #include "trice.h"
 
@@ -37,6 +38,16 @@
  * -------------------------------------------------------------------------- */
 
 static sMqttBridgeCfg   s_cfg;
+
+/* Persisted form of s_cfg.  Its own nvDb user, because the broker address is
+ * per-site data that has no business being in the image. */
+#define MQTT_CFG_MAGIC   0x4D515443u   /* "MQTC" */
+#define MQTT_CFG_VERSION 1u
+
+typedef struct {
+    sNvRecordHdr   hdr;
+    sMqttBridgeCfg cfg;
+} sMqttCfgRecord;
 static mqtt_client_t    *s_client;
 static volatile int      s_running;
 static volatile int      s_stopReq;
@@ -1069,6 +1080,34 @@ int MqttBridge_IsRunning(void)
 int MqttBridge_IsConnected(void)
 {
     return s_connected;
+}
+
+int MqttBridge_SaveCfg(void)
+{
+    sMqttCfgRecord rec;
+
+    memset(&rec, 0, sizeof(rec));
+    rec.cfg = s_cfg;
+    return NvRecord_Save(nvdbUser_mqttCfg, MQTT_CFG_MAGIC, MQTT_CFG_VERSION,
+                         &rec, sizeof(rec));
+}
+
+int MqttBridge_LoadCfg(sMqttBridgeCfg *out)
+{
+    sMqttCfgRecord rec;
+
+    if (out == NULL ||
+        NvRecord_Load(nvdbUser_mqttCfg, MQTT_CFG_MAGIC, MQTT_CFG_VERSION,
+                      &rec, sizeof(rec)) != 0) {
+        return -1;
+    }
+    *out = rec.cfg;
+    return 0;
+}
+
+int MqttBridge_ForgetCfg(void)
+{
+    return NvRecord_Forget(nvdbUser_mqttCfg);
 }
 
 void MqttBridge_SetBrokerIp(uint8_t a, uint8_t b, uint8_t c, uint8_t d)

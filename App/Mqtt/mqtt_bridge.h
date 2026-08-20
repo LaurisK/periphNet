@@ -41,6 +41,30 @@ typedef struct {
 void MqttBridge_Start(const sMqttBridgeCfg *cfg);
 
 /**
+ * @brief  Persist the running configuration so a reset does not lose it.
+ *
+ * The broker address used to live only in RAM, which meant a deployed board
+ * pointed at whatever the image was compiled with — the bench broker — after
+ * every reboot, until somebody re-issued a CLI command over USB.  That is the
+ * defect this exists to close.
+ *
+ * @return 0 on success, -1 if nothing is running or the medium refused.
+ */
+int MqttBridge_SaveCfg(void);
+
+/**
+ * @brief  Load the persisted configuration, if there is one.
+ * @return 0 and fills @p out, or -1 when the board has never been configured.
+ */
+int MqttBridge_LoadCfg(sMqttBridgeCfg *out);
+
+/**
+ * @brief  Discard the persisted configuration.
+ * @return 0 on success, -1 if the medium refused.
+ */
+int MqttBridge_ForgetCfg(void);
+
+/**
  * @brief  Stop the MQTT bridge task and disconnect.
  */
 void MqttBridge_Stop(void);

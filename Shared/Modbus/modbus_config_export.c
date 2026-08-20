@@ -226,7 +226,7 @@ static int export_plan(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
     return emit(sink, ctx, "]}");
 }
 
-int MbCfgExport(uint32_t regionBase, fModbusByteSink sink, void *ctx)
+int MbCfgExport(eNvDbUser region, fModbusByteSink sink, void *ctx)
 {
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
@@ -237,7 +237,7 @@ int MbCfgExport(uint32_t regionBase, fModbusByteSink sink, void *ctx)
     int                     r;
     int                     firstDev = 1, firstPlan = 1;
 
-    if (!sink || MbCfg_Open(regionBase, &c) != 0) {
+    if (!sink || MbCfg_Open(region, &c) != 0) {
         return -1;
     }
 

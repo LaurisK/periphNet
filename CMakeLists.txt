@@ -115,6 +115,18 @@ set(SHARED_MODBUS_SOURCES
     Shared/Modbus/modbus_units.c
 )
 
+# Application-only Shared/ code: nvDb owns the external flash address space.
+# Host-testable pure logic (libc + W25Q128 + its own port) and, like the
+# Modbus config machinery, kept out of the 32 KB bootloader — the BL runs
+# before the application exists and learns where things are from FWU, never
+# from nvDb (docs/task_nv_db.md §1.6, C20).
+set(SHARED_NVDB_SOURCES
+    Shared/NvDb/nvdb.c
+    Shared/NvDb/nvdb_layout.c
+    Shared/NvDb/nvdb_config.c
+    Shared/NvDb/nvdb_wear.c
+)
+
 # ==============================================================================
 # Trice ID management helpers
 # ==============================================================================
@@ -156,6 +168,10 @@ set(BL_SOURCES
     bootloader/boot_main.c
     bootloader/boot_api.c
     bootloader/boot_stm32f4xx_it.c
+    # boot_status.c is Shared and compiles into both targets, so it cannot
+    # call nvDb.  Each target answers boot_status_medium.h its own way: the
+    # BL writes the flash directly, the application goes through nvDb.
+    bootloader/boot_status_medium.c
     ${BL_SECRETS}
     Core/Startup/startup_stm32f407vetx.s
     Core/Src/gpio.c
@@ -246,6 +262,52 @@ set(APP_CORE_SOURCES
 file(GLOB_RECURSE APP_MODULE_SOURCES CONFIGURE_DEPENDS
     "App/*.c"
 )
+
+# nvDb must never link into the bootloader, and the bootloader must never
+# include its headers: the BL has no knowledge of nvDb by design, which is
+# what leaves the directory format free to evolve (docs/task_nv_db.md §1.6).
+file(GLOB_RECURSE _bl_srcs CONFIGURE_DEPENDS "bootloader/*.c" "bootloader/*.h")
+foreach(_f ${_bl_srcs})
+    file(STRINGS "${_f}" _hits REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<]nvdb")
+    if(_hits)
+        message(FATAL_ERROR "nvDb reached the bootloader: ${_f}: ${_hits}")
+    endif()
+endforeach()
+
+# ------------------------------------------------------------------------------
+# nvDb is the ONLY authority over the medium (docs/task_nv_db.md, rule 2),
+# enforced the same way the secrets and Modbus-boundary rules are: greppable,
+# checked at configure time, so it cannot decay back into a convention.
+#
+# Nothing in App/ or Shared/ may call the flash driver or name an ext-flash
+# address.  Four files are allowed to, each for a stated reason:
+#
+#   Shared/Drivers/w25q128.c  IS the driver
+#   Shared/NvDb/nvdb.c        IS the authority
+#   App/Log/crash.c           writes in fault context, where the RTOS may be
+#                             dead — it takes its address from nvDb through
+#                             nvdb_exceptions.h and does the I/O itself
+#   App/Fwu/fwu_control.c     compares nvDb's placement against what the
+#                             bootloader was built for, and refuses to arm an
+#                             install if they have diverged (§1.6)
+#   Shared/Fwu/image_mgmt.c   streams an HMAC over flash for the BOOTLOADER;
+#                             the application only ever calls it on internal,
+#                             memory-mapped flash
+# ------------------------------------------------------------------------------
+
+file(GLOB_RECURSE _medium_srcs CONFIGURE_DEPENDS "App/*.c" "App/*.h"
+                                                 "Shared/*.c" "Shared/*.h")
+foreach(_f ${_medium_srcs})
+    if(_f MATCHES "Shared/Drivers/|Shared/NvDb/|App/Log/crash\\.c|App/Fwu/fwu_control\\.c|Shared/Fwu/image_mgmt\\.c|Shared/Fwu/bl_app_contract\\.h")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hits REGEX "W25Q128_(Read|WritePage|Erase[A-Za-z0-9]*)\\(|EXT_FLASH_[A-Z_]*_ADDR")
+    if(_hits)
+        message(FATAL_ERROR
+                "nvDb is the only authority over the medium: ${_f} reaches it "
+                "directly: ${_hits}")
+    endif()
+endforeach()
 
 # FWU keys must never link into the application (see Key Constraints).
 foreach(_app_src ${APP_MODULE_SOURCES})
@@ -385,6 +447,7 @@ target_include_directories(trice PUBLIC
 set(APP_INCLUDES
     ${BASE_INCLUDES}
     Shared/Modbus
+    Shared/NvDb
     Core/ThreadSafe
     App
     USB_DEVICE/App
@@ -436,6 +499,7 @@ add_executable(application.elf
     ${APP_CORE_SOURCES}
     ${APP_MODULE_SOURCES}
     ${SHARED_MODBUS_SOURCES}
+    ${SHARED_NVDB_SOURCES}
     ${BACKTRACE_SOURCES}
     ${WIREGUARD_SOURCES}
     ${HAL_SOURCES}

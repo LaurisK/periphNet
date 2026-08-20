@@ -123,6 +123,11 @@ void KickIwdg(void)
     }
     s_lastKick_ms = now_ms;
 
+    System_FeedWatchdogLongOp();
+}
+
+void System_FeedWatchdogLongOp(void)
+{
     if (s_wdgTestMode) {
         return;
     }

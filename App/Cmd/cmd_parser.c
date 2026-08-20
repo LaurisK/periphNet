@@ -19,6 +19,9 @@
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
+#include "nvdb.h"
+#include "nvdb_config.h"
+#include "nvdb_layout.h"
 #include "cmsis_os.h"
 #include "trice.h"
 #include "usart.h"
@@ -70,14 +73,16 @@ static void cmd_bms(const char *args);
 static void cmd_modbus(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
+static void cmd_nvdb(const char *args);
 static void cmd_sysmon(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
-    { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|monitor|inject|publish|status)"  },
+    { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|save|forget|monitor|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
+    { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
     { "sysmon",      cmd_sysmon,      "System monitor (tasks|heap|reset)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
@@ -424,7 +429,10 @@ static void cmd_modbus(const char *args)
  * MQTT command: control MQTT bridge to Home Assistant.
  *
  * Usage:
- *   mqtt start [ip] [port]   — Start MQTT bridge (default 10.42.0.1:1883)
+ *   mqtt start [ip] [port]   — Start MQTT bridge.  With no address it uses
+ *                              the saved one, or 10.42.0.1:1883 if none
+ *   mqtt save                — Persist the running config across resets
+ *   mqtt forget              — Discard the persisted config
  *   mqtt stop                — Stop bridge
  *   mqtt status              — Show connection state
  *   mqtt set ip <a.b.c.d>   — Change broker IP
@@ -445,6 +453,11 @@ static void cmd_mqtt(const char *args)
             .prefix = "periphnet",
             .publishIntervalMs = 5000,
         };
+        /* A saved broker beats the compiled-in one, which is a bench
+         * address and wrong everywhere else. */
+        if (MqttBridge_LoadCfg(&cfg) == 0) {
+            TRice("MQTT: using saved broker\n");
+        }
         /* Parse optional: mqtt start [a.b.c.d] [port] */
         const char *p = args + 5;
         unsigned a, b, c, d, port = 0;
@@ -456,6 +469,18 @@ static void cmd_mqtt(const char *args)
             if (port > 0) cfg.brokerPort = (uint16_t)port;
         }
         MqttBridge_Start(&cfg);
+    } else if (strncmp(args, "save", 4) == 0) {
+        if (MqttBridge_SaveCfg() == 0) {
+            TRice("MQTT config saved\n");
+        } else {
+            TRice("MQTT config save FAILED\n");
+        }
+    } else if (strncmp(args, "forget", 6) == 0) {
+        if (MqttBridge_ForgetCfg() == 0) {
+            TRice("MQTT config forgotten\n");
+        } else {
+            TRice("MQTT config forget FAILED\n");
+        }
     } else if (strncmp(args, "stop", 4) == 0) {
         MqttBridge_Stop();
     } else if (strncmp(args, "set ip ", 7) == 0) {
@@ -506,7 +531,7 @@ static void cmd_mqtt(const char *args)
     } else if (strncmp(args, "status", 6) == 0) {
         MqttBridge_LogStatus();
     } else {
-        TRice("Usage: mqtt start|stop|status|set|monitor|inject|publish\n");
+        TRice("Usage: mqtt start|stop|save|forget|status|set|monitor|inject|publish\n");
     }
 }
 
@@ -633,6 +658,103 @@ static void cmd_wg(const char *args)
               now, persisted, (unsigned)flashOk);
     } else {
         TRice("Usage: wg start|stop|status|endpoint|ip|genkey|save|reset\n");
+    }
+}
+
+/**
+ * The non-volatile store: what it did with the medium, for a person.
+ *
+ * Usage:
+ *   nvdb status      — module and layout version, and how the last apply went
+ *   nvdb layout      — the layout in force, free space, anything waiting
+ *   nvdb usage       — per-user occupancy and wear (SLOW: reads every area)
+ *   nvdb wear        — erase counts only, no scan
+ *   nvdb drop        — discard a layout that came aboard but has not applied
+ *
+ * Read-only apart from `drop`.  An nvDb USER never asks any of this, and the
+ * operator asking it has no business erasing somebody else's area from a
+ * console — a layout is supplied over HTTP (POST /api/nvdb/layout), where a
+ * parse error can point at the offending field.
+ */
+static void cmd_nvdb(const char *args)
+{
+    if (strncmp(args, "status", 6) == 0) {
+        sNvDbStatus st;
+
+        if (NvDb_GetStatus(&st) != nvdbRes_ok) {
+            TRice("nvDb: not initialised\n");
+            return;
+        }
+        TRice("nvDb v%u, layout '%s' v%u\n", st.nvdbVer, st.layoutName,
+              st.layoutVer);
+        TRice("  last apply: mode %s, result %u\n",
+              NvDbCfg_ModeName(st.lastApplyMode), st.lastApplyResult);
+    } else if (strncmp(args, "layout", 6) == 0) {
+        sNvDbLayoutInfo info;
+        uint32_t        i = 0u;
+
+        if (NvDb_GetLayout(&info) != nvdbRes_ok) {
+            TRice("nvDb: not initialised\n");
+            return;
+        }
+        TRice("layout '%s' v%u, free %u B\n", info.name, info.version,
+              info.freeSpace_bytes);
+        for (i = 1u; i < (uint32_t)nvdbUser_last; i++) {
+            const char *name = NvDb_UserName((eNvDbUser)i);
+
+            if (name == NULL) {
+                continue;
+            }
+            TRice("  %s %u B\n", name, info.size_bytes[i]);
+        }
+        if (info.onboarding != nvdbOnboard_none) {
+            TRice("  waiting: '%s' v%u (%s)\n", info.received.name,
+                  info.received.version,
+                  NvDbCfg_ModeName(info.received.operation));
+        }
+    } else if (strncmp(args, "usage", 5) == 0 ||
+               strncmp(args, "wear", 4) == 0) {
+        /* `usage` observes occupancy, which reads every area — nearly a
+         * megabyte of SPI with two blob areas in the layout.  `wear` answers
+         * from counters already in RAM. */
+        bool             scan = (strncmp(args, "usage", 5) == 0);
+        sNvDbMediumUsage med;
+        uint32_t         i = 0u;
+
+        if (NvDb_GetMediumUsage(&med) != nvdbRes_ok) {
+            TRice("nvDb: not initialised\n");
+            return;
+        }
+        TRice("medium %u B, allocated %u B, free %u B\n",
+              med.medium_bytes, med.allocated_bytes, med.freeSpace_bytes);
+        TRice("  erases: max %u, total %u, %u not yet saved\n",
+              med.eraseCntMax, med.eraseCntTotal, med.eraseCntUnsaved);
+
+        for (i = 1u; i < (uint32_t)nvdbUser_last; i++) {
+            const char *name = NvDb_UserName((eNvDbUser)i);
+            sNvDbUsage  u;
+
+            if (name == NULL ||
+                NvDb_GetUsage((eNvDbUser)i, scan, &u) != nvdbRes_ok ||
+                u.size_bytes == 0u) {
+                continue;
+            }
+            if (scan) {
+                TRice("  %s %u/%u B used, erases max %u\n", name,
+                      u.occupied_bytes, u.size_bytes, u.eraseCntMax);
+            } else {
+                TRice("  %s %u B, erases max %u total %u\n", name,
+                      u.size_bytes, u.eraseCntMax, u.eraseCntTotal);
+            }
+        }
+    } else if (strncmp(args, "drop", 4) == 0) {
+        if (NvDb_DropSuppliedLayout() == nvdbRes_ok) {
+            TRice("nvDb: staged layout dropped\n");
+        } else {
+            TRice("nvDb: nothing to drop, or the medium refused\n");
+        }
+    } else {
+        TRice("Usage: nvdb status|layout|usage|wear|drop\n");
     }
 }
 

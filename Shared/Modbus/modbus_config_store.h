@@ -2,11 +2,16 @@
  * @file    modbus_config_store.h
  * @brief   Modbus config flash store: A/B region selector + record cursor.
  *
- * Two 16 KB LUT regions hold compiled record streams (modbus_records.h).
- * The 4 KB selector sector says which region is active, following the
- * boot_status NOR pattern: a CRC-protected header plus a flags word OUTSIDE
- * the CRC so single bits (swap_pending) can be cleared without a sector
- * erase.
+ * Two LUT regions hold compiled record streams (modbus_records.h).  A third
+ * area, the selector, says which of them is active, following the boot_status
+ * NOR pattern: a CRC-protected header plus a flags word OUTSIDE the CRC so
+ * single bits (swap_pending) can be cleared without an erase — which nvDb
+ * preserves, because a write it can program onto what is already there is
+ * programmed in place.
+ *
+ * All three are nvDb users (nvdbUser_modbusLutA / LutB / modbusSelector).
+ * A "region" here is therefore a user id, not an address: this module asks
+ * nvDb for bytes at an offset and has no idea where they live.
  *
  * Invariant: a region is never erased while it may still be walked — the
  * retiring region is only overwritten by the NEXT upload or plan edit, so a
@@ -22,6 +27,7 @@
 
 #include "modbus_records.h"
 #include "bl_app_contract.h"
+#include "nvdb.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -61,18 +67,20 @@ typedef struct {
  * config. Idempotent; call before any other store function. */
 int      MbCfgStore_Init(void);
 
-uint32_t MbCfgStore_ActiveBase(void);
-uint32_t MbCfgStore_InactiveBase(void);
+/* Which nvDb user holds the config in force, and which one an upload may
+ * consume.  They swap; neither moves. */
+eNvDbUser MbCfgStore_ActiveRegion(void);
+eNvDbUser MbCfgStore_InactiveRegion(void);
 
 /* Header magic/version/streamLen sanity + CRC32 over the record stream.
  * The version test is strict equality, which is what makes the v1 -> v2 move
  * a wipe rather than a migration (docs/modbus.md §11.2). */
-bool     MbCfgStore_RegionValid(uint32_t base);
+bool     MbCfgStore_RegionValid(eNvDbUser region);
 
 /* Erase a region's header page so it stops validating.  "Invalid is erased,
  * not repaired" (§4.2): one observable state instead of a spectrum of
  * partially-readable ones, and the region is immediately reusable. */
-int      MbCfgStore_EraseRegion(uint32_t base);
+int      MbCfgStore_EraseRegion(eNvDbUser region);
 
 /* Arm the swap flag (NOR bit-clear, no erase). Refuses (-1) if the inactive
  * region does not hold a valid config. */
@@ -109,12 +117,12 @@ int      MbCfgStore_ClearSwapPending(void);
  * ========================================================================== */
 
 typedef struct {
-    uint32_t base;               /* region base address                     */
-    uint32_t off;                /* current offset into the record stream   */
-    uint32_t streamLen;          /* from the region header                  */
+    uint32_t  off;               /* current offset into the record stream   */
+    uint32_t  streamLen;         /* from the region header                  */
+    eNvDbUser region;            /* which nvDb user holds this stream       */
 } sMbCfgCursor;
 
-int MbCfg_Open(uint32_t base, sMbCfgCursor *c);   /* -1 if header invalid */
+int MbCfg_Open(eNvDbUser region, sMbCfgCursor *c);  /* -1 if header invalid */
 
 int MbCfg_NextCapability(sMbCfgCursor *c, sModbusCapabilityRecord *cap);
 int MbCfg_NextPoint(sMbCfgCursor *c, sModbusPointRecord *p);
@@ -133,23 +141,23 @@ int MbCfg_ReadPointIds(sMbCfgCursor *c, uint16_t *out, uint16_t count);
  * ========================================================================== */
 
 /* Full structural walk; -1 if the stream is malformed. */
-int MbCfg_Count(uint32_t base, sModbusConfigCounts *out);
+int MbCfg_Count(eNvDbUser region, sModbusConfigCounts *out);
 
 /* Position a cursor at the first device / first plan record. */
-int MbCfg_SeekDevices(uint32_t base, sMbCfgCursor *c);
-int MbCfg_SeekPlans(uint32_t base, sMbCfgCursor *c);
+int MbCfg_SeekDevices(eNvDbUser region, sMbCfgCursor *c);
+int MbCfg_SeekPlans(eNvDbUser region, sMbCfgCursor *c);
 
 /* Load one capability and its blocks, leaving the cursor at its first point.
  * `blocks` may be NULL; it is filled with at most maxBlocks entries.
  * 0 = found, -1 = no such capability / malformed. */
-int MbCfg_OpenCapability(uint32_t base, uint16_t capId, sMbCfgCursor *c,
+int MbCfg_OpenCapability(eNvDbUser region, uint16_t capId, sMbCfgCursor *c,
                          sModbusCapabilityRecord *cap,
                          sModbusBlockRecord *blocks, uint8_t maxBlocks);
 
-int MbCfg_FindDevice(uint32_t base, uint8_t devOrd, sModbusDeviceRecord *out);
+int MbCfg_FindDevice(eNvDbUser region, uint8_t devOrd, sModbusDeviceRecord *out);
 
 /* One point of one capability, by its dense ordinal. */
-int MbCfg_FindPoint(uint32_t base, uint16_t capId, uint16_t ptOrd,
+int MbCfg_FindPoint(eNvDbUser region, uint16_t capId, uint16_t ptOrd,
                     sModbusPointRecord *out);
 
 /* Plan headers are the ONE deliberate exception to "no record is RAM-resident"
@@ -163,7 +171,7 @@ typedef struct {
 
 /* Fills out[0..MB_MAX_PLANS-1] by slot, marking the free ones.
  * Returns the number of plans present, or -1. */
-int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out);
+int MbCfg_ReadPlanHeaders(eNvDbUser region, sMbPlanHeader *out);
 
 typedef struct {
     uint8_t            slaveAddr;

@@ -22,7 +22,7 @@
 #include "modbus_blocks.h"
 #include "modbus_units.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
+#include "nvdb.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -35,6 +35,12 @@
 
 #define LEX_WINDOW      128u   /* refill window over the byte source */
 #define TOK_MAX         32u    /* longest key/value token + NUL      */
+
+/* How much compiled stream is buffered before it is handed to nvDb.  A
+ * buffer, not a page: nvDb splits at whatever boundaries the medium has and
+ * this module is not entitled to know what they are. */
+#define MB_WRITE_CHUNK  256u
+
 #define SCALE_POW_MAX   6      /* |scalePow10| ceiling               */
 
 #define PT_BITMAP_BYTES ((MB_MAX_POINTS_TOTAL + 7u) / 8u)
@@ -56,12 +62,15 @@ typedef struct {
     int           eof;
     int           ioErr;
 
-    /* flash writer (stream starts at regionBase + MODBUS_LUT_HEADER_SIZE) */
-    uint32_t      base;
-    uint32_t      streamOff;         /* bytes of stream written so far */
-    uint8_t       page[W25Q128_PAGE_SIZE];
+    /* writer — everything goes to nvDb at region offsets, the stream
+     * starting at MODBUS_LUT_HEADER_SIZE.  There is no erase bookkeeping
+     * here any more: the region is wiped up front and nvDb pulls each unit's
+     * erase forward as the writes reach it. */
+    eNvDbUser     region;
+    uint32_t      regionMax;         /* bytes the region can hold          */
+    uint32_t      streamOff;         /* bytes of stream written so far     */
+    uint8_t       page[MB_WRITE_CHUNK];
     uint32_t      pageLen;
-    uint32_t      nextEraseOff;      /* region offset of next unerased sector */
     uint32_t      crc;
     void        (*kick)(void);
     int           flashErr;
@@ -352,28 +361,11 @@ static int parse_scale_pow10(const char *text, int8_t *out)
 }
 
 /* ==========================================================================
- * Flash writer — page-buffered, lazy sector erase, incremental CRC.
- * Stream data begins at regionBase + MODBUS_LUT_HEADER_SIZE; the header
- * page is written last (see fw_finish).
+ * Writer — chunk-buffered, incremental CRC, everything through nvDb.
+ * Stream data begins at region offset MODBUS_LUT_HEADER_SIZE; the header is
+ * written last (see fw_finish), so a torn compile never leaves a valid
+ * region behind.
  * ========================================================================== */
-
-static int fw_erase_up_to(uint32_t regionOff)
-{
-    if (s_c.dryRun) {
-        return 0;
-    }
-    while (s_c.nextEraseOff <= regionOff) {
-        if (s_c.kick) {
-            s_c.kick();
-        }
-        if (W25Q128_EraseSector(s_c.base + s_c.nextEraseOff) != w25q_ok) {
-            s_c.flashErr = 1;
-            return fail("flash", "sector erase failed");
-        }
-        s_c.nextEraseOff += W25Q128_SECTOR_SIZE;
-    }
-    return 0;
-}
 
 static int fw_flush_page(void)
 {
@@ -387,13 +379,13 @@ static int fw_flush_page(void)
 
     uint32_t regionOff = MODBUS_LUT_HEADER_SIZE + s_c.streamOff - s_c.pageLen;
 
-    if (fw_erase_up_to(regionOff + s_c.pageLen - 1u) != 0) {
-        return -1;
+    if (s_c.kick) {
+        s_c.kick();
     }
-    if (W25Q128_WritePage(s_c.base + regionOff, s_c.page,
-                          s_c.pageLen) != w25q_ok) {
+    if (NvDb_Write(s_c.region, s_c.page, regionOff,
+                   s_c.pageLen) != nvdbRes_ok) {
         s_c.flashErr = 1;
-        return fail("flash", "page write failed");
+        return fail("flash", "region write failed");
     }
     s_c.pageLen = 0;
     return 0;
@@ -403,14 +395,14 @@ static int fw_write(const void *data, uint32_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
 
-    if (MODBUS_LUT_HEADER_SIZE + s_c.streamOff + len > EXT_FLASH_MODBUS_LUT_SIZE) {
+    if (MODBUS_LUT_HEADER_SIZE + s_c.streamOff + len > s_c.regionMax) {
         return fail("config", "compiled stream exceeds region size");
     }
 
     s_c.crc = ImgMgmt_Crc32Update(s_c.crc, p, len);
 
     while (len > 0u) {
-        uint32_t n = W25Q128_PAGE_SIZE - s_c.pageLen;
+        uint32_t n = MB_WRITE_CHUNK - s_c.pageLen;
         if (n > len) {
             n = len;
         }
@@ -419,7 +411,7 @@ static int fw_write(const void *data, uint32_t len)
         s_c.streamOff += n;
         p   += n;
         len -= n;
-        if (s_c.pageLen == W25Q128_PAGE_SIZE && fw_flush_page() != 0) {
+        if (s_c.pageLen == MB_WRITE_CHUNK && fw_flush_page() != 0) {
             return -1;
         }
     }
@@ -443,8 +435,8 @@ static int fw_finish(void)
     hdr.streamLen = s_c.streamOff;
     hdr.crc32     = ImgMgmt_Crc32Final(s_c.crc);
 
-    if (W25Q128_WritePage(s_c.base, (const uint8_t *)&hdr,
-                          sizeof(hdr)) != w25q_ok) {
+    if (NvDb_Write(s_c.region, &hdr, 0u,
+                   (uint32_t)sizeof(hdr)) != nvdbRes_ok) {
         s_c.flashErr = 1;
         return fail("flash", "header write failed");
     }
@@ -1488,12 +1480,19 @@ static int parse_config(void)
  * never a second validator to keep in sync, which is the whole reason verify
  * is cheap enough to have. */
 static int compile_or_verify(fModbusByteSource src, void *srcCtx,
-                             uint32_t regionBase, void (*kick)(void),
+                             eNvDbUser region, void (*kick)(void),
                              sModbusCompileResult *res, int dryRun)
 {
+    uint32_t regionSize = 0u;
+
     if (!src || !res ||
-        (!dryRun && regionBase != EXT_FLASH_MODBUS_LUT_A_ADDR &&
-         regionBase != EXT_FLASH_MODBUS_LUT_B_ADDR)) {
+        (region != nvdbUser_modbusLutA && region != nvdbUser_modbusLutB)) {
+        return -1;
+    }
+    /* A verify writes nothing, but it still has to answer "would this fit?",
+     * so it asks the size of the region the upload WOULD have gone to. */
+    if (NvDb_GetSize(region, &regionSize) != nvdbRes_ok ||
+        regionSize <= MODBUS_LUT_HEADER_SIZE) {
         return -1;
     }
 
@@ -1506,7 +1505,8 @@ static int compile_or_verify(fModbusByteSource src, void *srcCtx,
     memset(&s_c, 0, sizeof(s_c));
     s_c.src        = src;
     s_c.srcCtx     = srcCtx;
-    s_c.base       = regionBase;
+    s_c.region     = region;
+    s_c.regionMax  = regionSize;
     s_c.kick       = kick;
     s_c.crc        = ImgMgmt_Crc32Init();
     s_c.res        = res;
@@ -1526,11 +1526,14 @@ static int compile_or_verify(fModbusByteSource src, void *srcCtx,
         if (kick) {
             kick();
         }
-        if (W25Q128_EraseSector(regionBase) != w25q_ok) {
-            fail("flash", "sector erase failed");
+        /* MbCfgStore_EraseRegion clears the header magic synchronously and
+         * then wipes: the region stops validating the instant this returns,
+         * and the erases it costs happen in the background — or are pulled
+         * forward by the writes below, whichever comes first. */
+        if (MbCfgStore_EraseRegion(region) != 0) {
+            fail("flash", "region erase failed");
             return -1;
         }
-        s_c.nextEraseOff = W25Q128_SECTOR_SIZE;
     }
 
     if (parse_config() != 0 || fw_finish() != 0) {
@@ -1542,10 +1545,10 @@ static int compile_or_verify(fModbusByteSource src, void *srcCtx,
     return 0;
 }
 
-int MbCfgCompile(fModbusByteSource src, void *srcCtx, uint32_t regionBase,
+int MbCfgCompile(fModbusByteSource src, void *srcCtx, eNvDbUser region,
                  void (*kick)(void), sModbusCompileResult *res)
 {
-    return compile_or_verify(src, srcCtx, regionBase, kick, res, 0);
+    return compile_or_verify(src, srcCtx, region, kick, res, 0);
 }
 
 /* ==========================================================================
@@ -1772,5 +1775,6 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
 int MbCfgVerify(fModbusByteSource src, void *srcCtx,
                 sModbusCompileResult *res)
 {
-    return compile_or_verify(src, srcCtx, 0u, NULL, res, 1);
+    return compile_or_verify(src, srcCtx, MbCfgStore_InactiveRegion(), NULL,
+                             res, 1);
 }

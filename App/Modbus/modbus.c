@@ -162,7 +162,7 @@ static void catalogue_emit(const sSubEntry *s, const sModbusPointDesc *pt,
  * nothing watches it — "capable is not the same as monitored" (§4.5).  A point
  * watched by two plans produces ONE descriptor carrying the fastest cadence
  * anything will actually deliver it at. */
-static uint32_t catalogue_period(uint32_t base, uint8_t planMask,
+static uint32_t catalogue_period(eNvDbUser region, uint8_t planMask,
                                  uint8_t devOrd, uint16_t capId,
                                  uint16_t ptOrd)
 {
@@ -170,7 +170,7 @@ static uint32_t catalogue_period(uint32_t base, uint8_t planMask,
     sModbusPlanRecord plan;
     uint32_t          best = 0;
 
-    if (MbCfg_SeekPlans(base, &c) != 0) {
+    if (MbCfg_SeekPlans(region, &c) != 0) {
         return 0;
     }
 
@@ -217,13 +217,13 @@ static uint32_t catalogue_period(uint32_t base, uint8_t planMask,
 
 /* How many descriptors a full burst produces: INSTANCES, not records — a
  * capability shared by four devices describes four devices' worth of points. */
-static uint16_t catalogue_total(uint32_t base)
+static uint16_t catalogue_total(eNvDbUser region)
 {
     sMbCfgCursor        c;
     sModbusDeviceRecord dev;
     uint16_t            total = 0;
 
-    if (MbCfg_SeekDevices(base, &c) != 0) {
+    if (MbCfg_SeekDevices(region, &c) != 0) {
         return 0;
     }
     while (MbCfg_NextDevice(&c, &dev) == 1) {
@@ -231,7 +231,7 @@ static uint16_t catalogue_total(uint32_t base)
         sModbusCapabilityRecord cap;
         sModbusPointRecord      pt;
 
-        if (MbCfg_OpenCapability(base, dev.capId, &pc, &cap, NULL, 0) != 0) {
+        if (MbCfg_OpenCapability(region, dev.capId, &pc, &cap, NULL, 0) != 0) {
             continue;
         }
         while (MbCfg_NextPoint(&pc, &pt) == 1) {
@@ -244,14 +244,14 @@ static uint16_t catalogue_total(uint32_t base)
 static void catalogue_replay(uint8_t i)
 {
     const sSubEntry    *s    = &s_subs[i];
-    uint32_t            base = MbCfgStore_ActiveBase();
+    eNvDbUser           region = MbCfgStore_ActiveRegion();
     sMbCfgCursor        c;
     sModbusDeviceRecord dev;
-    uint16_t            total = catalogue_total(base);
+    uint16_t            total = catalogue_total(region);
     uint16_t            emitted = 0;
     uint8_t             devOrd = 0;
 
-    if (total == 0u || MbCfg_SeekDevices(base, &c) != 0) {
+    if (total == 0u || MbCfg_SeekDevices(region, &c) != 0) {
         catalogue_emit(s, NULL, 1u);       /* the empty catalogue */
         return;
     }
@@ -262,7 +262,7 @@ static void catalogue_replay(uint8_t i)
         sModbusPointRecord      pt;
         uint16_t                ptOrd = 0;
 
-        if (MbCfg_OpenCapability(base, dev.capId, &pc, &cap, NULL, 0) != 0) {
+        if (MbCfg_OpenCapability(region, dev.capId, &pc, &cap, NULL, 0) != 0) {
             devOrd++;
             continue;
         }
@@ -270,7 +270,7 @@ static void catalogue_replay(uint8_t i)
             sModbusPointDesc desc;
 
             ModbusDesc_Build(&desc, dev.topicPrefix, devOrd, ptOrd,
-                             catalogue_period(base, s->planMask, devOrd,
+                             catalogue_period(region, s->planMask, devOrd,
                                               dev.capId, ptOrd),
                              &pt);
             emitted++;
@@ -502,7 +502,7 @@ static struct {
 
 void ModbusPlans_Refresh(void)
 {
-    (void)MbCfg_ReadPlanHeaders(MbCfgStore_ActiveBase(), s_plans);
+    (void)MbCfg_ReadPlanHeaders(MbCfgStore_ActiveRegion(), s_plans);
 }
 
 /* How many live subscriptions NAMED this plan.  Wildcards do not count: a
@@ -646,7 +646,7 @@ static int plan_edit(uint8_t slot, const sModbusPlanSpec *spec, int mustExist)
     if (slot >= MB_MAX_PLANS) {
         return mbErr_badArg;
     }
-    if (!MbCfgStore_RegionValid(MbCfgStore_ActiveBase())) {
+    if (!MbCfgStore_RegionValid(MbCfgStore_ActiveRegion())) {
         return mbErr_config;
     }
     /* A plan edit and an upload compete for the same inactive region (§7.3). */
@@ -654,7 +654,7 @@ static int plan_edit(uint8_t slot, const sModbusPlanSpec *spec, int mustExist)
         return mbErr_busy;
     }
     if (spec != NULL) {
-        int v = err_from_plan(MbCfgPlans_Validate(MbCfgStore_ActiveBase(),
+        int v = err_from_plan(MbCfgPlans_Validate(MbCfgStore_ActiveRegion(),
                                                   spec));
         if (v != 0) {
             return v;
@@ -698,7 +698,7 @@ int Modbus_PlanTables(uint8_t planId, sModbusTimeTableSpec *tables,
     if (!s_plans[planId].used) {
         return mbErr_idNotFound;
     }
-    if (MbCfg_SeekPlans(MbCfgStore_ActiveBase(), &c) != 0) {
+    if (MbCfg_SeekPlans(MbCfgStore_ActiveRegion(), &c) != 0) {
         return mbErr_config;
     }
 
@@ -788,8 +788,8 @@ void ModbusPlans_Service(void)
     }
 
     if (s_edit.isDelete) {
-        r = MbCfgPlans_Rewrite(MbCfgStore_ActiveBase(),
-                               MbCfgStore_InactiveBase(),
+        r = MbCfgPlans_Rewrite(MbCfgStore_ActiveRegion(),
+                               MbCfgStore_InactiveRegion(),
                                s_edit.slot, NULL, KickIwdg);
     } else {
         uint16_t at = 0;
@@ -805,8 +805,8 @@ void ModbusPlans_Service(void)
         spec.tableCount = s_edit.tableCount;
         spec.devices    = s_edit.devices;
 
-        r = MbCfgPlans_Rewrite(MbCfgStore_ActiveBase(),
-                               MbCfgStore_InactiveBase(),
+        r = MbCfgPlans_Rewrite(MbCfgStore_ActiveRegion(),
+                               MbCfgStore_InactiveRegion(),
                                s_edit.slot, &spec, KickIwdg);
     }
 
@@ -1204,11 +1204,11 @@ int Modbus_Init(void)
      * immediately reusable.  This is also what makes the v1 -> v2 move a wipe:
      * the version test is strict equality, so both regions fail it once and
      * the board comes up unprovisioned (§11.2). */
-    if (!MbCfgStore_RegionValid(MbCfgStore_ActiveBase())) {
-        (void)MbCfgStore_EraseRegion(MbCfgStore_ActiveBase());
+    if (!MbCfgStore_RegionValid(MbCfgStore_ActiveRegion())) {
+        (void)MbCfgStore_EraseRegion(MbCfgStore_ActiveRegion());
     }
-    if (!MbCfgStore_RegionValid(MbCfgStore_InactiveBase())) {
-        (void)MbCfgStore_EraseRegion(MbCfgStore_InactiveBase());
+    if (!MbCfgStore_RegionValid(MbCfgStore_InactiveRegion())) {
+        (void)MbCfgStore_EraseRegion(MbCfgStore_InactiveRegion());
     }
 
     ModbusPlans_Refresh();
@@ -1237,7 +1237,7 @@ int Modbus_ConfigCompile(fModbusByteSource src, void *srcCtx,
         return mbErr_busy;       /* the inactive region is about to go live */
     }
 
-    if (MbCfgCompile(src, srcCtx, MbCfgStore_InactiveBase(),
+    if (MbCfgCompile(src, srcCtx, MbCfgStore_InactiveRegion(),
                      KickIwdg, err) != 0) {
         return mbErr_config;     /* *err carries what actually went wrong */
     }
@@ -1248,8 +1248,8 @@ int Modbus_ConfigErase(void)
 {
     /* Both regions: "erase" means the board is for nothing until it is told
      * what it is for, and a surviving staged config would contradict that. */
-    int a = MbCfgStore_EraseRegion(MbCfgStore_ActiveBase());
-    int b = MbCfgStore_EraseRegion(MbCfgStore_InactiveBase());
+    int a = MbCfgStore_EraseRegion(MbCfgStore_ActiveRegion());
+    int b = MbCfgStore_EraseRegion(MbCfgStore_InactiveRegion());
 
     /* Disarming is part of erasing, not a courtesy.  A swap armed against the
      * region just erased can never be committed (the engine requires a valid
@@ -1285,7 +1285,7 @@ int Modbus_ConfigExport(fModbusByteSink sink, void *ctx)
     if (sink == NULL) {
         return mbErr_badArg;
     }
-    return (MbCfgExport(MbCfgStore_ActiveBase(), sink, ctx) == 0)
+    return (MbCfgExport(MbCfgStore_ActiveRegion(), sink, ctx) == 0)
                ? 0 : mbErr_config;
 }
 
@@ -1299,7 +1299,7 @@ int Modbus_DeviceList(sModbusDeviceInfo *out, uint8_t max)
     if (out == NULL) {
         return mbErr_badArg;
     }
-    if (MbCfg_SeekDevices(MbCfgStore_ActiveBase(), &c) != 0) {
+    if (MbCfg_SeekDevices(MbCfgStore_ActiveRegion(), &c) != 0) {
         return 0;                  /* unprovisioned: zero devices is valid */
     }
 
@@ -1331,12 +1331,12 @@ int Modbus_ConfigStatus(sModbusConfigStatus *out)
         return mbErr_badArg;
     }
 
-    uint32_t active = MbCfgStore_ActiveBase();
+    eNvDbUser active = MbCfgStore_ActiveRegion();
 
     memset(out, 0, sizeof(*out));
-    out->activeRegion = (uint8_t)(active == EXT_FLASH_MODBUS_LUT_B_ADDR);
+    out->activeRegion = (uint8_t)(active == nvdbUser_modbusLutB);
     out->valid        = MbCfgStore_RegionValid(active) ? 1u : 0u;
-    out->stagedValid  = MbCfgStore_RegionValid(MbCfgStore_InactiveBase())
+    out->stagedValid  = MbCfgStore_RegionValid(MbCfgStore_InactiveRegion())
                             ? 1u : 0u;
     out->swapPending  = MbCfgStore_IsSwapPending() ? 1u : 0u;
 

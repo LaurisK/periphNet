@@ -1,6 +1,6 @@
 #include "boot_status.h"
+#include "boot_status_medium.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -29,8 +29,7 @@ int BootStatus_Read(sBootStatus *status)
         return -1;
     }
 
-    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR,
-                     (uint8_t *)status, sizeof(sBootStatus)) != w25q_ok) {
+    if (BootStatusMedium_Read(0u, status, sizeof(sBootStatus)) != 0) {
         return -1;
     }
 
@@ -50,17 +49,7 @@ int BootStatus_Write(const sBootStatus *status)
         return -1;
     }
 
-    if (W25Q128_EraseSector(EXT_FLASH_FWU_STATUS_ADDR) != w25q_ok) {
-        return -1;
-    }
-
-    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR,
-                          (const uint8_t *)status,
-                          sizeof(sBootStatus)) != w25q_ok) {
-        return -1;
-    }
-
-    return 0;
+    return BootStatusMedium_Rewrite(status, sizeof(sBootStatus));
 }
 
 /* --------------------------------------------------------------------------
@@ -92,11 +81,7 @@ int BootStatus_EnsureValid(void)
 
 static int write_flags(const sBootFlags *flags)
 {
-    if (W25Q128_WritePage(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                          (const uint8_t *)flags, sizeof(*flags)) != w25q_ok) {
-        return -1;
-    }
-    return 0;
+    return BootStatusMedium_Program(FLAGS_OFFSET, flags, sizeof(*flags));
 }
 
 int BootStatus_GetFlags(sBootFlags *flags)
@@ -105,12 +90,7 @@ int BootStatus_GetFlags(sBootFlags *flags)
         return -1;
     }
 
-    if (W25Q128_Read(EXT_FLASH_FWU_STATUS_ADDR + FLAGS_OFFSET,
-                     (uint8_t *)flags, sizeof(*flags)) != w25q_ok) {
-        return -1;
-    }
-
-    return 0;
+    return BootStatusMedium_Read(FLAGS_OFFSET, flags, sizeof(*flags));
 }
 
 /* --------------------------------------------------------------------------

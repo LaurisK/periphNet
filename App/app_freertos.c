@@ -25,9 +25,12 @@
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "App/Mon/sysmon.h"
+#include "App/Mqtt/mqtt_bridge.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
+#include "App/NvDb/nvdb_platform.h"
+#include "nvdb_layout.h"
 #include "boot_status.h"
 #include "cmsis_os.h"
 #include "main.h"
@@ -113,16 +116,38 @@ void App_DefaultTaskEntry(void)
         W25Q128_ReadID(&id);
         TRice("Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\n",
               id.manufacturer_id, id.memory_type, id.capacity);
-
-        /* NOTE: the app deliberately does NOT self-confirm.  An outside
-         * actor must POST /api/fwu/confirm after checking the device
-         * is healthy; otherwise the bootloader rolls back to the golden
-         * image after BOOT_ATTEMPTS_MAX unconfirmed boots. */
-        if (BootStatus_IsUnconfirmed()) {
-            TRice("Boot UNCONFIRMED: awaiting /api/fwu/confirm\n");
-        }
     } else {
         TRice("Flash INIT FAILED\n");
+    }
+
+    /* nvDb owns the external flash address space, so it comes up on the heels
+     * of the medium and BEFORE anything that holds storage — the boot status
+     * included, which is why the unconfirmed check moved below this point.  A
+     * user that initialises earlier gets nvdbRes_notInit; that is the whole
+     * ordering rule, and every user is started further down.
+     *
+     * Boot always succeeds: a refused layout leaves the previous one in force
+     * and says so (docs/task_nv_db.md §2.6, C15). */
+    {
+        sNvDbStatus nvStatus;
+        eNvDbRes    nvRes = NvDbPlatform_Init();
+
+        if (NvDb_GetStatus(&nvStatus) == nvdbRes_ok) {
+            TRice("nvDb: layout '%s' v%u, last apply %u\n",
+                  nvStatus.layoutName, nvStatus.layoutVer,
+                  nvStatus.lastApplyResult);
+        }
+        if (nvRes != nvdbRes_ok) {
+            TRice("nvDb: init returned %u\n", nvRes);
+        }
+    }
+
+    /* NOTE: the app deliberately does NOT self-confirm.  An outside actor
+     * must POST /api/fwu/confirm after checking the device is healthy;
+     * otherwise the bootloader rolls back to the golden image after
+     * BOOT_ATTEMPTS_MAX unconfirmed boots. */
+    if (BootStatus_IsUnconfirmed()) {
+        TRice("Boot UNCONFIRMED: awaiting /api/fwu/confirm\n");
     }
 
     /* Monotonic time base for the WireGuard handshake timestamp.  Must run
@@ -206,9 +231,26 @@ void App_DefaultTaskEntry(void)
     http_server_init();
     TRice("HTTP server started on port 80\n");
 
-    /* Start trice UDP broadcast (port 17001) */
+    /* Start trice UDP broadcast (port 17001).  Destinations configured
+     * through /api/trice/dest come back with it. */
     Trice_UdpInit();
     TRice("Trice UDP started on port %u\n", TRICE_UDP_PORT);
+
+    /* Bring the MQTT bridge up by itself IF this board has been told which
+     * broker to use.  A board that never has behaves exactly as before and
+     * waits for `mqtt start`, so nothing on a bench changes; a deployed one
+     * stops needing somebody with a USB cable after every reset. */
+    {
+        sMqttBridgeCfg mqttCfg;
+
+        if (MqttBridge_LoadCfg(&mqttCfg) == 0) {
+            MqttBridge_Start(&mqttCfg);
+            TRice("MQTT: auto-started from saved config (%u.%u.%u.%u:%u)\n",
+                  mqttCfg.brokerIp[0], mqttCfg.brokerIp[1],
+                  mqttCfg.brokerIp[2], mqttCfg.brokerIp[3],
+                  mqttCfg.brokerPort);
+        }
+    }
 
     /* WireGuard tunnel to the hub.  Started here rather than in MX_LWIP_Init()
      * so WgTime_Init() has already run.  A missing link or an unreachable hub

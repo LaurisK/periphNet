@@ -13,7 +13,8 @@
 #include "modbus_records.h"
 #include "modbus_config_store.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
+#include "nvdb.h"
+#include "nvdb_port.h"
 #include "w25q128_mock.h"
 
 #include <string.h>
@@ -134,21 +135,20 @@ TS_END(ts_end_devices,     sModbusDeviceRecord)
 TS_END(ts_end_time_tables, sModbusTimeTableRecord)
 TS_END(ts_end_plans,       sModbusPlanRecord)
 
-/* Program a finished stream + valid header into a LUT region of the mock. */
-static inline void ts_write_region(const sTestStream *s, uint32_t base)
+/* Program a finished stream + valid header into a LUT region.  Goes through
+ * nvDb like everything else does now, so the test writes a region exactly the
+ * way the compiler would. */
+static inline void ts_write_region(const sTestStream *s, eNvDbUser region)
 {
-    for (uint32_t off = 0; off < EXT_FLASH_MODBUS_LUT_SIZE;
-         off += W25Q128_SECTOR_SIZE) {
-        W25Q128_EraseSector(base + off);
-    }
+    (void)NvDb_Wipe(region, NULL);
+    while (NvDb_CollectStep()) { }
 
     for (uint32_t off = 0; off < s->len; off += 256u) {
         uint32_t n = s->len - off;
         if (n > 256u) {
             n = 256u;
         }
-        W25Q128_WritePage(base + MODBUS_LUT_HEADER_SIZE + off,
-                          &s->buf[off], n);
+        NvDb_Write(region, &s->buf[off], MODBUS_LUT_HEADER_SIZE + off, n);
     }
 
     sModbusLutHeader hdr;
@@ -157,7 +157,7 @@ static inline void ts_write_region(const sTestStream *s, uint32_t base)
     hdr.version   = MODBUS_LUT_VERSION;
     hdr.streamLen = s->len;
     hdr.crc32     = ImgMgmt_Crc32(s->buf, s->len);
-    W25Q128_WritePage(base, (const uint8_t *)&hdr, sizeof(hdr));
+    NvDb_Write(region, &hdr, 0u, (uint32_t)sizeof(hdr));
 }
 
 /* DLMS unit codes used by the worked example (values per modbus_units.c). */

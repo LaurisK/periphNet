@@ -1,8 +1,21 @@
 # Task — `nvDb`, the application's only authority over non-volatile storage
 
 **Status:** design settled through the API surface (§2), criteria in §3,
-phased implementation plan in §7. Internals in §4 are provisional. **Not
-implemented — no `nvDb` code exists yet.**
+phased implementation plan in §7. **Phases 0-7 are implemented**
+(`Shared/NvDb/`, `App/NvDb/nvdb_platform.c`, `tests/test_nvdb_*.c`); §4's
+internals are no longer provisional, they are what was built, and the notes
+below record where the implementation chose one way over another.
+
+**No application code reaches the medium any more**, and CMake fails the
+build if any does: `W25Q128_*` and `EXT_FLASH_*_ADDR` are banned everywhere
+in `App/` and `Shared/` except the driver, nvDb itself, and three files with
+stated reasons (§7). Rule 2 is an invariant now rather than a convention.
+
+**Phases 0-8 are all implemented.** What remains is not in this plan: the
+FWU->BL handoff (§6, FWU's design, not nvDb's) and removing a user (§6).
+Until the handoff exists the built-in layout deliberately leaves every
+pre-existing address alone, and `FwuCtl_BlContractHolds()` refuses to arm an
+install if a layout ever moves one.
 
 **Supersedes** the design note on `dev_work` (`git show
 origin/dev_work:docs/task_nv_db.md`), which described `nvDb` as a parameter
@@ -553,11 +566,33 @@ An implementation is `nvDb` if and only if it satisfies all of these.
 
 ---
 
-## 4. Internals — **provisional**
+## 4. Internals — **as built**
 
-Nothing in this section is visible through §2. It is recorded so the API can
-be reviewed against a plausible implementation, not because these choices are
-settled.
+Nothing in this section is visible through §2. It was recorded so the API
+could be reviewed against a plausible implementation; phases 0-6 then built
+it, so it now describes what exists. Where the implementation settled a
+question the design left open, a note says so.
+
+**What the implementation added.** Three things the design did not name:
+
+- **Two directory slots plus a journal.** `nvDb`'s config area is four
+  erasable units: directory A, directory B, the staged layout, and a relayout
+  journal. Directory writes alternate slots and the higher sequence number
+  wins, so a power cut during a directory write cannot destroy both. The
+  journal holds the whole move plan, the directory to commit once it has run,
+  and one byte per step that is bit-cleared as that step completes — no
+  erase, so recording progress is free. A relayout interrupted anywhere is
+  replayed from the first unfinished step; every step is idempotent, and the
+  ordering guarantees the source of an unfinished step is still intact.
+- **Ownership.** A layout an operator supplied sets a flag in the directory,
+  and from then on the built-in layout stops applying itself. Without it, a
+  firmware update would quietly take back a layout somebody authored for that
+  board.
+- **Tail erasure is a plan step.** Whatever a user did not bring with it must
+  read as erased space, or an area that grew — or that landed where somebody
+  else's bytes used to be — would hand its user the previous layout's
+  leftovers. `NVDB_STEP_ERASE` is a step like any other, so it is journalled
+  and resumed like any other.
 
 ### 4.1 Read-modify-write
 
@@ -597,8 +632,18 @@ user that discards data it no longer needs is buying cheap writes later.
 - **The mark list is bounded and coalescing.** Adjacent and overlapping
   ranges merge, and a `NvDb_Wipe` collapses that user's marks into one. When
   the list is nevertheless full, the incoming `NvDb_Delete` performs its erase
-  inline rather than being dropped or refused. Provisional size: 64 ranges,
-  ~12 bytes each — an internal number, tunable without touching the API.
+  inline rather than being dropped or refused. Built at 64 ranges of 24 bytes
+  — an internal number, tunable without touching the API.
+  **As built:** two ranges merge only when they would report to the same
+  place. A completion belongs to the request that asked for it, and merging
+  two different callbacks would silently retarget one. For the same reason, a
+  write that lands in the middle of a pending delete SPLITS the mark rather
+  than swallowing it, and a superseded delete's callback does not fire.
+- **As built: a write pulls forward whole erasable units**, not just the
+  bytes it covers. Collecting only the covered bytes would erase the unit
+  anyway and leave the rest of it still marked, so the next write into the
+  same unit would erase it a second time. The caller pays one erase either
+  way; this way it buys the whole unit.
 - **Lowest priority in the system**, one erasable unit per lock acquisition
   so a waiting writer gets in between units.
 - **A blocked write pulls its own erase forward** rather than waiting for a
@@ -746,6 +791,16 @@ mechanism. Occupancy is erased-unit versus written-unit counts. Neither ever
 influences an operation (C13), which is what allows both to be cheap and
 lossy.
 
+**As built.** The counters are a RAM mirror (`uint16` per unit, 4 KB for the
+whole medium) loaded at init and written back by the collector when it goes
+idle. A blank or scribbled-over wear area simply reads as "never counted" —
+there is no CRC and nothing to repair, because there is nothing here worth
+repairing, and `test_losing_the_wear_area_costs_a_statistic` says so. Counts
+saturate one short of the erased value rather than wrapping. `NvDb_GetUsage`
+takes an explicit `scan` flag because observing occupancy reads the area:
+answering without one is not a lie, it is a different question, and the
+rendered report states which was asked.
+
 ### 4.6 The port
 
 The core is RTOS-free so the host unit tests can drive it with no board.
@@ -791,10 +846,12 @@ sector-erase behaviour is preserved rather than regressed.
 
 **Still to decide:**
 
-- **How a layout is supplied.** By analogy with the Modbus config this is an
-  HTTP endpoint plus a CLI command, with JSON parse errors pointing at the
-  offending field and the structural check reported separately. The schema is
-  settled (§2.7); the transport is not.
+- ~~**How a layout is supplied.**~~ **Settled and built:**
+  `POST /api/nvdb/layout` takes the §2.7 JSON, answers 422 with the offending
+  field on a parse error and 409 when the advisory structural check refuses,
+  and 202 otherwise — because nothing moves until the next boot. `GET` renders
+  the read-back form, `DELETE` discards what is waiting, and
+  `nvdb status|layout|usage|wear|drop` covers the console.
 
 - **Removing a user.** Adding is settled and cheap; retiring one is not
   designed. `eNvDbUser` values are persisted and index the size array, so a
@@ -809,13 +866,17 @@ sector-erase behaviour is preserved rather than regressed.
   understands. What that structure looks like, and what the BL does when it is
   missing or stale, is FWU's business, not `nvDb`'s (§1.6).
 
-**Internal, deliberately left until the core runs** — none of these change a
-signature, so none of them blocks the header:
+**Internal, deliberately left until the core runs** — none of these changed a
+signature, so none of them blocked the header, and that prediction held:
 
-- Operator-facing reporting of occupancy and wear.
-- How hard the collector works and how often.
-- The directory's exact fields, its CRC and its anchor address (§4.3).
-- Whether 32 KB / 64 KB block erases are used for large areas.
+- ~~Operator-facing reporting of occupancy and wear.~~ Built (phase 8).
+- ~~The directory's exact fields, its CRC and its anchor address (§4.3).~~
+  Settled: two alternating slots plus a journal at a pinned `0x00104000`.
+- How hard the collector works and how often. Currently one erasable unit per
+  wake, sleeping on a notification with a 1 s backstop. Untuned on hardware.
+- Whether 32 KB / 64 KB block erases are used for large areas. Still no: a
+  488 KB wipe is 122 sector erases, and whether that matters is a question
+  for the first board.
 
 **Limits accepted rather than solved:**
 
@@ -852,50 +913,98 @@ tests/
   test_nvdb_*.c         one per phase, over the NOR-faithful flash mock
 ```
 
-**Phase 0 — raise the mock.** `tests/mocks/w25q128_mock.h` caps the mock at
-`0x110000`. The relayout and blob-area tests need the full 8 MB. One line, and
-it blocks phases 2, 5 and 7.
+### Status of each phase
 
-**Phase 1 — addressing, no writes.** `NvDb_Init`, `NvDb_GetSize`, `NvDb_Read`,
+Phases 0-6 are **done**; 7 and 8 are **not started**. What follows is the
+plan as written, annotated with what was actually built.
+
+**Phase 0 — raise the mock. DONE.** `tests/mocks/w25q128_mock.h` now covers
+the full 8 MB. It also grew an erase and a write counter (so C12 can be
+asserted rather than believed), page-program faithfulness (a program that
+crosses a page boundary now fails, as it would wrap on the real part), and a
+`mock_flash_failAfter` knob that cuts the power partway through a given
+operation.
+
+**Phase 1 — addressing, no writes. DONE** (`tests/test_nvdb_access.c`). `NvDb_Init`, `NvDb_GetSize`, `NvDb_Read`,
 `NvDb_GetAbsoluteAddress`, the result set, the layout struct and its
 validation. Tests: bounds rejection at every edge, `len_bytes == 0`,
 `offset_bytes == size`, unknown user, size-0 user, reads of never-written
 space, calls before `Init`. **Deliverable: a user can read.**
 
-**Phase 2 — the write path.** Content check, read-modify-write, the erased
+**Phase 2 — the write path. DONE** (`tests/test_nvdb_access.c`). Content check, read-modify-write, the erased
 fast path, the 4 KB main-SRAM buffer. Tests: write into erased space performs
 no erase (assert against the mock's erase counter — this is C12 and it is the
 one property most worth pinning early), write across an erasable-unit
 boundary, write that preserves neighbours, torn write at every step.
 **Deliverable: a user can persist.**
 
-**Phase 3 — delete, wipe, collector.** Byte-range marks, coalescing, the
+**Phase 3 — delete, wipe, collector. DONE** (`tests/test_nvdb_collect.c`). Byte-range marks, coalescing, the
 bounded list with inline erase on overflow, `fNvDbEraseDone`, and a write
 waiting on a pending delete. Tests: delete then read still sees old bytes;
 delete then collect then read sees erased; a write into pending space pulls
 its erase forward; mark-list overflow does the work inline and still fires the
 callback before returning. **Deliverable: the fast path stays fast.**
 
-**Phase 4 — configuration and status.** JSON parse and render, the staged
+**Phase 4 — configuration and status. DONE** (`tests/test_nvdb_config.c`). JSON parse and render, the staged
 layout, `NvDb_GetStatus`, apply modes. Tests: the accept/reject matrix,
 round-trip JSON -> struct -> JSON, an unknown user name, `freeSpace` supplied
 (must be a parse error), stored form read back with fewer entries than
 `nvdbUser_last`. **Deliverable: a layout can be authored and inspected.**
 
-**Phase 5 — relayout.** Move, grow, shrink against observed occupancy,
+**Phase 5 — relayout. DONE** (`tests/test_nvdb_layout.c`). Move, grow, shrink against observed occupancy,
 feasibility rule (a), refusal leaving the current layout untouched, forced
 truncation, and first adoption (§4.4.1). Tests: every row of that behaviour,
 plus a torn relayout resumed at the next init, plus a layout that misplaces
 `nvDb`'s own areas being refused in **both** modes. **This is the bulk of the
 test effort** and all of it is host-side with no board.
 
-**Phase 6 — the port and first hardware run.** `App/NvDb/nvdb_platform.c`,
-`NvDb_Init()` next to `W25Q128_Init()` in `defaultTask`, the collector task at
-lowest priority with a priority-inheriting mutex. First on-device check: IWDG
-margin during a large wipe, and worst-case write latency under a concurrent
-reader.
+**Phase 6 — the port. BUILT; the hardware run is still outstanding.**
+`App/NvDb/nvdb_platform.c` implements the four port hooks and the collector
+task (`osPriorityLow`, 256 words, `xSemaphoreCreateMutex` for priority
+inheritance, `KickIwdg()` on `NvDbPort_Kick`). `NvDbPlatform_Init()` runs in
+`defaultTask` immediately after `W25Q128_Init()` and before every user, and
+`nvdb status` / `nvdb layout` on the CLI is enough to confirm on a board that
+the layout took. **Still to do on hardware:** IWDG margin during a large
+wipe, and worst-case write latency under a concurrent reader.
 
-**Phase 7 — migrate users, cheapest first.**
+**Phase 7 — migrate users. DONE.** Every row of §5 now reaches the medium
+through `nvDb`, and the CMake guard above stops it decaying. What each step
+turned out to need:
+
+| # | User | What it took |
+|---|------|--------------|
+| 1 | `mqttCfg`, `triceUdpCfg` | New records via `App/nv_record.h` (a CRC'd, versioned record in one area — user-side policy, deliberately not in `nvDb`). MQTT now **auto-starts from the saved broker** and Trice restores explicitly-configured destinations, which is the live defect closed rather than a risk taken |
+| 2 | `wg_cfg` | One record; `WgCfg_Clear` overwrites the private key synchronously before wiping, because "gone" has to be true when it returns |
+| 3 | `wg_time` | Slot count now comes from `NvDb_GetSize`, not a map constant; ring restart is a `NvDb_Wipe` and the append that follows pulls its erase forward |
+| 4 | Crash log | Reads and clears through the front door; the **fault-context write still does its own I/O**, at an address from `NvDb_GetAbsoluteAddress` — the exception `nvdb_exceptions.h` exists for |
+| 5 | Modbus config | The biggest: a "region" stopped being a base address and became an `eNvDbUser`, which deleted all the base+offset arithmetic. Lazy sector erase deleted too — the region is wiped up front and nvDb pulls erases forward |
+| 6 | FWU blobs, image meta | `ImgStore_ScanArea` takes a user; uploads and golden promotion wipe first, so 488 KB of erases stay off the write path |
+| 7 | Boot status | `Shared/Fwu/boot_status.c` links into BOTH targets and can never call nvDb, so it stopped caring where the bytes are: `boot_status_medium.h` has three calls, the BL answers them with direct flash and the application with nvDb |
+
+**The enabler nothing in the design anticipated.** Several of those users
+update a flag word by CLEARING BITS, which needs no erase and is therefore
+atomic — the boot status and the Modbus selector both depend on it, and it is
+why their flags sit outside their CRCs. Routed through a `NvDb_Write` that
+only knew "erased or not", every one of those would have become an
+erase-and-write-back, putting the most safety-critical structure on the chip
+at the mercy of a power cut. So the write path's content check was
+generalised from "is the target erased?" to "can these bytes be programmed
+onto what is already there?" — still blind, still about the state of the
+medium and never its meaning, with "already erased" as the special case where
+every current bit is set (§4.1).
+
+**The built-in layout still moves nothing, and that is now a choice about the
+bootloader alone.** The BL reads the boot status and both blobs at addresses
+compiled into it, and the handoff that would let it learn otherwise is
+undesigned (§6). So `s_targetSizes` in `nvdb_layout.c` reproduces the
+hand-assigned map exactly — `imageMeta` absorbs the 8 KB hole that map left
+(12 KB instead of 4 KB) so the packer needs no concept of a hole — and
+`FwuCtl_BlContractHolds()` checks at boot that nvDb still agrees with the BL,
+refusing to arm an install (409, `fwuCtlRes_blContract`) if it does not. The
+compacting layout ships as `periphnet` v2 once the handoff exists;
+`test_the_compacting_layout_moves_everything_safely` already proves the move
+itself works.
+
 
 | Order | User | Why here |
 |-------|------|----------|
@@ -906,9 +1015,33 @@ reader.
 | 5 | Modbus config A/B + selector | Large, and the swap policy stays in the module |
 | 6 | FWU blobs + image meta + boot status | **Last.** Needs the FWU->BL handoff (§6), and a mistake here costs the ability to boot |
 
-**Phase 8 — operator surface.** Wear counting, occupancy reporting, the HTTP
-endpoint and CLI command for supplying and reading a layout. None of it
-changes a signature, which is why it is last rather than first.
+**Phase 8 — operator surface. DONE.** As predicted, none of it changed a
+signature.
+
+- **Wear counting** (`Shared/NvDb/nvdb_wear.c`) rides in `NvDbInt_RawErase`,
+  the one function that erases anything, so it needs no cooperation from any
+  user and nothing can forget to call it. The counters are a RAM mirror — one
+  `uint16` per erasable unit, 4 KB for the whole 8 MB medium, which is
+  exactly the size of the wear area — written back by the collector when it
+  runs out of work. That is the only context that may: a flush is itself an
+  erase, and it must not land in the middle of somebody's write. A flash
+  counter was never an option, because incrementing one in NOR means setting
+  bits, which means an erase, which is the thing being counted.
+- **Occupancy and wear reporting**: `NvDb_GetUsage` (per user, with an
+  explicit `scan` because observing occupancy reads the whole area) and
+  `NvDb_GetMediumUsage` (no scan; nothing in it needs one). Both live in
+  `nvdb_layout.h` — the OPERATOR header — which is the one place granularity
+  is visible, and only because the answers are meaningless without it. None
+  of it reaches `nvdb.h`: a user still cannot learn that an erasable unit
+  exists.
+- **HTTP**: `GET/POST/DELETE /api/nvdb/layout` and `GET /api/nvdb/usage`.
+  The POST answers **202 Accepted**, not 200 — nothing moves when a layout is
+  supplied, and saying otherwise would be a lie about the one thing an
+  operator most needs to understand.
+- **CLI**: `nvdb status|layout|usage|wear|drop`.
+- **C13 is a test, not a claim**: `test_wear_never_influences_a_placement`
+  hammers one area, supplies a layout, and asserts the placement is
+  byte-identical to the one a fresh board produces.
 
 **What is deliberately not in the plan:** removing a user (§6), and the
 FWU->BL handoff, which is FWU's design and gates phase 7 step 6 rather than

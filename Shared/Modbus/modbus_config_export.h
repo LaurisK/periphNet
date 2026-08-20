@@ -11,6 +11,7 @@
 #define MODBUS_CONFIG_EXPORT_H_
 
 #include "modbus_records.h"
+#include "nvdb.h"
 
 #include <stdint.h>
 
@@ -21,7 +22,7 @@ extern "C" {
 /* fModbusByteSink lives in modbus_records.h (docs/modbus.md §4.9). */
 
 /* Walk the region and emit JSON. 0 = done, -1 = invalid region / sink abort. */
-int MbCfgExport(uint32_t regionBase, fModbusByteSink sink, void *ctx);
+int MbCfgExport(eNvDbUser region, fModbusByteSink sink, void *ctx);
 
 #ifdef __cplusplus
 }

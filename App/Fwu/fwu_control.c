@@ -13,7 +13,8 @@
 
 #include "App/Fwu/fwu_control.h"
 #include "App/system.h"
-#include "w25q128.h"
+#include "nvdb.h"
+#include "nvdb_exceptions.h"
 #include "boot_status.h"
 #include "bl_app_contract.h"
 #include <string.h>
@@ -21,15 +22,46 @@
 #define PROMOTE_CHUNK_SIZE   4096U   /* one ext-flash sector */
 
 static sBlobInfo golden;
+static bool      bl_contract_ok;
 
 static volatile bool reboot_pending  = false;
 static volatile bool promote_pending = false;
 static volatile bool promoting       = false;
 
+/**
+ * @brief Does nvDb still put the BL-visible areas where the BL looks?
+ * @param  user - the nvDb user holding the area
+ * @param  addr - the address the bootloader was built against
+ * @param  size - the size it was built against
+ * @retval true if they agree
+ */
+static bool bl_area_agrees(eNvDbUser user, uint32_t addr, uint32_t size)
+{
+    uint32_t a = 0U;
+    uint32_t n = 0U;
+
+    if (NvDb_GetAbsoluteAddress(user, &a, &n) != nvdbRes_ok) {
+        return false;
+    }
+    return (a == addr) && (n >= size);
+}
+
 void FwuCtl_Init(void)
 {
-    ImgStore_ScanArea(EXT_FLASH_GOLDEN_IMG_ADDR, EXT_FLASH_GOLDEN_IMG_SIZE,
-                      &golden);
+    ImgStore_ScanArea(nvdbUser_fwuGolden, &golden);
+
+    bl_contract_ok =
+        bl_area_agrees(nvdbUser_bootStatus, EXT_FLASH_FWU_STATUS_ADDR,
+                       EXT_FLASH_FWU_STATUS_SIZE) &&
+        bl_area_agrees(nvdbUser_fwuStored, EXT_FLASH_FWU_IMG_ADDR,
+                       EXT_FLASH_FWU_IMG_SIZE) &&
+        bl_area_agrees(nvdbUser_fwuGolden, EXT_FLASH_GOLDEN_IMG_ADDR,
+                       EXT_FLASH_GOLDEN_IMG_SIZE);
+}
+
+bool FwuCtl_BlContractHolds(void)
+{
+    return bl_contract_ok;
 }
 
 const sBlobInfo *FwuCtl_GetGolden(void)
@@ -50,6 +82,9 @@ eFwuCtlRes FwuCtl_RequestInstall(void)
     }
     if (promote_pending || promoting) {
         return fwuCtlRes_busy;
+    }
+    if (!bl_contract_ok) {
+        return fwuCtlRes_blContract;
     }
     if (BootStatus_RequestFwu() != 0) {
         return fwuCtlRes_flashErr;
@@ -142,6 +177,11 @@ void FwuCtl_RunPromotion(void)
         return;
     }
 
+    /* The golden area still holds the previous image, so declare it unwanted
+     * before overwriting it: a write into occupied space drags an erase onto
+     * the write path, and there are 488 KB of them here. */
+    (void)NvDb_Wipe(nvdbUser_fwuGolden, NULL);
+
     bool ok = true;
     for (uint32_t off = 0; off < total && ok; off += PROMOTE_CHUNK_SIZE) {
         KickIwdg();
@@ -149,17 +189,12 @@ void FwuCtl_RunPromotion(void)
         uint32_t n = total - off;
         if (n > PROMOTE_CHUNK_SIZE) n = PROMOTE_CHUNK_SIZE;
 
-        if (W25Q128_EraseSector(EXT_FLASH_GOLDEN_IMG_ADDR + off) != w25q_ok) {
-            ok = false;
-            break;
-        }
-
         for (uint32_t page = 0; page < n; page += sizeof(buf)) {
             uint32_t plen = n - page;
             if (plen > sizeof(buf)) plen = sizeof(buf);
             if (!ImgStore_Read(off + page, buf, plen) ||
-                W25Q128_WritePage(EXT_FLASH_GOLDEN_IMG_ADDR + off + page,
-                                  buf, plen) != w25q_ok) {
+                NvDb_Write(nvdbUser_fwuGolden, buf, off + page,
+                           plen) != nvdbRes_ok) {
                 ok = false;
                 break;
             }
@@ -167,8 +202,7 @@ void FwuCtl_RunPromotion(void)
     }
 
     /* Re-scan golden: validates the copy (manifest + CRC32) */
-    ImgStore_ScanArea(EXT_FLASH_GOLDEN_IMG_ADDR, EXT_FLASH_GOLDEN_IMG_SIZE,
-                      &golden);
+    ImgStore_ScanArea(nvdbUser_fwuGolden, &golden);
 
     (void)ok;
     ImgStore_ReleaseRead();

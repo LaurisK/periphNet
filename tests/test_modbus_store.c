@@ -17,18 +17,19 @@
 static void test_blank_flash_init(void)
 {
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     TEST_ASSERT(MbCfgStore_Init() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
-    TEST_ASSERT(MbCfgStore_InactiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR);
-    TEST_ASSERT(!MbCfgStore_RegionValid(MbCfgStore_ActiveBase()));
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutA);
+    TEST_ASSERT(MbCfgStore_InactiveRegion() == nvdbUser_modbusLutB);
+    TEST_ASSERT(!MbCfgStore_RegionValid(MbCfgStore_ActiveRegion()));
     TEST_ASSERT(!MbCfgStore_IsSwapPending());
 
     sMbCfgCursor c;
-    TEST_ASSERT(MbCfg_Open(EXT_FLASH_MODBUS_LUT_A_ADDR, &c) != 0);
+    TEST_ASSERT(MbCfg_Open(nvdbUser_modbusLutA, &c) != 0);
 
     sModbusConfigCounts counts;
-    TEST_ASSERT(MbCfg_Count(EXT_FLASH_MODBUS_LUT_A_ADDR, &counts) != 0);
+    TEST_ASSERT(MbCfg_Count(nvdbUser_modbusLutA, &counts) != 0);
 
     /* Init must be idempotent */
     TEST_ASSERT(MbCfgStore_Init() == 0);
@@ -43,24 +44,32 @@ static void test_region_valid_and_counts(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
 
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
-    TEST_ASSERT(!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_B_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
+    TEST_ASSERT(!MbCfgStore_RegionValid(nvdbUser_modbusLutB));
 
     sModbusConfigCounts counts;
-    TEST_ASSERT(MbCfg_Count(EXT_FLASH_MODBUS_LUT_A_ADDR, &counts) == 0);
+    TEST_ASSERT(MbCfg_Count(nvdbUser_modbusLutA, &counts) == 0);
     TEST_ASSERT(counts.capabilities == 2);
     TEST_ASSERT(counts.devices == 3);
     TEST_ASSERT(counts.plans == 3);
     TEST_ASSERT(counts.points == 5);      /* records, NOT instances */
 
-    /* Corrupting one stream byte (NOR-legal bit clear) must fail the CRC */
-    mock_flash[EXT_FLASH_MODBUS_LUT_A_ADDR + MODBUS_LUT_HEADER_SIZE] &= 0xFE;
-    TEST_ASSERT(!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    /* Corrupting one stream byte (NOR-legal bit clear) must fail the CRC.
+     * Done through nvDb, because clearing a bit is exactly the write it
+     * programs in place — the corruption a real board could suffer. */
+    uint8_t b = 0;
+    TEST_ASSERT(NvDb_Read(nvdbUser_modbusLutA, &b, MODBUS_LUT_HEADER_SIZE,
+                          1u) == nvdbRes_ok);
+    b &= 0xFEu;
+    TEST_ASSERT(NvDb_Write(nvdbUser_modbusLutA, &b, MODBUS_LUT_HEADER_SIZE,
+                           1u) == nvdbRes_ok);
+    TEST_ASSERT(!MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 }
 
 /* "Invalid is erased, not repaired" (§4.2) collapses to one state. */
@@ -69,13 +78,14 @@ static void test_region_erase(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    ts_write_region(&s, nvdbUser_modbusLutA);
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 
-    TEST_ASSERT(MbCfgStore_EraseRegion(EXT_FLASH_MODBUS_LUT_A_ADDR) == 0);
-    TEST_ASSERT(!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_EraseRegion(nvdbUser_modbusLutA) == 0);
+    TEST_ASSERT(!MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 }
 
 /* ============================================================================
@@ -87,9 +97,10 @@ static void test_cursor_traversal(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
@@ -100,7 +111,7 @@ static void test_cursor_traversal(void)
     sModbusTimeTableRecord  tt;
     uint16_t                ids[8];
 
-    TEST_ASSERT(MbCfg_Open(EXT_FLASH_MODBUS_LUT_A_ADDR, &c) == 0);
+    TEST_ASSERT(MbCfg_Open(nvdbUser_modbusLutA, &c) == 0);
 
     /* capability 0 */
     TEST_ASSERT(MbCfg_NextCapability(&c, &cap) == 1);
@@ -183,18 +194,19 @@ static void test_truncated_stream_detected(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
 
     /* Stream missing the final plan sentinel */
     ts_build_worked_example(&s);
     s.len -= sizeof(sModbusPlanRecord);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     /* CRC still matches (header written over the truncated stream), but a
      * structural walk must fail instead of running off the end. */
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
     sModbusConfigCounts counts;
-    TEST_ASSERT(MbCfg_Count(EXT_FLASH_MODBUS_LUT_A_ADDR, &counts) != 0);
+    TEST_ASSERT(MbCfg_Count(nvdbUser_modbusLutA, &counts) != 0);
 }
 
 /* ============================================================================
@@ -206,15 +218,16 @@ static void test_open_capability_and_find(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
     sModbusBlockRecord      blocks[MB_MAX_BLOCKS_PER_CAP];
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 1, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 1, &c, &cap,
                                      blocks, MB_MAX_BLOCKS_PER_CAP) == 0);
     TEST_ASSERT(strcmp(cap.name, "meter") == 0);
     TEST_ASSERT(blocks[0].base == 0 && blocks[0].regs == 8);
@@ -223,17 +236,17 @@ static void test_open_capability_and_find(void)
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);     /* cursor left at points */
     TEST_ASSERT(strcmp(pt.name, "power") == 0);
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 2, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 2, &c, &cap,
                                      NULL, 0) != 0);
 
     sModbusDeviceRecord dev;
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 2, &dev) == 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 2, &dev) == 0);
     TEST_ASSERT(dev.slaveAddr == 2 && dev.capId == 1);
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 3, &dev) != 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 3, &dev) != 0);
 
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 3, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 3, &pt) == 0);
     TEST_ASSERT(strcmp(pt.name, "overdischarge_soc_set") == 0);
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 4, &pt) != 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 4, &pt) != 0);
 }
 
 static void test_resolve_point_by_ordinal(void)
@@ -241,9 +254,10 @@ static void test_resolve_point_by_ordinal(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     sMbPointLookup lk;
 
@@ -278,12 +292,13 @@ static void test_plan_headers_with_a_gap(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     sMbPlanHeader hdr[MB_MAX_PLANS];
-    TEST_ASSERT(MbCfg_ReadPlanHeaders(EXT_FLASH_MODBUS_LUT_A_ADDR, hdr) == 3);
+    TEST_ASSERT(MbCfg_ReadPlanHeaders(nvdbUser_modbusLutA, hdr) == 3);
 
     /* Slots 0, 2 and 3 are used; 1 is a hole and simply has no record.  This
      * is THE case a blank record would break: a stored blank would look like
@@ -308,27 +323,28 @@ static void test_swap_lifecycle(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     /* Inactive (B) holds nothing valid → apply must refuse */
     TEST_ASSERT(MbCfgStore_SetSwapPending() != 0);
     TEST_ASSERT(!MbCfgStore_IsSwapPending());
 
     /* Upload a config into the inactive region, then apply */
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_B_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutB);
     TEST_ASSERT(MbCfgStore_SetSwapPending() == 0);
     TEST_ASSERT(MbCfgStore_IsSwapPending());
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutA);
 
     TEST_ASSERT(MbCfgStore_CommitSwap() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutB);
     TEST_ASSERT(!MbCfgStore_IsSwapPending());
 
     /* Survives a "reboot" */
     TEST_ASSERT(MbCfgStore_Init() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutB);
 }
 
 /* The erase-while-armed lockout, observed on a live board: the config plane
@@ -341,29 +357,30 @@ static void test_erase_disarms_pending_swap(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_B_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
+    ts_write_region(&s, nvdbUser_modbusLutB);
 
     /* Arm a swap, then invalidate the region it is armed against */
     TEST_ASSERT(MbCfgStore_SetSwapPending() == 0);
     TEST_ASSERT(MbCfgStore_IsSwapPending());
-    TEST_ASSERT(MbCfgStore_EraseRegion(MbCfgStore_InactiveBase()) == 0);
-    TEST_ASSERT(!MbCfgStore_RegionValid(MbCfgStore_InactiveBase()));
+    TEST_ASSERT(MbCfgStore_EraseRegion(MbCfgStore_InactiveRegion()) == 0);
+    TEST_ASSERT(!MbCfgStore_RegionValid(MbCfgStore_InactiveRegion()));
 
     /* Whoever invalidated the region must disarm in the same breath */
     TEST_ASSERT(MbCfgStore_ClearSwapPending() == 0);
     TEST_ASSERT(!MbCfgStore_IsSwapPending());
 
     /* Disarm is not a commit: the active region must not have moved */
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutA);
 
     /* And the board comes back up provisioned, not wedged */
     TEST_ASSERT(MbCfgStore_Init() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutA);
     TEST_ASSERT(!MbCfgStore_IsSwapPending());
-    TEST_ASSERT(MbCfgStore_RegionValid(MbCfgStore_ActiveBase()));
+    TEST_ASSERT(MbCfgStore_RegionValid(MbCfgStore_ActiveRegion()));
 }
 
 static void test_selector_recovery_prefers_valid_region(void)
@@ -371,21 +388,22 @@ static void test_selector_recovery_prefers_valid_region(void)
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_B_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutB);
 
     /* Wipe the selector, as a power cut during CommitSwap would */
     W25Q128_EraseSector(EXT_FLASH_MODBUS_SEL_ADDR);
 
     TEST_ASSERT(MbCfgStore_Init() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutB);
 
     /* Both regions valid → prefer A (deterministic) */
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
     W25Q128_EraseSector(EXT_FLASH_MODBUS_SEL_ADDR);
     TEST_ASSERT(MbCfgStore_Init() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_A_ADDR);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutA);
 }
 
 int main(void)

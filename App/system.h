@@ -65,6 +65,23 @@ uint32_t System_GetResetCause(void);
 void KickIwdg(void);
 
 /**
+ * @brief Keep the watchdogs quiet during one long operation, without
+ *        claiming the caller is the health of the system.
+ *
+ * KickIwdg() does two jobs: it feeds the watchdogs AND it records the gap
+ * since the last feed, which is what System_GetIwdgStats() reports as "the
+ * longest we ever went" — the early warning the reset itself never gives.
+ * That statistic is only meaningful if it measures defaultTask's loop.
+ *
+ * A long operation on some other task — a 488 KB erase, a relayout, an
+ * occupancy scan — still has to feed the hardware or the IWDG fires halfway
+ * through.  It must not touch the statistic while doing so, or the number
+ * silently becomes "how long since ANYBODY kicked", which is optimistic
+ * exactly when it matters.
+ */
+void System_FeedWatchdogLongOp(void);
+
+/**
  * @brief Watchdog margin: longest gap ever seen between KickIwdg() calls, and
  *        how long ago the last one was.
  *

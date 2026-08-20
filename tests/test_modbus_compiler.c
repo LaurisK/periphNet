@@ -47,7 +47,7 @@ static int compile_str(const char *json, uint32_t chunk,
                        sModbusCompileResult *res)
 {
     sMemSource src = { json, (uint32_t)strlen(json), 0, chunk };
-    return MbCfgCompile(mem_source, &src, EXT_FLASH_MODBUS_LUT_A_ADDR,
+    return MbCfgCompile(mem_source, &src, nvdbUser_modbusLutA,
                         NULL, res);
 }
 
@@ -119,15 +119,14 @@ static void assert_worked_example_stream(void)
     ts_build_worked_example(&expect);
 
     sModbusLutHeader hdr;
-    TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR,
-                             (uint8_t *)&hdr, sizeof(hdr)) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(nvdbUser_modbusLutA, &hdr, 0u,
+                          sizeof(hdr)) == nvdbRes_ok);
     TEST_ASSERT(hdr.version == MODBUS_LUT_VERSION);
     TEST_ASSERT(hdr.streamLen == expect.len);
 
     static uint8_t got[8192];
-    TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR +
-                             MODBUS_LUT_HEADER_SIZE,
-                             got, expect.len) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(nvdbUser_modbusLutA, got, MODBUS_LUT_HEADER_SIZE,
+                          expect.len) == nvdbRes_ok);
     TEST_ASSERT_MEM_EQ(got, expect.buf, expect.len);
 }
 
@@ -136,6 +135,7 @@ static void test_worked_example_compiles(void)
     sModbusCompileResult res;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
 
     TEST_ASSERT(compile_str(WORKED_EXAMPLE, 0, &res) == 0);
@@ -145,7 +145,7 @@ static void test_worked_example_compiles(void)
     TEST_ASSERT(res.counts.plans == 3);
     TEST_ASSERT(res.counts.points == 5);
 
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
     assert_worked_example_stream();
 }
 
@@ -154,15 +154,17 @@ static void test_one_byte_chunks(void)
     sModbusCompileResult res;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     /* 1-byte reads exercise every token/window boundary */
     TEST_ASSERT(compile_str(WORKED_EXAMPLE, 1, &res) == 0);
     TEST_ASSERT(res.ok == 1);
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
     assert_worked_example_stream();
 
     /* 7-byte chunks for an odd stride across the 128-byte window */
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(WORKED_EXAMPLE, 7, &res) == 0);
     assert_worked_example_stream();
 }
@@ -194,6 +196,7 @@ static void test_jk_dialect_compiles(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) == 0);
 
     sMbCfgCursor            c;
@@ -202,7 +205,7 @@ static void test_jk_dialect_compiles(void)
     sModbusPointRecord      pt;
     sModbusDeviceRecord     dev;
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 0, &c, &cap,
                                      blocks, MB_MAX_BLOCKS_PER_CAP) == 0);
     TEST_ASSERT(cap.addrStride == 2 && cap.writeFc == 16);
     TEST_ASSERT(cap.maxReadRegs == 123 && cap.blockCount == 3);
@@ -216,7 +219,7 @@ static void test_jk_dialect_compiles(void)
     /* A 2-register writable point is legal under FC16 and only under FC16 */
     TEST_ASSERT((pt.flags & MB_PT_WRITE) != 0);
 
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &dev) == 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 0, &dev) == 0);
     TEST_ASSERT(MbRecords_BaudFromCode(dev.baudCode) == 115200u);
     TEST_ASSERT(dev.format == mbFmt_8N1);
     TEST_ASSERT(dev.portId == mbPort_rs485);      /* default */
@@ -237,9 +240,10 @@ static void test_device_line_parameters(void)
     sModbusDeviceRecord  dev;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) == 0);
     TEST_ASSERT(res.counts.plans == 0);           /* zero plans is legal */
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &dev) == 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 0, &dev) == 0);
     TEST_ASSERT(dev.baudCode == 0);               /* 9600 is code 0 */
     TEST_ASSERT(dev.format == mbFmt_8E1);
     TEST_ASSERT(dev.portId == mbPort_test);
@@ -265,13 +269,14 @@ static void test_scale_and_bounds_forms(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) == 0);
 
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
     sModbusPointRecord      pt;
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 0, &c, &cap,
                                      NULL, 0) == 0);
     TEST_ASSERT(MbCfg_NextPoint(&c, &pt) == 1);
     TEST_ASSERT(pt.scalePow10 == 0);
@@ -296,8 +301,9 @@ static void test_scale_and_bounds_forms(void)
         "\"writeMin\":-100000,\"writeMax\":100000}"
         "]}]}";
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(wide, 0, &res) == 0);
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 0, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 0, &pt) == 0);
     TEST_ASSERT(pt.writeMin == -100000 && pt.writeMax == 100000);
     TEST_ASSERT(pt.flags & MB_PT_BOUNDED);
 }
@@ -312,6 +318,7 @@ static void expect_reject(const char *json, const char *expectField,
     sModbusCompileResult res;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) != 0);
     TEST_ASSERT(res.ok == 0);
     if (strcmp(res.field, expectField) != 0) {
@@ -323,7 +330,7 @@ static void expect_reject(const char *json, const char *expectField,
                res.reason, expectReasonSub);
         test_failures++;
     }
-    TEST_ASSERT(!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(!MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 }
 
 /* Wrap one point into an otherwise valid single-capability config. */
@@ -585,10 +592,11 @@ static void test_accept_empty_plan_sets(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) == 0);
 
     sMbPlanHeader hdr[MB_MAX_PLANS];
-    TEST_ASSERT(MbCfg_ReadPlanHeaders(EXT_FLASH_MODBUS_LUT_A_ADDR, hdr) == 1);
+    TEST_ASSERT(MbCfg_ReadPlanHeaders(nvdbUser_modbusLutA, hdr) == 1);
     TEST_ASSERT(hdr[0].used && hdr[0].rec.devices == 0);
     TEST_ASSERT(hdr[0].tableCount == 0);
 }
@@ -653,6 +661,7 @@ static void test_integration_fixture_compiles(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     if (compile_str(json, 0, &res) != 0) {
         printf("  fixture rejected: %s / %s\n", res.field, res.reason);
         test_failures++;
@@ -666,21 +675,21 @@ static void test_integration_fixture_compiles(void)
     /* The points the injected frames land on, at the addresses the frames
      * assume: reg 0, reg 1 and reg 6 of a 20-register read at 3132. */
     sModbusPointRecord pt;
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 0, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 0, &pt) == 0);
     TEST_ASSERT(pt.addr == 3132 && pt.scalePow10 == -1);
     TEST_ASSERT(strcmp(pt.name, "battery_voltage") == 0);
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 2, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 2, &pt) == 0);
     TEST_ASSERT(pt.addr == 3138);
     TEST_ASSERT(strcmp(pt.name, "battery_soc") == 0);
 
     /* And the two writable points the set-topic tests drive, with the bounds
      * those tests depend on (15 accepted, 99 refused). */
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 4, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 4, &pt) == 0);
     TEST_ASSERT(strcmp(pt.name, "overdischarge_soc") == 0);
     TEST_ASSERT(pt.addr == 3010);
     TEST_ASSERT((pt.flags & MB_PT_WRITE) && (pt.flags & MB_PT_BOUNDED));
     TEST_ASSERT(pt.writeMin == 5 && pt.writeMax == 40);
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 3, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 3, &pt) == 0);
     TEST_ASSERT(strcmp(pt.name, "max_charge_soc") == 0);
     TEST_ASSERT(pt.writeMin == 70 && pt.writeMax == 100);
 }
@@ -705,6 +714,7 @@ static void test_jk_fixture_compiles(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     if (compile_str(json, 0, &res) != 0) {
         printf("  JK fixture rejected: %s / %s\n", res.field, res.reason);
         test_failures++;
@@ -718,7 +728,7 @@ static void test_jk_fixture_compiles(void)
     sModbusCapabilityRecord cap;
     sModbusBlockRecord      blocks[MB_MAX_BLOCKS_PER_CAP];
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 0, &c, &cap,
                                      blocks, MB_MAX_BLOCKS_PER_CAP) == 0);
     TEST_ASSERT(cap.addrStride == 2);
     TEST_ASSERT(cap.writeFc == 16);
@@ -729,7 +739,7 @@ static void test_jk_fixture_compiles(void)
     /* A 2-register writable point is legal ONLY because writeFc is 16 — under
      * FC06 not one JK setpoint would be writable (§3.2). */
     sModbusPointRecord pt;
-    TEST_ASSERT(MbCfg_FindPoint(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, 10, &pt) == 0);
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, 0, 10, &pt) == 0);
     TEST_ASSERT(strcmp(pt.name, "cell_ovp") == 0);
     TEST_ASSERT(pt.flags & MB_PT_WRITE);
     TEST_ASSERT(MbRecords_RegWidth(pt.decodeType, pt.length) == 2);
@@ -737,8 +747,8 @@ static void test_jk_fixture_compiles(void)
     /* Both packs share the capability: the same ptOrd is the same point on a
      * different slave, which is what makes four packs one register map. */
     sModbusDeviceRecord d0, d1;
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &d0) == 0);
-    TEST_ASSERT(MbCfg_FindDevice(EXT_FLASH_MODBUS_LUT_A_ADDR, 1, &d1) == 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 0, &d0) == 0);
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 1, &d1) == 0);
     TEST_ASSERT(d0.capId == d1.capId);
     TEST_ASSERT(d0.slaveAddr != d1.slaveAddr);
     TEST_ASSERT(MbRecords_BaudFromCode(d0.baudCode) == 115200u);
@@ -761,6 +771,7 @@ static void test_jk_fixture_derives_blocks(void)
 
     sModbusCompileResult res;
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(compile_str(json, 0, &res) == 0);
 
     sMbCfgCursor            c;
@@ -771,7 +782,7 @@ static void test_jk_fixture_derives_blocks(void)
     sModbusReadBlock        out[8];
     uint16_t                nSpans = 0;
 
-    TEST_ASSERT(MbCfg_OpenCapability(EXT_FLASH_MODBUS_LUT_A_ADDR, 0, &c, &cap,
+    TEST_ASSERT(MbCfg_OpenCapability(nvdbUser_modbusLutA, 0, &c, &cap,
                                      blocks, MB_MAX_BLOCKS_PER_CAP) == 0);
 
     /* The realtime points of pack_fast: ids 5..8 */
@@ -803,16 +814,17 @@ static void test_failed_compile_invalidates_previous(void)
     sModbusCompileResult res;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
 
     /* Region A holds a valid config... */
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    ts_write_region(&s, nvdbUser_modbusLutA);
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 
     /* ...a failing compile into it must leave it invalid, not stale-valid.
      * That is exactly the cost Modbus_ConfigVerify exists to avoid (§4.9). */
     TEST_ASSERT(compile_str("{\"devices\":[]}", 0, &res) != 0);
-    TEST_ASSERT(!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(!MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 }
 
 /* ============================================================================
@@ -826,17 +838,18 @@ static void test_verify_writes_nothing(void)
     sMemSource           src;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
 
     /* Region A holds a config, and a verify must leave it EXACTLY there —
      * that is the whole reason verify exists: a compile consumes the region
      * whether it succeeds or fails, and that region is the fallback. */
     ts_build_worked_example(&s);
-    ts_write_region(&s, EXT_FLASH_MODBUS_LUT_A_ADDR);
+    ts_write_region(&s, nvdbUser_modbusLutA);
 
     static uint8_t before[8192];
-    TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR, before,
-                             sizeof(before)) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(nvdbUser_modbusLutA, before, 0u,
+                          sizeof(before)) == nvdbRes_ok);
 
     src = (sMemSource){ WORKED_EXAMPLE, (uint32_t)strlen(WORKED_EXAMPLE), 0, 0 };
     TEST_ASSERT(MbCfgVerify(mem_source, &src, &res) == 0);
@@ -844,10 +857,10 @@ static void test_verify_writes_nothing(void)
     TEST_ASSERT(res.counts.capabilities == 2 && res.counts.points == 5);
 
     static uint8_t after[8192];
-    TEST_ASSERT(W25Q128_Read(EXT_FLASH_MODBUS_LUT_A_ADDR, after,
-                             sizeof(after)) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(nvdbUser_modbusLutA, after, 0u,
+                          sizeof(after)) == nvdbRes_ok);
     TEST_ASSERT_MEM_EQ(after, before, sizeof(before));
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 
     /* A bad config reports the same failure a compile would, still writing
      * nothing — same pass, same rules, counting sink. */
@@ -859,7 +872,7 @@ static void test_verify_writes_nothing(void)
     src = (sMemSource){ bad, (uint32_t)strlen(bad), 0, 0 };
     TEST_ASSERT(MbCfgVerify(mem_source, &src, &res) != 0);
     TEST_ASSERT(strcmp(res.field, "scale") == 0);
-    TEST_ASSERT(MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR));
+    TEST_ASSERT(MbCfgStore_RegionValid(nvdbUser_modbusLutA));
 }
 
 /* The point ceiling is a COUNTING cap; the real ceiling is the 16 KB REGION,
@@ -911,6 +924,7 @@ static void test_region_budget_is_the_real_ceiling(void)
     build_big_config(MB_MAX_POINTS_TOTAL, 0, 0);
     src = (sMemSource){ s_bigJson, (uint32_t)strlen(s_bigJson), 0, 0 };
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     if (MbCfgVerify(mem_source, &src, &res) != 0) {
         printf("  maximal point config rejected: %s / %s\n",
                res.field, res.reason);
@@ -924,6 +938,7 @@ static void test_region_budget_is_the_real_ceiling(void)
     build_big_config(MB_MAX_POINTS_TOTAL, 6, 64);
     src = (sMemSource){ s_bigJson, (uint32_t)strlen(s_bigJson), 0, 0 };
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgVerify(mem_source, &src, &res) != 0);
     if (strstr(res.reason, "exceeds region size") == NULL) {
         printf("  got '%s' / '%s'\n", res.field, res.reason);

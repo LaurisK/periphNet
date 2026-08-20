@@ -15,6 +15,9 @@
 
 #include "App/Http/http_server.h"
 #include "App/Img/image_store.h"
+#include "nvdb.h"
+#include "nvdb_config.h"
+#include "nvdb_layout.h"
 #include "App/Fwu/fwu_control.h"
 #include "App/Log/crash.h"
 #include "App/Log/trice_udp.h"
@@ -728,6 +731,168 @@ static void handle_fwu_status(struct netconn *conn)
     send_json(conn, "200 OK", resp_buf);
 }
 
+/* ==========================================================================
+ * nvDb endpoints under /api/nvdb — the operator surface of the store
+ * ==========================================================================
+ * An nvDb USER never asks any of this.  The person who loaded a layout and
+ * rebooted the board asks it, because loading can fail even when validation
+ * passed (docs/task_nv_db.md §2.6).
+ * ========================================================================== */
+
+/* GET /api/nvdb/layout — the layout in force, free space, and anything that
+ * has come aboard but not been applied. */
+static void handle_nvdb_layout_get(struct netconn *conn)
+{
+    sNvDbLayoutInfo info;
+    sNvDbStatus     status;
+
+    if (NvDb_GetLayout(&info) != nvdbRes_ok ||
+        NvDb_GetStatus(&status) != nvdbRes_ok) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"nvDb is not initialised\"}");
+        return;
+    }
+    if (NvDbCfg_Render(&info, &status, resp_buf, sizeof(resp_buf)) == 0u) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"layout does not fit the response buffer\"}");
+        return;
+    }
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* POST /api/nvdb/layout — take a layout aboard, to be applied at the NEXT
+ * boot.  Nothing moves now: a layout is loaded, validated and applied at
+ * NvDb_Init() and only there, which is what makes the outcome something the
+ * status has to be asked about afterwards. */
+static void handle_nvdb_layout_post(struct netconn *conn, sConnStream *s)
+{
+    uint32_t       content_length = parse_content_length(req_buf);
+    /* Main SRAM, not CCM: CCM is the constrained region here and a layout
+     * document is not hot.  The parser wants the whole document, so it has to
+     * land somewhere. */
+    static char    body[1024];
+    sNvDbLayoutCfg cfg;
+    sNvDbCfgError  err;
+    uint32_t       got = 0u;
+    eNvDbRes       res;
+
+    if (content_length == 0u || content_length >= sizeof(body)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"JSON body required (max 1023 bytes)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    while (got < content_length) {
+        int ch = cs_read_byte(s);
+        if (ch < 0) {
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"incomplete body\"}");
+            return;
+        }
+        body[got++] = (char)ch;
+    }
+    body[got] = '\0';
+
+    if (NvDbCfg_Parse(body, got, &cfg, &err) != 0) {
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"error\":\"%s\",\"field\":\"%s\",\"offset\":%u}",
+                 err.reason, err.field, (unsigned)err.offset_bytes);
+        send_json(conn, "422 Unprocessable Entity", resp_buf);
+        return;
+    }
+
+    res = NvDb_SupplyLayout(&cfg);
+    if (res == nvdbRes_refused) {
+        /* The ADVISORY check said no.  Nothing was written, and the layout in
+         * force is untouched — refusal is never a route to data loss. */
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"layout refused: it does not fit, it would "
+                  "truncate a user, or it misplaces nvDb's own areas\"}");
+        return;
+    }
+    if (res != nvdbRes_ok) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not store the layout\"}");
+        return;
+    }
+
+    TRiceS("nvDb: layout '%s' taken aboard, applies at next boot\n", cfg.name);
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"status\":\"onboard\",\"name\":\"%s\",\"version\":%u,"
+             "\"operation\":\"%s\","
+             "\"note\":\"applied at the next boot; check "
+             "lastApplyResult afterwards\"}",
+             cfg.name, (unsigned)cfg.version,
+             NvDbCfg_ModeName(cfg.operation));
+    send_json(conn, "202 Accepted", resp_buf);
+}
+
+/* DELETE /api/nvdb/layout — discard a layout that came aboard but has not
+ * been applied.  It never touches the layout in force. */
+static void handle_nvdb_layout_delete(struct netconn *conn)
+{
+    if (NvDb_DropSuppliedLayout() != nvdbRes_ok) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"could not drop the staged layout\"}");
+        return;
+    }
+    TRice("nvDb: staged layout dropped\n");
+    send_json(conn, "200 OK", "{\"status\":\"dropped\"}");
+}
+
+/* GET /api/nvdb/usage[?scan=1] — occupancy and wear.
+ *
+ * `scan` observes occupancy, which reads every area — for the two 488 KB blob
+ * areas that is nearly a megabyte of SPI, so it is off by default and the
+ * reply says which it was. */
+#define NVDB_USAGE_JSON_CAP  2048u
+
+/* Is `key` present in the query string of the request LINE?
+ *
+ * Deliberately not a search of req_buf: that holds the headers too, and a
+ * client with the word in a User-Agent would otherwise trigger a scan of the
+ * whole medium. */
+static bool query_has(const char *key)
+{
+    const char *eol = strpbrk(req_buf, "\r\n");
+    const char *q   = strchr(req_buf, '?');
+    const char *hit;
+
+    if (q == NULL || (eol != NULL && q > eol)) {
+        return false;
+    }
+    hit = strstr(q, key);
+    return (hit != NULL) && (eol == NULL || hit < eol);
+}
+
+static void handle_nvdb_usage(struct netconn *conn)
+{
+    bool  scan = query_has("scan=1");
+    char *js;
+
+    /* One object per user does not fit resp_buf, and CCM has nothing to
+     * spare — the same reason the system-status handler builds its JSON in a
+     * transient block. */
+    js = (char *)pvPortMalloc(NVDB_USAGE_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+
+    if (NvDbCfg_RenderUsage(scan, js, NVDB_USAGE_JSON_CAP) == 0u) {
+        vPortFree(js);
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"nvDb is not initialised, or the report does "
+                  "not fit\"}");
+        return;
+    }
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
 static void handle_fwu_install(struct netconn *conn)
 {
     switch (FwuCtl_RequestInstall()) {
@@ -748,6 +913,14 @@ static void handle_fwu_install(struct netconn *conn)
     case fwuCtlRes_busy:
         send_json(conn, "409 Conflict",
                   "{\"error\":\"golden promotion in progress\"}");
+        break;
+    case fwuCtlRes_blContract:
+        /* The layout moved a blob out from under a bootloader that has no
+         * way to be told.  Installing would brick the board, so it does not
+         * happen (docs/task_nv_db.md §6). */
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"storage layout no longer matches the "
+                  "bootloader\"}");
         break;
     default:
         send_json(conn, "500 Internal Server Error",
@@ -1292,7 +1465,7 @@ static void handle_modbus_write(struct netconn *conn, sConnStream *s)
 }
 
 /* --------------------------------------------------------------------------
- * Modbus config endpoints (/api/modbus/config/*) — upload compiles JSON
+ * Modbus config endpoints under /api/modbus/config — upload compiles JSON
  * straight into the inactive LUT region (compile = validation, design §4/§9);
  * apply arms the swap flag and the walker commits at a lap boundary.
  * -------------------------------------------------------------------------- */
@@ -2047,6 +2220,7 @@ static void handle_trice_dest(struct netconn *conn, sConnStream *s, int add)
 
     if (!add && content_length == 0u) {
         Trice_UdpResetDests();
+        (void)Trice_UdpForgetDests();
         TRice("Trice UDP destinations reset to broadcast\n");
         size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
         off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
@@ -2098,6 +2272,13 @@ static void handle_trice_dest(struct netconn *conn, sConnStream *s, int add)
         }
         TRice("Trice UDP dest removed %d.%d.%d.%d\n", ip[0], ip[1], ip[2], ip[3]);
     }
+
+    /* An explicitly configured destination is meant to outlive a reset — that
+     * it did not is the defect this closes.  A subscriber that added ITSELF
+     * (the /subscribe path below) is not persisted: it can ask again, and a
+     * board should not accumulate the addresses of laptops that have long
+     * since gone home. */
+    (void)Trice_UdpSaveDests();
 
     {
         size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
@@ -2235,6 +2416,14 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_monitor(conn, 0);
     } else if (route_is("POST /api/modbus/write")) {
         handle_modbus_write(conn, &stream);
+    } else if (route_is("GET /api/nvdb/layout")) {
+        handle_nvdb_layout_get(conn);
+    } else if (route_is("POST /api/nvdb/layout")) {
+        handle_nvdb_layout_post(conn, &stream);
+    } else if (route_is("DELETE /api/nvdb/layout")) {
+        handle_nvdb_layout_delete(conn);
+    } else if (route_is("GET /api/nvdb/usage")) {
+        handle_nvdb_usage(conn);
     } else if (route_is("POST /api/modbus/config/upload")) {
         handle_modbus_cfg_upload(conn, &stream);
     } else if (route_is("POST /api/modbus/config/verify")) {

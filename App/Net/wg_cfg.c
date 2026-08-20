@@ -7,9 +7,8 @@
 
 #include <string.h>
 
-#include "Shared/Drivers/w25q128.h"
-#include "Shared/Fwu/bl_app_contract.h"
 #include "Shared/Fwu/image_mgmt.h"
+#include "nvdb.h"
 #include "trice.h"
 
 /* --------------------------------------------------------------------------
@@ -78,8 +77,8 @@ static uint16_t record_read(uWgCfgRecord *rec)
 {
     uint32_t stored_crc;
 
-    if (W25Q128_Read(EXT_FLASH_WG_CFG_ADDR, rec->raw,
-                     (uint32_t)sizeof(rec->raw)) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_wgCfg, rec->raw,
+                  0u, (uint32_t)sizeof(rec->raw)) != nvdbRes_ok) {
         return 0u;
     }
     if (rec->v1.magic != WG_CFG_MAGIC) {
@@ -201,13 +200,11 @@ int WgCfg_Save(const sWgLinkCfg *cfg)
 
     rec.crc32 = record_crc(&rec, (uint32_t)sizeof(rec));
 
-    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != w25q_ok) {
-        TRice("WG cfg: erase failed\n");
-        return -2;
-    }
-    /* sizeof(rec) is below the 256 B page size, so one write suffices. */
-    if (W25Q128_WritePage(EXT_FLASH_WG_CFG_ADDR, (const uint8_t *)&rec,
-                          (uint32_t)sizeof(rec)) != w25q_ok) {
+    /* One record, rewritten whole on every change.  nvDb decides whether
+     * that costs an erase; config edits are rare, so it does not matter
+     * either way and there is nothing here that needs to know. */
+    if (NvDb_Write(nvdbUser_wgCfg, &rec, 0u,
+                   (uint32_t)sizeof(rec)) != nvdbRes_ok) {
         TRice("WG cfg: write failed\n");
         return -3;
     }
@@ -217,7 +214,18 @@ int WgCfg_Save(const sWgLinkCfg *cfg)
 
 int WgCfg_Clear(void)
 {
-    if (W25Q128_EraseSector(EXT_FLASH_WG_CFG_ADDR) != w25q_ok) {
+    /* This erases the device private key, so the caller wants it GONE, not
+     * merely unreachable.  nvDb's delete is eventual and does not survive a
+     * reset, so overwrite the record's own bytes first — that much is
+     * synchronous — and let the wipe reclaim the rest in the background. */
+    uint8_t zeros[sizeof(sWgCfgRecordV2)];
+
+    memset(zeros, 0, sizeof(zeros));
+    if (NvDb_Write(nvdbUser_wgCfg, zeros, 0u,
+                   (uint32_t)sizeof(zeros)) != nvdbRes_ok) {
+        return -1;
+    }
+    if (NvDb_Wipe(nvdbUser_wgCfg, NULL) != nvdbRes_ok) {
         return -1;
     }
     return 0;

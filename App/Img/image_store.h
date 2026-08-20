@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "dfu_types.h"
+#include "nvdb.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -68,7 +69,7 @@ const sImageStoreState *ImgStore_GetState(void);
 
 /** Scan any blob area (manifest sanity + whole-blob CRC32).  Also used by
  *  FWU code for the golden area — the blob layout is storage knowledge. */
-void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out);
+void ImgStore_ScanArea(eNvDbUser area, sBlobInfo *out);
 
 /* ---- Upload session (single, sequential — HTTP task is the only user) ---
  * Begin() → Write() for each body chunk → Finish() / Abort().             */

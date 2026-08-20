@@ -77,6 +77,24 @@ int Trice_UdpRemoveDest(const ip_addr_t *addr);
 void Trice_UdpResetDests(void);
 
 /**
+ * @brief Persist the current destination list.
+ *
+ * The list used to live only in RAM, so every reset dropped whoever was
+ * listening back to the broadcast default — fine on a bench, useless on a
+ * board reached through a tunnel.  Saved destinations come back at
+ * Trice_UdpInit().
+ *
+ * @return 0 on success, -1 if the medium refused.
+ */
+int Trice_UdpSaveDests(void);
+
+/**
+ * @brief Discard the persisted destination list.
+ * @return 0 on success, -1 if the medium refused.
+ */
+int Trice_UdpForgetDests(void);
+
+/**
  * @brief  Snapshot the destination list.
  * @return number of entries written to @p out (at most @p max).
  */

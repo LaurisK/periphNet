@@ -10,16 +10,17 @@
  * App/Fwu/fwu_control.c and consumes this module through its public API.
  *
  * Runs in the HTTP server task (upload/download/delete); FWU promotion
- * reads from defaultTask under a read hold.  The W25Q128 driver
- * serializes SPI access.
+ * reads from defaultTask under a read hold.  Every byte goes through nvDb,
+ * which serializes access and decides where the areas live — this module
+ * names users (nvdbUser_fwuStored, fwuGolden, imageMeta), never addresses.
  */
 
 #include "App/Img/image_store.h"
 #include "App/system.h"
-#include "w25q128.h"
 #include "image_mgmt.h"
 #include "version.h"
 #include "bl_app_contract.h"
+#include "nvdb.h"
 #include <string.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -28,8 +29,8 @@
 
 #define IMG_META_MAGIC   0x4D474D49u   /* "IMGM" */
 
-/* Metadata record at EXT_FLASH_IMG_META_ADDR — app-side extras that do
- * not fit the fixed .pnfw manifest.  blob_crc32 binds it to the blob. */
+/* Metadata record in its own nvDb area — app-side extras that do not fit the
+ * fixed .pnfw manifest.  blob_crc32 binds it to the blob. */
 typedef struct {
     uint32_t magic;
     uint32_t blob_crc32;
@@ -44,12 +45,18 @@ static volatile bool    read_held;
  * Blob area scanning — manifest sanity + whole-blob CRC32 (keyless)
  * -------------------------------------------------------------------------- */
 
-void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out)
+void ImgStore_ScanArea(eNvDbUser area, sBlobInfo *out)
 {
+    uint32_t area_size = 0U;
+
     memset(out, 0, sizeof(*out));
 
+    if (NvDb_GetSize(area, &area_size) != nvdbRes_ok) {
+        return;
+    }
+
     sFwuManifest man;
-    if (W25Q128_Read(base, (uint8_t *)&man, sizeof(man)) != w25q_ok) {
+    if (NvDb_Read(area, &man, 0U, sizeof(man)) != nvdbRes_ok) {
         return;
     }
 
@@ -74,15 +81,14 @@ void ImgStore_ScanArea(uint32_t base, uint32_t area_size, sBlobInfo *out)
         if ((off & 0xFFFFU) == 0U) {
             KickIwdg();
         }
-        if (W25Q128_Read(base + off, buf, n) != w25q_ok) {
+        if (NvDb_Read(area, buf, off, n) != nvdbRes_ok) {
             return;
         }
         crc = ImgMgmt_Crc32Update(crc, buf, n);
     }
 
     uint32_t stored;
-    if (W25Q128_Read(base + body_len, (uint8_t *)&stored,
-                     sizeof(stored)) != w25q_ok) {
+    if (NvDb_Read(area, &stored, body_len, sizeof(stored)) != nvdbRes_ok) {
         return;
     }
     if (ImgMgmt_Crc32Final(crc) != stored) {
@@ -111,8 +117,7 @@ static void meta_load(void)
     }
 
     sImageMeta meta;
-    if (W25Q128_Read(EXT_FLASH_IMG_META_ADDR, (uint8_t *)&meta,
-                     sizeof(meta)) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_imageMeta, &meta, 0U, sizeof(meta)) != nvdbRes_ok) {
         return;
     }
     if (meta.magic != IMG_META_MAGIC ||
@@ -136,11 +141,8 @@ static void meta_store(const char *name)
     meta.crc = ImgMgmt_Crc32((const uint8_t *)&meta,
                              offsetof(sImageMeta, crc));
 
-    if (W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != w25q_ok) {
-        return;                     /* name is best-effort, blob is intact */
-    }
-    (void)W25Q128_WritePage(EXT_FLASH_IMG_META_ADDR,
-                            (const uint8_t *)&meta, sizeof(meta));
+    /* Name is best-effort; the blob is intact either way. */
+    (void)NvDb_Write(nvdbUser_imageMeta, &meta, 0U, sizeof(meta));
 }
 
 /* --------------------------------------------------------------------------
@@ -153,8 +155,7 @@ void ImgStore_Init(void)
 
     /* The blob area is self-describing: rescan so an image uploaded
      * before a reboot is still available. */
-    ImgStore_ScanArea(EXT_FLASH_FWU_IMG_ADDR, EXT_FLASH_FWU_IMG_SIZE,
-                      &store_state.blob);
+    ImgStore_ScanArea(nvdbUser_fwuStored, &store_state.blob);
     meta_load();
 
     store_state.status = store_state.blob.valid ? imgStore_ready
@@ -175,8 +176,7 @@ typedef struct {
     bool     active;
     uint32_t content_length;
     uint32_t bytes_received;
-    uint32_t flash_write_addr;
-    uint32_t current_sector;
+    uint32_t write_off;
     uint16_t buffer_pos;
     uint8_t  buffer[256];
     char     name[IMG_STORE_NAME_MAX];
@@ -192,23 +192,18 @@ static bool flush_upload_page(void)
         return true;
     }
 
-    uint32_t addr = upload.flash_write_addr;
-    uint32_t sector = addr & ~0xFFFU;
+    KickIwdg();
 
-    /* Lazy sector erase before first write to each 4KB sector */
-    if (sector != upload.current_sector) {
-        KickIwdg();
-        if (W25Q128_EraseSector(sector) != w25q_ok) {
-            return false;
-        }
-        upload.current_sector = sector;
-    }
-
-    if (W25Q128_WritePage(addr, upload.buffer, upload.buffer_pos) != w25q_ok) {
+    /* The area was declared unwanted at UploadBegin, so these writes land in
+     * space the collector is already erasing — or pull that unit's erase
+     * forward themselves.  Either way the lazy sector erase this used to do
+     * by hand is now nvDb's business, and so is the page boundary. */
+    if (NvDb_Write(nvdbUser_fwuStored, upload.buffer, upload.write_off,
+                   upload.buffer_pos) != nvdbRes_ok) {
         return false;
     }
 
-    upload.flash_write_addr += upload.buffer_pos;
+    upload.write_off += upload.buffer_pos;
     upload.buffer_pos = 0;
     return true;
 }
@@ -224,18 +219,25 @@ bool ImgStore_UploadBegin(uint32_t content_length, const char *name,
         *err = "upload already in progress";
         return false;
     }
-    if (content_length < FWU_BLOB_OVERHEAD ||
-        content_length > EXT_FLASH_FWU_IMG_SIZE) {
+    uint32_t area_size = 0U;
+
+    if (NvDb_GetSize(nvdbUser_fwuStored, &area_size) != nvdbRes_ok ||
+        content_length < FWU_BLOB_OVERHEAD ||
+        content_length > area_size) {
         *err = "invalid content-length";
         return false;
     }
 
     memset(&upload, 0, sizeof(upload));
-    upload.active           = true;
-    upload.content_length   = content_length;
-    upload.flash_write_addr = EXT_FLASH_FWU_IMG_ADDR;
-    upload.current_sector   = 0xFFFFFFFFU;
+    upload.active         = true;
+    upload.content_length = content_length;
+    upload.write_off      = 0U;
     snprintf(upload.name, sizeof(upload.name), "%s", name ? name : "");
+
+    /* Say up front that the old blob is no longer wanted: a large user that
+     * writes into space still holding data drags an erase onto every write,
+     * which is exactly what the deferred delete exists to avoid. */
+    (void)NvDb_Wipe(nvdbUser_fwuStored, NULL);
 
     /* Incoming upload invalidates whatever was stored */
     store_state.blob.valid         = false;
@@ -293,8 +295,7 @@ bool ImgStore_UploadFinish(void)
     }
 
     /* Validate the received blob: manifest + CRC32 (keyless) */
-    ImgStore_ScanArea(EXT_FLASH_FWU_IMG_ADDR, EXT_FLASH_FWU_IMG_SIZE,
-                      &store_state.blob);
+    ImgStore_ScanArea(nvdbUser_fwuStored, &store_state.blob);
 
     if (store_state.blob.valid) {
         meta_store(upload.name);
@@ -342,7 +343,7 @@ void ImgStore_DownloadEnd(bool ok, const char *err)
 
 bool ImgStore_Read(uint32_t offset, uint8_t *buf, uint32_t len)
 {
-    if (W25Q128_Read(EXT_FLASH_FWU_IMG_ADDR + offset, buf, len) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_fwuStored, buf, offset, len) != nvdbRes_ok) {
         return false;
     }
     if (store_state.status == imgStore_downloading) {
@@ -358,9 +359,17 @@ eImgStoreRes ImgStore_Delete(void)
         return imgRes_busy;
     }
 
-    /* Erase first sector of the blob area — kills the manifest */
-    if (W25Q128_EraseSector(EXT_FLASH_FWU_IMG_ADDR) != w25q_ok ||
-        W25Q128_EraseSector(EXT_FLASH_IMG_META_ADDR) != w25q_ok) {
+    /* Kill the manifest magic first: nvDb's wipe is eventual, and "deleted"
+     * has to be true the moment this returns.  Clearing bits is a program,
+     * not an erase, so it lands synchronously and costs nothing. */
+    uint32_t dead = 0U;
+
+    if (NvDb_Write(nvdbUser_fwuStored, &dead, 0U, sizeof(dead)) != nvdbRes_ok ||
+        NvDb_Write(nvdbUser_imageMeta, &dead, 0U, sizeof(dead)) != nvdbRes_ok) {
+        return imgRes_flashErr;
+    }
+    if (NvDb_Wipe(nvdbUser_fwuStored, NULL) != nvdbRes_ok ||
+        NvDb_Wipe(nvdbUser_imageMeta, NULL) != nvdbRes_ok) {
         return imgRes_flashErr;
     }
 

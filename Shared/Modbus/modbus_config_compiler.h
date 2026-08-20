@@ -32,12 +32,12 @@ extern "C" {
  * result is data a consumer may name, MbCfgCompile() is a flash accessor it
  * may not call (docs/modbus.md §4.9). */
 
-/* Compile JSON from `src` into the LUT region at `regionBase`.
+/* Compile JSON from `src` into the LUT region held by nvDb user `region`.
  * `kick` (nullable) is called before each sector erase (IWDG).
  * Returns 0 and res->ok=1 on success; -1 with res describing the first
  * failure otherwise. Not reentrant (static parser state) — callers are the
  * HTTP task and one-time default provisioning, serialized by design. */
-int MbCfgCompile(fModbusByteSource src, void *srcCtx, uint32_t regionBase,
+int MbCfgCompile(fModbusByteSource src, void *srcCtx, eNvDbUser region,
                  void (*kick)(void), sModbusCompileResult *res);
 
 /* The same pass with the record writes discarded: same source, same rules,

@@ -1,6 +1,6 @@
 #include "modbus_config_store.h"
 #include "image_mgmt.h"
-#include "w25q128.h"
+#include "nvdb.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -28,8 +28,8 @@ static uint32_t sel_header_crc(const sMbSelector *sel)
 
 static int sel_read(sMbSelector *sel)
 {
-    if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR,
-                     (uint8_t *)sel, sizeof(*sel)) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_modbusSelector, sel, 0u,
+                  (uint32_t)sizeof(*sel)) != nvdbRes_ok) {
         return -1;
     }
 
@@ -45,20 +45,31 @@ static int sel_read(sMbSelector *sel)
 
 static int sel_write(const sMbSelector *sel)
 {
-    if (W25Q128_EraseSector(EXT_FLASH_MODBUS_SEL_ADDR) != w25q_ok) {
-        return -1;
-    }
-    if (W25Q128_WritePage(EXT_FLASH_MODBUS_SEL_ADDR,
-                          (const uint8_t *)sel, sizeof(*sel)) != w25q_ok) {
+    /* Rewriting the whole record sets bits that are already clear, so nvDb
+     * does the erase-and-write-back for us.  Whether that costs an erase is
+     * its business, not this module's. */
+    if (NvDb_Write(nvdbUser_modbusSelector, sel, 0u,
+                   (uint32_t)sizeof(*sel)) != nvdbRes_ok) {
         return -1;
     }
     return 0;
 }
 
-static uint32_t region_base(uint32_t index)
+static eNvDbUser region_user(uint32_t index)
 {
-    return (index == 0u) ? EXT_FLASH_MODBUS_LUT_A_ADDR
-                         : EXT_FLASH_MODBUS_LUT_B_ADDR;
+    return (index == 0u) ? nvdbUser_modbusLutA : nvdbUser_modbusLutB;
+}
+
+/* The record stream a region can hold, minus its header. */
+static uint32_t region_stream_max(eNvDbUser region)
+{
+    uint32_t size = 0u;
+
+    if (NvDb_GetSize(region, &size) != nvdbRes_ok ||
+        size <= MODBUS_LUT_HEADER_SIZE) {
+        return 0u;
+    }
+    return size - MODBUS_LUT_HEADER_SIZE;
 }
 
 /* ==========================================================================
@@ -77,8 +88,8 @@ int MbCfgStore_Init(void)
     /* Blank or corrupt (e.g. power cut during CommitSwap): prefer whichever
      * region holds a valid config so a previously working setup survives. */
     uint32_t active = 0u;
-    if (!MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_A_ADDR) &&
-        MbCfgStore_RegionValid(EXT_FLASH_MODBUS_LUT_B_ADDR)) {
+    if (!MbCfgStore_RegionValid(nvdbUser_modbusLutA) &&
+        MbCfgStore_RegionValid(nvdbUser_modbusLutB)) {
         active = 1u;
     }
 
@@ -97,32 +108,32 @@ int MbCfgStore_Init(void)
     return 0;
 }
 
-uint32_t MbCfgStore_ActiveBase(void)
+eNvDbUser MbCfgStore_ActiveRegion(void)
 {
-    return region_base(s_activeRegion);
+    return region_user(s_activeRegion);
 }
 
-uint32_t MbCfgStore_InactiveBase(void)
+eNvDbUser MbCfgStore_InactiveRegion(void)
 {
-    return region_base(s_activeRegion ^ 1u);
+    return region_user(s_activeRegion ^ 1u);
 }
 
 /* ==========================================================================
  * Region validity — header sanity + stream CRC
  * ========================================================================== */
 
-bool MbCfgStore_RegionValid(uint32_t base)
+bool MbCfgStore_RegionValid(eNvDbUser region)
 {
     sModbusLutHeader hdr;
 
-    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != w25q_ok) {
+    if (NvDb_Read(region, &hdr, 0u, (uint32_t)sizeof(hdr)) != nvdbRes_ok) {
         return false;
     }
 
     if (hdr.magic != MODBUS_LUT_MAGIC ||
         hdr.version != MODBUS_LUT_VERSION ||
         hdr.streamLen == 0u ||
-        hdr.streamLen > EXT_FLASH_MODBUS_LUT_SIZE - MODBUS_LUT_HEADER_SIZE) {
+        hdr.streamLen > region_stream_max(region)) {
         return false;
     }
 
@@ -134,8 +145,8 @@ bool MbCfgStore_RegionValid(uint32_t base)
         if (n > sizeof(chunk)) {
             n = sizeof(chunk);
         }
-        if (W25Q128_Read(base + MODBUS_LUT_HEADER_SIZE + off,
-                         chunk, n) != w25q_ok) {
+        if (NvDb_Read(region, chunk, MODBUS_LUT_HEADER_SIZE + off,
+                      n) != nvdbRes_ok) {
             return false;
         }
         crc = ImgMgmt_Crc32Update(crc, chunk, n);
@@ -151,20 +162,22 @@ bool MbCfgStore_RegionValid(uint32_t base)
 
 int MbCfgStore_SetSwapPending(void)
 {
-    if (!MbCfgStore_RegionValid(MbCfgStore_InactiveBase())) {
+    if (!MbCfgStore_RegionValid(MbCfgStore_InactiveRegion())) {
         return -1;                       /* nothing valid to swap to */
     }
 
     sMbSelFlags flags;
-    if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_modbusSelector, &flags, SEL_FLAGS_OFFSET,
+                  (uint32_t)sizeof(flags)) != nvdbRes_ok) {
         return -1;
     }
 
+    /* Clearing one bit of a word that is otherwise unchanged: nvDb programs
+     * that in place, so arming a swap still costs no erase and is still
+     * atomic — which is the whole reason the flags sit outside the CRC. */
     flags.bits.swap_pending = 0;
-    if (W25Q128_WritePage(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
-                          (const uint8_t *)&flags,
-                          sizeof(flags)) != w25q_ok) {
+    if (NvDb_Write(nvdbUser_modbusSelector, &flags, SEL_FLAGS_OFFSET,
+                   (uint32_t)sizeof(flags)) != nvdbRes_ok) {
         return -1;
     }
     return 0;
@@ -174,8 +187,8 @@ bool MbCfgStore_IsSwapPending(void)
 {
     sMbSelFlags flags;
 
-    if (W25Q128_Read(EXT_FLASH_MODBUS_SEL_ADDR + SEL_FLAGS_OFFSET,
-                     (uint8_t *)&flags, sizeof(flags)) != w25q_ok) {
+    if (NvDb_Read(nvdbUser_modbusSelector, &flags, SEL_FLAGS_OFFSET,
+                  (uint32_t)sizeof(flags)) != nvdbRes_ok) {
         return false;
     }
     return flags.bits.swap_pending == 0;
@@ -218,18 +231,27 @@ int MbCfgStore_ClearSwapPending(void)
  * Region erase — "invalid is erased, not repaired" (docs/modbus.md §4.2)
  * ========================================================================== */
 
-int MbCfgStore_EraseRegion(uint32_t base)
+int MbCfgStore_EraseRegion(eNvDbUser region)
 {
-    /* Only the header page has to go: without a valid header nothing opens a
-     * cursor on the region, and the next upload overwrites the rest. */
-    return (W25Q128_EraseSector(base) == w25q_ok) ? 0 : -1;
+    /* "Invalid is erased, not repaired" has to hold the instant this
+     * returns, and nvDb's delete is eventual.  Clearing the header's magic
+     * is a bit-clear, so it lands synchronously and costs nothing; the wipe
+     * then reclaims the region in the background, which is what makes the
+     * next upload's writes cheap. */
+    uint32_t magic = 0u;
+
+    if (NvDb_Write(region, &magic, offsetof(sModbusLutHeader, magic),
+                   (uint32_t)sizeof(magic)) != nvdbRes_ok) {
+        return -1;
+    }
+    return (NvDb_Wipe(region, NULL) == nvdbRes_ok) ? 0 : -1;
 }
 
 /* ==========================================================================
  * Record cursor
  * ========================================================================== */
 
-int MbCfg_Open(uint32_t base, sMbCfgCursor *c)
+int MbCfg_Open(eNvDbUser region, sMbCfgCursor *c)
 {
     sModbusLutHeader hdr;
 
@@ -237,15 +259,15 @@ int MbCfg_Open(uint32_t base, sMbCfgCursor *c)
         return -1;
     }
 
-    if (W25Q128_Read(base, (uint8_t *)&hdr, sizeof(hdr)) != w25q_ok ||
+    if (NvDb_Read(region, &hdr, 0u, (uint32_t)sizeof(hdr)) != nvdbRes_ok ||
         hdr.magic != MODBUS_LUT_MAGIC ||
         hdr.version != MODBUS_LUT_VERSION ||
         hdr.streamLen == 0u ||
-        hdr.streamLen > EXT_FLASH_MODBUS_LUT_SIZE - MODBUS_LUT_HEADER_SIZE) {
+        hdr.streamLen > region_stream_max(region)) {
         return -1;
     }
 
-    c->base      = base;
+    c->region    = region;
     c->off       = 0u;
     c->streamLen = hdr.streamLen;
     return 0;
@@ -258,8 +280,8 @@ static int cursor_read(sMbCfgCursor *c, void *dst, uint32_t size)
         return -1;
     }
     if (dst != NULL &&
-        W25Q128_Read(c->base + MODBUS_LUT_HEADER_SIZE + c->off,
-                     (uint8_t *)dst, size) != w25q_ok) {
+        NvDb_Read(c->region, dst, MODBUS_LUT_HEADER_SIZE + c->off,
+                  size) != nvdbRes_ok) {
         return -1;
     }
     c->off += size;
@@ -373,12 +395,12 @@ static int skip_plan_body(sMbCfgCursor *c, uint8_t *tables)
     return (r == 0) ? 0 : -1;
 }
 
-int MbCfg_SeekDevices(uint32_t base, sMbCfgCursor *c)
+int MbCfg_SeekDevices(eNvDbUser region, sMbCfgCursor *c)
 {
     sModbusCapabilityRecord cap;
     int r;
 
-    if (MbCfg_Open(base, c) != 0) {
+    if (MbCfg_Open(region, c) != 0) {
         return -1;
     }
     while ((r = MbCfg_NextCapability(c, &cap)) == 1) {
@@ -389,19 +411,19 @@ int MbCfg_SeekDevices(uint32_t base, sMbCfgCursor *c)
     return (r == 0) ? 0 : -1;
 }
 
-int MbCfg_SeekPlans(uint32_t base, sMbCfgCursor *c)
+int MbCfg_SeekPlans(eNvDbUser region, sMbCfgCursor *c)
 {
     sModbusDeviceRecord dev;
     int r;
 
-    if (MbCfg_SeekDevices(base, c) != 0) {
+    if (MbCfg_SeekDevices(region, c) != 0) {
         return -1;
     }
     while ((r = MbCfg_NextDevice(c, &dev)) == 1) { }
     return (r == 0) ? 0 : -1;
 }
 
-int MbCfg_Count(uint32_t base, sModbusConfigCounts *out)
+int MbCfg_Count(eNvDbUser region, sModbusConfigCounts *out)
 {
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
@@ -410,7 +432,7 @@ int MbCfg_Count(uint32_t base, sModbusConfigCounts *out)
     sModbusConfigCounts     counts = { 0, 0, 0, 0 };
     int                     r;
 
-    if (!out || MbCfg_Open(base, &c) != 0) {
+    if (!out || MbCfg_Open(region, &c) != 0) {
         return -1;
     }
 
@@ -445,14 +467,14 @@ int MbCfg_Count(uint32_t base, sModbusConfigCounts *out)
     return 0;
 }
 
-int MbCfg_OpenCapability(uint32_t base, uint16_t capId, sMbCfgCursor *c,
+int MbCfg_OpenCapability(eNvDbUser region, uint16_t capId, sMbCfgCursor *c,
                          sModbusCapabilityRecord *cap,
                          sModbusBlockRecord *blocks, uint8_t maxBlocks)
 {
     uint16_t ord = 0;
     int      r;
 
-    if (!c || !cap || MbCfg_Open(base, c) != 0) {
+    if (!c || !cap || MbCfg_Open(region, c) != 0) {
         return -1;
     }
 
@@ -481,12 +503,12 @@ int MbCfg_OpenCapability(uint32_t base, uint16_t capId, sMbCfgCursor *c,
     return -1;
 }
 
-int MbCfg_FindDevice(uint32_t base, uint8_t devOrd, sModbusDeviceRecord *out)
+int MbCfg_FindDevice(eNvDbUser region, uint8_t devOrd, sModbusDeviceRecord *out)
 {
     sMbCfgCursor c;
     uint8_t      ord = 0;
 
-    if (!out || MbCfg_SeekDevices(base, &c) != 0) {
+    if (!out || MbCfg_SeekDevices(region, &c) != 0) {
         return -1;
     }
     while (MbCfg_NextDevice(&c, out) == 1) {
@@ -498,14 +520,14 @@ int MbCfg_FindDevice(uint32_t base, uint8_t devOrd, sModbusDeviceRecord *out)
     return -1;
 }
 
-int MbCfg_FindPoint(uint32_t base, uint16_t capId, uint16_t ptOrd,
+int MbCfg_FindPoint(eNvDbUser region, uint16_t capId, uint16_t ptOrd,
                     sModbusPointRecord *out)
 {
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
     uint16_t                ord = 0;
 
-    if (!out || MbCfg_OpenCapability(base, capId, &c, &cap, NULL, 0) != 0) {
+    if (!out || MbCfg_OpenCapability(region, capId, &c, &cap, NULL, 0) != 0) {
         return -1;
     }
     while (MbCfg_NextPoint(&c, out) == 1) {
@@ -517,7 +539,7 @@ int MbCfg_FindPoint(uint32_t base, uint16_t capId, uint16_t ptOrd,
     return -1;
 }
 
-int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out)
+int MbCfg_ReadPlanHeaders(eNvDbUser region, sMbPlanHeader *out)
 {
     sMbCfgCursor      c;
     sModbusPlanRecord plan;
@@ -529,7 +551,7 @@ int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out)
     }
     memset(out, 0, sizeof(sMbPlanHeader) * MB_MAX_PLANS);
 
-    if (MbCfg_SeekPlans(base, &c) != 0) {
+    if (MbCfg_SeekPlans(region, &c) != 0) {
         return -1;
     }
 
@@ -553,16 +575,16 @@ int MbCfg_ReadPlanHeaders(uint32_t base, sMbPlanHeader *out)
 
 int MbCfg_ResolvePoint(uint8_t devOrd, uint16_t ptOrd, sMbPointLookup *out)
 {
-    uint32_t                base = MbCfgStore_ActiveBase();
+    eNvDbUser               region = MbCfgStore_ActiveRegion();
     sModbusDeviceRecord     dev;
     sMbCfgCursor            c;
     sModbusCapabilityRecord cap;
     uint16_t                ord = 0;
 
-    if (!out || MbCfg_FindDevice(base, devOrd, &dev) != 0) {
+    if (!out || MbCfg_FindDevice(region, devOrd, &dev) != 0) {
         return -1;
     }
-    if (MbCfg_OpenCapability(base, dev.capId, &c, &cap, NULL, 0) != 0) {
+    if (MbCfg_OpenCapability(region, dev.capId, &c, &cap, NULL, 0) != 0) {
         return -1;
     }
 

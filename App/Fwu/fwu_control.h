@@ -23,12 +23,26 @@ typedef enum {
     fwuCtlRes_noImage,       /* no valid stored image                */
     fwuCtlRes_busy,           /* transfer / promotion in progress     */
     fwuCtlRes_flashErr,      /* boot status / ext flash write error  */
-    fwuCtlRes_already,
-    fwuCtlRes_last          /* sentinel */        /* confirm: nothing pending             */
+    fwuCtlRes_already,       /* confirm: nothing pending             */
+    fwuCtlRes_blContract,    /* nvDb placed a blob where the BL does
+                              * not look — installing would brick it  */
+    fwuCtlRes_last          /* sentinel */
 } eFwuCtlRes;
 
 /** Scan the golden area.  Call once at startup, after ImgStore_Init(). */
 void FwuCtl_Init(void);
+
+/** True when nvDb's placement of the boot status and the two blob areas still
+ *  matches what the bootloader was built to look for.
+ *
+ *  The bootloader has no knowledge of nvDb by design — it cannot link it, and
+ *  keeping it ignorant is what leaves the directory format free to evolve.
+ *  The price is that the FWU module owns the handoff, and until that handoff
+ *  is designed (docs/task_nv_db.md §6) the only honest version of it is this:
+ *  check that the addresses still agree, and refuse to arm an install if they
+ *  do not.  A layout change that moves a blob would otherwise be discovered
+ *  by a board that no longer boots. */
+bool FwuCtl_BlContractHolds(void);
 
 /** Golden (last confirmed) image info — rollback target. */
 const sBlobInfo *FwuCtl_GetGolden(void);

@@ -30,6 +30,18 @@ set(UNIT_INCLUDES
     ${PROJECT_ROOT}/Shared/Crypto
     ${PROJECT_ROOT}/Shared/Fwu
     ${PROJECT_ROOT}/Shared/Modbus
+    ${PROJECT_ROOT}/Shared/NvDb
+)
+
+# nvDb is now the only authority over the medium, so every test that touches
+# flash links it and drives it through its host port.
+set(NVDB_CORE
+    ${PROJECT_ROOT}/Shared/NvDb/nvdb.c
+    ${PROJECT_ROOT}/Shared/NvDb/nvdb_layout.c
+    ${PROJECT_ROOT}/Shared/NvDb/nvdb_config.c
+    ${PROJECT_ROOT}/Shared/NvDb/nvdb_wear.c
+    mocks/w25q128_mock.c
+    mocks/nvdb_port_stub.c
 )
 
 add_executable(test_crypto
@@ -49,9 +61,13 @@ add_executable(test_version
 target_include_directories(test_version PRIVATE ${UNIT_INCLUDES})
 add_test(NAME version COMMAND test_version)
 
+# App/Fwu/boot_status_medium.c is application code, but it depends only on
+# nvdb.h by design — so the test drives the same path the firmware does
+# rather than a second implementation of it.
 add_executable(test_boot_status
     test_boot_status.c
-    mocks/w25q128_mock.c
+    ${NVDB_CORE}
+    ${PROJECT_ROOT}/App/Fwu/boot_status_medium.c
     ${PROJECT_ROOT}/Shared/Fwu/boot_status.c
     ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
     ${PROJECT_ROOT}/Shared/Fwu/version.c
@@ -61,7 +77,7 @@ add_test(NAME boot_status COMMAND test_boot_status)
 
 add_executable(test_modbus_store
     test_modbus_store.c
-    mocks/w25q128_mock.c
+    ${NVDB_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
     ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
     ${PROJECT_ROOT}/Shared/Fwu/version.c
@@ -78,7 +94,7 @@ add_test(NAME modbus_frame COMMAND test_modbus_frame)
 
 add_executable(test_modbus_plans
     test_modbus_plans.c
-    mocks/w25q128_mock.c
+    ${NVDB_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_plans.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
     ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
@@ -103,7 +119,7 @@ add_test(NAME modbus_units COMMAND test_modbus_units)
 
 add_executable(test_modbus_compiler
     test_modbus_compiler.c
-    mocks/w25q128_mock.c
+    ${NVDB_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
@@ -121,7 +137,7 @@ add_test(NAME modbus_compiler COMMAND test_modbus_compiler)
 
 add_executable(test_modbus_export
     test_modbus_export.c
-    mocks/w25q128_mock.c
+    ${NVDB_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_export.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
@@ -133,6 +149,24 @@ add_executable(test_modbus_export
 )
 target_include_directories(test_modbus_export PRIVATE ${UNIT_INCLUDES})
 add_test(NAME modbus_export COMMAND test_modbus_export)
+
+# nvDb: the core is RTOS-free precisely so it can be driven here with no
+# board, over the same NOR-faithful flash mock.  mocks/nvdb_port_stub.c is the
+# port; the tests call NvDb_CollectStep() themselves.
+set(NVDB_SOURCES
+    ${NVDB_CORE}
+    ${PROJECT_ROOT}/Shared/Fwu/image_mgmt.c
+    ${PROJECT_ROOT}/Shared/Fwu/version.c
+)
+
+add_executable(test_nvdb_access   test_nvdb_access.c   ${NVDB_SOURCES})
+add_executable(test_nvdb_collect  test_nvdb_collect.c  ${NVDB_SOURCES})
+add_executable(test_nvdb_layout   test_nvdb_layout.c   ${NVDB_SOURCES})
+add_executable(test_nvdb_config   test_nvdb_config.c   ${NVDB_SOURCES})
+foreach(_t access collect layout config)
+    target_include_directories(test_nvdb_${_t} PRIVATE ${UNIT_INCLUDES})
+    add_test(NAME nvdb_${_t} COMMAND test_nvdb_${_t})
+endforeach()
 
 # App/Net/wg_conf.c is application code, but it depends only on libc by
 # design (no lwIP, no HAL) precisely so the .conf parser can be tested here.

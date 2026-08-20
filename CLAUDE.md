@@ -36,8 +36,8 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — ~263 KB flash (480 KB limit), ~67 KB main
-  SRAM of 128 KB and ~58 KB CCM of 64 KB (**CCM is the tight one — ~91 %**);
+- `build/application.elf` / `.bin` — ~383 KB flash (480 KB limit), ~86 KB main
+  SRAM of 128 KB and ~58 KB CCM of 64 KB (**CCM is the tight one — ~92 %**);
   the `.bin` is signed in-place (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
@@ -116,9 +116,13 @@ attempt counting, so JLink dev flashing is unaffected.
 ```
 
 **Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
-gate, boot_status flag lifecycle, and the Modbus config machinery — record
+gate, boot_status flag lifecycle, the Modbus config machinery — record
 store/selector, JSON compiler accept+reject matrix, export round-trip,
-decode/format vectors — all over a NOR-faithful flash mock):
+decode/format vectors — and all of `nvDb`: bounds at every edge, the erased
+fast path asserted against an erase counter, delete/collector semantics,
+layout JSON accept+reject, and relocation including a power-cut sweep. All
+over a NOR-faithful flash mock — full 8 MB, page-program boundaries enforced,
+and a "cut the power on operation N" knob):
 ```bash
 cmake -B tests/build -S tests && cmake --build tests/build -j8
 ctest --test-dir tests/build --output-on-failure
@@ -198,13 +202,49 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
              └───────────────────┘
 ```
 
-**Every address above is hand-assigned in `Shared/Fwu/bl_app_contract.h` with
-no overlap check beyond review, and ten files in `App/`+`Shared/` call
-`W25Q128_*` directly.** [docs/task_nv_db.md](docs/task_nv_db.md) is the
-approved design that replaces this: `nvDb` becomes the only authority over
-the external flash address space, each client ("user") gets a flat
-bounds-checked span starting at `0x00`, and placement/relocation/isolation
-move into one module. **Not implemented — the map above is what ships.**
+**`nvDb` (`Shared/NvDb/`) now owns this address space** —
+[docs/task_nv_db.md](docs/task_nv_db.md) §1-§5, phases 0-6 of §7. Each client
+("user", `eNvDbUser`) gets a flat bounds-checked span starting at `0x00`;
+placement, relocation and isolation live in one module and no consumer header
+mentions a sector, a page, an erase or an address. It runs on the board:
+`NvDbPlatform_Init()` in `defaultTask` right after `W25Q128_Init()`, with a
+priority-inheriting mutex and a lowest-priority collector task. `nvdb
+status|layout|usage|wear|drop` on the CLI, `/api/nvdb/*` over HTTP.
+
+**Wear and occupancy are indication only.** Erase counts ride in the one
+function that performs every erase, so no user cooperates and nothing can
+forget to. They live in a RAM mirror (4 KB `.bss`, one `uint16` per erasable
+unit) written back by the collector when it runs out of work — a flash
+counter would need an erase to increment, and an erase is the thing being
+counted. Neither wear nor occupancy ever influences an allocation, a
+relocation, a write or a result code (C13); that is what lets both be cheap
+and lossy, and why losing the wear area costs a statistic and nothing else.
+
+**No application code reaches the medium any more, and CMake enforces
+it.** `W25Q128_*` and `EXT_FLASH_*_ADDR` are banned throughout `App/` and
+`Shared/`; the build fails at configure time if one appears. Three files are
+exempt, each for a stated reason: `App/Log/crash.c` (writes in fault context,
+address from `NvDb_GetAbsoluteAddress`), `App/Fwu/fwu_control.c` (compares
+nvDb's placement against what the BL was built for), and
+`Shared/Fwu/image_mgmt.c` (streams an HMAC over flash for the *bootloader*).
+
+**The map above is still exactly what ships, and that is deliberate** — but
+now for one reason only: **the bootloader**. It reads the boot status and
+both blobs at addresses compiled into it, and the FWU→BL handoff that would
+let it learn otherwise is still undesigned. So the built-in layout
+(`s_targetSizes` in `nvdb_layout.c`) reproduces the hand-assigned map exactly:
+on first boot `nvDb` adopts it (§4.4.1 first adoption), adds its two pinned
+areas plus `mqttCfg`/`triceUdpCfg` above them, and moves nothing. `imageMeta`
+is 12 KB rather than 4 KB because it absorbs the 8 KB hole the old map left,
+so the packer reproduces the old addresses without learning to leave holes.
+`FwuCtl_BlContractHolds()` checks the agreement at boot and
+`POST /api/fwu/install` **refuses with 409** if a layout ever breaks it,
+rather than letting a board discover it by not booting.
+
+The compacting layout ships as `periphnet` v2 once that handoff exists.
+Relocation itself is fully tested host-side — including a sweep that cuts the
+power at all 60 steps of a relayout and checks every user's bytes
+afterwards.
 
 ## Project Structure
 
@@ -218,6 +258,9 @@ PeriphNet/
     application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
     Can/                          # Pylontech BMS reader + simulator (CAN)
     Cmd/cmd_parser.c/h            # CLI command parser (composition root)
+    nv_record.h                   # a CRC'd, versioned record in one nvDb
+                                  #   area. USER-side policy: nvDb never
+                                  #   learns what a version is (Rule 3)
     Data/telemetry.c/h            # Neutral telemetry model — RESERVED, no
                                   #   producers or consumers today (mqtt_bridge
                                   #   stopped consuming it in the config
@@ -234,6 +277,9 @@ PeriphNet/
                                   #   RNG-backed DRBG, TAI64N), wg_time
                                   #   (reboot-surviving monotonic seconds),
                                   #   wg_cfg (per-device net config in flash)
+    NvDb/nvdb_platform.c/h        # the nvDb port: priority-inheriting mutex
+                                  #   + lowest-priority collector task. The
+                                  #   ONLY part of nvDb that knows FreeRTOS
     Modbus/                       # THE module: modbus.h (the only consumer
                                   #   header), modbus.c (surface: subscriptions,
                                   #   requests, plans, config), modbus_engine
@@ -253,11 +299,22 @@ PeriphNet/
                                   #   (NIST-vector-tested, see tests/)
     Fwu/                          # bl_app_contract.h, dfu_types.h,
                                   #   version.c/h, boot_status.c/h, image_mgmt.c/h
+                                  #   boot_status_medium.h — boot_status.c is
+                                  #   in BOTH targets so it cannot call nvDb;
+                                  #   the BL answers this with direct flash,
+                                  #   the app (App/Fwu/) with nvDb
     Modbus/                       # APPLICATION-ONLY Shared code (host-testable,
                                   #   never linked into the 32KB BL): register
                                   #   config records/store/selector, streaming
                                   #   JSON compiler, JSON export, decode/format,
                                   #   DLMS unit table
+    NvDb/                         # APPLICATION-ONLY Shared code, same rule:
+                                  #   nvdb.h (the only consumer header — no
+                                  #   flash word in it), nvdb_exceptions.h
+                                  #   (absolute addresses, crash handler + FWU
+                                  #   only), nvdb_port.h (the RTOS contract),
+                                  #   nvdb_layout.c (directory, placement,
+                                  #   relayout, journal), nvdb_config.c (JSON)
     Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver
   Core/                           # CubeMX-OWNED ONLY (regeneration-safe)
     Inc/ Src/                     # main.c, gpio.c, spi.c, HAL config ...
@@ -496,7 +553,8 @@ Shared code compiled into both bootloader and application.
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
-| mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`) |
+| nvdb | 256 words | osPriorityLow | The nvDb collector: erases deleted space in the background so erases stay off the write path. One erasable unit per lock acquisition, so a waiting writer gets in between units. Sleeps on a notify (1 s backstop); never reboots anything |
+| mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`), and **auto-started at boot when a broker has been saved** (`mqtt save`) — a board that was never configured still waits for the command |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
 
@@ -564,6 +622,11 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
 | `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag) |
 | `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |
+| `/api/nvdb/layout` | GET | The storage layout in force, free space, and anything that has come aboard but not been applied |
+| `/api/nvdb/layout` | POST | Take a layout aboard (JSON, §2.7 schema). **202 Accepted** — nothing moves now: a layout is applied at the NEXT boot and only there, so check `lastApplyResult` afterwards. 422 with the offending field on a parse error; 409 when the advisory structural check refuses (nothing written, previous layout untouched) |
+| `/api/nvdb/layout` | DELETE | Discard a layout that came aboard but has not applied. Never touches the layout in force |
+| `/api/nvdb/usage` | GET | Occupancy and wear per user plus a medium summary. Add `?scan=1` to **observe** occupancy — that reads every area (~1 MB of SPI), so it is off by default and the reply says which it was |
+| `/api/fwu/install` | — | Now also returns **409 `storage layout no longer matches the bootloader`** when nvDb has placed the boot status or a blob somewhere the BL does not look. Installing then would brick the board |
 | `/api/modbus/config/verify` | POST | Validate a config JSON **without writing anything** — an upload consumes the inactive region on success *and* on failure, and that region holds the previous config |
 | `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
 | `/api/modbus/config/apply` | POST | Arm the config swap; the engine commits it at its next safe point (hot reload, no reboot) |
@@ -736,6 +799,10 @@ TRice("Message: %d\n", value);
 - **Confirm or roll back** — non-local builds must be confirmed via `POST /api/fwu/confirm` within 3 boots of an install, otherwise the BL restores the golden image
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)
 - **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
+- **`Shared/NvDb/` is application-only Shared code too** (`SHARED_NVDB_SOURCES`), and CMake **fails the build if any bootloader source includes an `nvdb*` header**. The BL has no knowledge of `nvDb` by design — it learns where the firmware blobs are from the FWU module, which is what leaves the directory format free to evolve without a bootloader in lockstep
+- **`nvDb` is the only authority over the medium, and CMake enforces that too** — no `W25Q128_*` call and no `EXT_FLASH_*_ADDR` anywhere in `App/` or `Shared/` outside the driver, `Shared/NvDb/`, and the three exempt files listed in the External Flash section
+- **A write that only clears bits is programmed in place, never erased.** `boot_status` and the Modbus selector both keep their flags outside their CRCs precisely so a flag update is atomic; routing them through a store that only knew "erased or not" would have turned every one into an erase-and-write-back
+- **Absolute addresses leave `nvDb` only through `nvdb_exceptions.h`** — the crash handler (fault context) and the FWU module. Including `nvdb.h` cannot reach it; that is the enforcement
 - **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. It holds **two** NOLOAD sections with different lifecycles:
   - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.

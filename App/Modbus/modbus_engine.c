@@ -164,7 +164,7 @@ static int timer_create(uint8_t devOrd, uint8_t planId, uint8_t ttId,
  * by no live plan is not polled at all (§4.3). */
 static void timers_rebuild(void)
 {
-    uint32_t          base = MbCfgStore_ActiveBase();
+    eNvDbUser         region = MbCfgStore_ActiveRegion();
     sMbCfgCursor      c;
     sModbusPlanRecord plan;
     uint8_t           liveMask = ModbusSub_PlanUnion();
@@ -172,7 +172,7 @@ static void timers_rebuild(void)
 
     timers_destroy();
 
-    if (liveMask == 0u || MbCfg_SeekPlans(base, &c) != 0) {
+    if (liveMask == 0u || MbCfg_SeekPlans(region, &c) != 0) {
         return;                    /* nothing subscribed: the wire stays quiet */
     }
 
@@ -230,14 +230,14 @@ static int id_selected(uint16_t id, uint16_t count)
 }
 
 /* Find the plan's time table `ttId` and load its point ids. */
-static int load_time_table(uint32_t base, uint8_t planId, uint8_t ttId,
+static int load_time_table(eNvDbUser region, uint8_t planId, uint8_t ttId,
                            sModbusPlanRecord *planOut, uint16_t *idCount,
                            uint32_t *period_sec)
 {
     sMbCfgCursor      c;
     sModbusPlanRecord plan;
 
-    if (MbCfg_SeekPlans(base, &c) != 0) {
+    if (MbCfg_SeekPlans(region, &c) != 0) {
         return -1;
     }
     while (MbCfg_NextPlan(&c, &plan) == 1) {
@@ -292,7 +292,7 @@ static void emit_point(const char *devPrefix, uint8_t devOrd,
     ModbusDispatch_Sample(&desc, scaled, textPtr);
 }
 
-static void service_block(uint32_t base, const sModbusDeviceRecord *dev,
+static void service_block(eNvDbUser region, const sModbusDeviceRecord *dev,
                           uint8_t devOrd, const sModbusCapabilityRecord *cap,
                           const sModbusReadBlock *blk, uint16_t idCount,
                           uint32_t period_sec, uint8_t planId, uint8_t ttId)
@@ -330,7 +330,7 @@ static void service_block(uint32_t base, const sModbusDeviceRecord *dev,
     sModbusPointRecord      pt;
     uint16_t                ptOrd = 0;
 
-    if (MbCfg_OpenCapability(base, dev->capId, &pc, &tmp, NULL, 0) != 0) {
+    if (MbCfg_OpenCapability(region, dev->capId, &pc, &tmp, NULL, 0) != 0) {
         return;
     }
     while (MbCfg_NextPoint(&pc, &pt) == 1) {
@@ -352,7 +352,7 @@ static void service_block(uint32_t base, const sModbusDeviceRecord *dev,
 
 static void run_sequence(sTimerSlot *t)
 {
-    uint32_t                base = MbCfgStore_ActiveBase();
+    eNvDbUser               region = MbCfgStore_ActiveRegion();
     sModbusPlanRecord       plan;
     sModbusDeviceRecord     dev;
     sModbusCapabilityRecord cap;
@@ -363,18 +363,18 @@ static void run_sequence(sTimerSlot *t)
     sModbusPointRecord      pt;
     int                     blockCount;
 
-    if (load_time_table(base, t->planId, t->ttId, &plan, &idCount,
+    if (load_time_table(region, t->planId, t->ttId, &plan, &idCount,
                         &period_sec) != 0) {
         return;
     }
-    if (MbCfg_FindDevice(base, t->devOrd, &dev) != 0) {
+    if (MbCfg_FindDevice(region, t->devOrd, &dev) != 0) {
         return;
     }
     /* A port with no driver registered is disabled, structurally (§5.1). */
     if (!ModbusPort_IsRegistered(dev.portId)) {
         return;
     }
-    if (MbCfg_OpenCapability(base, plan.capId, &c, &cap, blocks,
+    if (MbCfg_OpenCapability(region, plan.capId, &c, &cap, blocks,
                              MB_MAX_BLOCKS_PER_CAP) != 0) {
         return;
     }
@@ -408,7 +408,7 @@ static void run_sequence(sTimerSlot *t)
      * obvious injection point, between blocks (§5.2). */
     for (int b = 0; b < blockCount; b++) {
         ModbusReq_Service();
-        service_block(base, &dev, t->devOrd, &cap, &s_blocks[b], idCount,
+        service_block(region, &dev, t->devOrd, &cap, &s_blocks[b], idCount,
                       period_sec, t->planId, t->ttId);
     }
 }
@@ -467,7 +467,7 @@ static void engine_task(void *arg)
         /* A config swap is committed here, on the task that walks the config,
          * so a reader can never race one. */
         if (MbCfgStore_IsSwapPending() &&
-            !MbCfgStore_RegionValid(MbCfgStore_InactiveBase())) {
+            !MbCfgStore_RegionValid(MbCfgStore_InactiveRegion())) {
             /* Armed with nothing to swap to: unreachable by design (arming
              * checks the region), so getting here means the region was
              * invalidated afterwards.  Left alone the flag is never consumed
@@ -485,14 +485,14 @@ static void engine_task(void *arg)
                 ModbusPlans_Refresh();
                 s_resched = 1;
                 TRice("Modbus: config swapped, active region %u\n",
-                      (unsigned)(MbCfgStore_ActiveBase() ==
-                                 EXT_FLASH_MODBUS_LUT_B_ADDR));
-                if (MbCfg_Count(MbCfgStore_ActiveBase(), &counts) != 0) {
+                      (unsigned)(MbCfgStore_ActiveRegion() ==
+                                 nvdbUser_modbusLutB));
+                if (MbCfg_Count(MbCfgStore_ActiveRegion(), &counts) != 0) {
                     memset(&counts, 0, sizeof(counts));
                 }
                 ModbusDispatch_Config(
-                    (uint8_t)(MbCfgStore_ActiveBase() ==
-                              EXT_FLASH_MODBUS_LUT_B_ADDR), &counts);
+                    (uint8_t)(MbCfgStore_ActiveRegion() ==
+                              nvdbUser_modbusLutB), &counts);
                 ModbusSub_CatalogueAll();
             }
         }
@@ -556,7 +556,7 @@ void ModbusEngine_LogStatus(void)
 {
     sModbusConfigCounts counts;
     int                 haveCounts =
-        (MbCfg_Count(MbCfgStore_ActiveBase(), &counts) == 0);
+        (MbCfg_Count(MbCfgStore_ActiveRegion(), &counts) == 0);
     uint8_t             timers = 0;
     char                buf[110];
 
@@ -582,14 +582,14 @@ void ModbusEngine_LogStatus(void)
         return;
     }
     TRice("Modbus config: region %u, %u caps %u devices %u plans %u points\n",
-          (unsigned)(MbCfgStore_ActiveBase() == EXT_FLASH_MODBUS_LUT_B_ADDR),
+          (unsigned)(MbCfgStore_ActiveRegion() == nvdbUser_modbusLutB),
           counts.capabilities, counts.devices, counts.plans, counts.points);
 
     sMbCfgCursor        c;
     sModbusDeviceRecord dev;
     uint8_t             devOrd = 0;
 
-    if (MbCfg_SeekDevices(MbCfgStore_ActiveBase(), &c) == 0) {
+    if (MbCfg_SeekDevices(MbCfgStore_ActiveRegion(), &c) == 0) {
         while (MbCfg_NextDevice(&c, &dev) == 1 && devOrd < MB_MAX_DEVICES) {
             uint8_t polled = 0;
 
@@ -612,7 +612,7 @@ void ModbusEngine_LogStatus(void)
     }
 
     sMbPlanHeader hdr[MB_MAX_PLANS];
-    if (MbCfg_ReadPlanHeaders(MbCfgStore_ActiveBase(), hdr) > 0) {
+    if (MbCfg_ReadPlanHeaders(MbCfgStore_ActiveRegion(), hdr) > 0) {
         for (uint8_t i = 0; i < MB_MAX_PLANS; i++) {
             if (!hdr[i].used) {
                 continue;

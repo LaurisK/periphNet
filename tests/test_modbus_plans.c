@@ -14,49 +14,50 @@
 
 #include <stdlib.h>
 
-#define REG_A EXT_FLASH_MODBUS_LUT_A_ADDR
-#define REG_B EXT_FLASH_MODBUS_LUT_B_ADDR
+#define REG_A nvdbUser_modbusLutA
+#define REG_B nvdbUser_modbusLutB
 
 static void load_worked_example(void)
 {
     sTestStream s;
 
     mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
     TEST_ASSERT(MbCfgStore_Init() == 0);
     ts_build_worked_example(&s);
     ts_write_region(&s, REG_A);
 }
 
 /* Read a region's stream and header. */
-static uint32_t read_stream(uint32_t base, uint8_t *out, uint32_t max,
+static uint32_t read_stream(eNvDbUser region, uint8_t *out, uint32_t max,
                             sModbusLutHeader *hdr)
 {
-    TEST_ASSERT(W25Q128_Read(base, (uint8_t *)hdr, sizeof(*hdr)) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(region, hdr, 0u, sizeof(*hdr)) == nvdbRes_ok);
     TEST_ASSERT(hdr->streamLen <= max);
-    TEST_ASSERT(W25Q128_Read(base + MODBUS_LUT_HEADER_SIZE, out,
-                             hdr->streamLen) == w25q_ok);
+    TEST_ASSERT(NvDb_Read(region, out, MODBUS_LUT_HEADER_SIZE,
+                          hdr->streamLen) == nvdbRes_ok);
     return hdr->streamLen;
 }
 
 /* Offset at which the plan section starts, i.e. how much of the stream must
  * survive an edit byte for byte. */
-static uint32_t plan_section_offset(uint32_t base)
+static uint32_t plan_section_offset(eNvDbUser region)
 {
     sMbCfgCursor c;
-    TEST_ASSERT(MbCfg_SeekPlans(base, &c) == 0);
+    TEST_ASSERT(MbCfg_SeekPlans(region, &c) == 0);
     return c.off;
 }
 
-static void assert_region_valid(uint32_t base)
+static void assert_region_valid(eNvDbUser region)
 {
     static uint8_t     buf[8192];
     sModbusLutHeader   hdr;
-    uint32_t           len = read_stream(base, buf, sizeof(buf), &hdr);
+    uint32_t           len = read_stream(region, buf, sizeof(buf), &hdr);
 
     TEST_ASSERT(hdr.magic == MODBUS_LUT_MAGIC);
     TEST_ASSERT(hdr.version == MODBUS_LUT_VERSION);
     TEST_ASSERT(hdr.crc32 == ImgMgmt_Crc32(buf, len));
-    TEST_ASSERT(MbCfgStore_RegionValid(base));
+    TEST_ASSERT(MbCfgStore_RegionValid(region));
 }
 
 /* ============================================================================
@@ -283,7 +284,7 @@ static void test_successive_edits(void)
     TEST_ASSERT(MbCfgPlans_Rewrite(REG_A, REG_B, 0, &spec, NULL) == mbPlan_ok);
     TEST_ASSERT(MbCfgStore_SetSwapPending() == 0);
     TEST_ASSERT(MbCfgStore_CommitSwap() == 0);
-    TEST_ASSERT(MbCfgStore_ActiveBase() == REG_B);
+    TEST_ASSERT(MbCfgStore_ActiveRegion() == REG_B);
 
     sModbusPlanSpec spec2 = { "two", &tt, 0, 1, 0x02 };
     TEST_ASSERT(MbCfgPlans_Rewrite(REG_B, REG_A, 2, &spec2, NULL) ==

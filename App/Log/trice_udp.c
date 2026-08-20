@@ -2,6 +2,7 @@
 #include "App/Log/trice_usb.h"
 #include "App/Log/trice_consumer.h"
 #include "App/Mon/sysmon.h"
+#include "App/nv_record.h"
 #include "trice.h"
 #include "lwip/udp.h"
 #include "lwip/tcpip.h"
@@ -15,6 +16,19 @@ typedef struct {
     uint32_t  seq;
     uint8_t   sticky;
 } sTriceUdpDest;
+
+/* Persisted destination list.  Its own nvDb user: where the logs go is
+ * per-site data, and it must not be lost with the power. */
+#define TRICE_DEST_MAGIC   0x54554450u   /* "TUDP" */
+#define TRICE_DEST_VERSION 1u
+
+typedef struct {
+    sNvRecordHdr hdr;
+    uint8_t      count;
+    uint8_t      _reserved[3];
+    uint32_t     ip4[TRICE_UDP_MAX_DEST];   /* network order, as ip_addr_t   */
+    uint8_t      sticky[TRICE_UDP_MAX_DEST];
+} sTriceDestRecord;
 
 static struct udp_pcb *s_trice_pcb;
 static sTriceUdpDest   s_dest[TRICE_UDP_MAX_DEST];
@@ -172,6 +186,66 @@ void Trice_UdpResetDests(void)
     UNLOCK_TCPIP_CORE();
 }
 
+/**
+ * @brief Restore persisted destinations on top of the default list.
+ * @retval how many were restored
+ * @note Additive on purpose: the broadcast default is what makes an
+ *       unconfigured board observable, and a saved list must not silently
+ *       take that away.
+ */
+static uint32_t dests_load(void)
+{
+    sTriceDestRecord rec;
+    uint32_t         n = 0u;
+    uint32_t         i = 0u;
+
+    if (NvRecord_Load(nvdbUser_triceUdpCfg, TRICE_DEST_MAGIC,
+                      TRICE_DEST_VERSION, &rec, sizeof(rec)) != 0) {
+        return 0u;
+    }
+    if (rec.count > TRICE_UDP_MAX_DEST) {
+        return 0u;
+    }
+
+    LOCK_TCPIP_CORE();
+    for (i = 0u; i < rec.count; i++) {
+        ip_addr_t addr;
+        ip_addr_set_ip4_u32(&addr, rec.ip4[i]);
+        if (dest_add(&addr, rec.sticky[i]) >= 0) {
+            n++;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+    return n;
+}
+
+int Trice_UdpSaveDests(void)
+{
+    sTriceDestRecord rec;
+    uint32_t         i = 0u;
+
+    memset(&rec, 0, sizeof(rec));
+
+    LOCK_TCPIP_CORE();
+    for (i = 0u; i < TRICE_UDP_MAX_DEST; i++) {
+        if (s_dest[i].seq == 0u) {
+            continue;
+        }
+        rec.ip4[rec.count]    = ip_addr_get_ip4_u32(&s_dest[i].addr);
+        rec.sticky[rec.count] = s_dest[i].sticky;
+        rec.count++;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return NvRecord_Save(nvdbUser_triceUdpCfg, TRICE_DEST_MAGIC,
+                         TRICE_DEST_VERSION, &rec, sizeof(rec));
+}
+
+int Trice_UdpForgetDests(void)
+{
+    return NvRecord_Forget(nvdbUser_triceUdpCfg);
+}
+
 uint32_t Trice_UdpGetDests(ip_addr_t *out, uint32_t max)
 {
     uint32_t n = 0u;
@@ -235,6 +309,15 @@ void Trice_UdpInit(void)
     }
 
     Trice_UdpResetDests();
+
+    /* Whoever was listening before the reset gets their logs back without
+     * anyone having to plug a cable in. */
+    {
+        uint32_t restored = dests_load();
+        if (restored > 0u) {
+            TRice("Trice UDP: %u destination(s) restored\n", restored);
+        }
+    }
 
     extern Write8AuxiliaryFn_t UserNonBlockingDeferredWrite8AuxiliaryFn;
     UserNonBlockingDeferredWrite8AuxiliaryFn = Trice_AuxWrite;
