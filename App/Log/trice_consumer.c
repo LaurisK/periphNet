@@ -28,7 +28,7 @@ void TriceConsumer_Dispatch(const void *data, size_t len)
 {
     s_mgr.data = data;
     s_mgr.len  = len;
-    s_mgr.pending_mask = ((1u << TRICE_CONSUMER_COUNT) - 1u);
+    s_mgr.pending_mask = TRICE_CONSUMER_MASK;
 
     if (s_mgr.tasks[TRICE_CONSUMER_UDP] != NULL) {
         xTaskNotifyGive(s_mgr.tasks[TRICE_CONSUMER_UDP]);

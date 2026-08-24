@@ -41,10 +41,130 @@ static void bus_unlock(void)
     xSemaphoreGive(s_busLock);
 }
 
+/* --------------------------------------------------------------------------
+ * Bulk transport — DMA where it is legal, polled everywhere else
+ *
+ * Only two transfers on this bus are big enough to matter: the payload of a
+ * read and the payload of a page program.  Every other exchange is a 1..4 byte
+ * command, where arming DMA costs more than clocking the bytes out.
+ *
+ * DMA IS NOT ALWAYS AVAILABLE, AND THE REASONS ARE NOT NEGOTIABLE:
+ *
+ *  - DMA CANNOT ADDRESS CCM.  Core-coupled memory at 0x10000000 is off the bus
+ *    matrix the DMA controllers master, and real callers hand this driver CCM
+ *    buffers -- the Modbus config compiler and the plan rewriter both keep
+ *    their page staging in .ccmram, and anything pvPortMalloc'd is in .ccmheap.
+ *    A DMA transfer from there does not fault, it silently moves nothing, so
+ *    the address has to be checked rather than assumed.
+ *  - The BOOTLOADER links this same file with no RTOS and no DMA init.
+ *  - Before the scheduler runs there is nothing to block on, and in interrupt
+ *    context there is nothing that may block.
+ *
+ * Falling back to the existing polled HAL call in all of those cases keeps one
+ * code path correct everywhere instead of two that disagree.
+ * -------------------------------------------------------------------------- */
+
+/*! Under this many bytes the setup dominates; commands always land here. */
+#define W25Q_DMA_MIN_BYTES  64u
+
+/* STM32F407 memory map, for "can the DMA controller see this?" */
+#define W25Q_SRAM_BASE_ADDR      0x20000000u
+#define W25Q_SRAM_END_ADDR       0x20020000u   /* 128 KB main SRAM               */
+#define W25Q_IFLASH_BASE_ADDR     0x08000000u
+#define W25Q_IFLASH_END_ADDR      0x08080000u   /* 512 KB internal flash          */
+
+static SemaphoreHandle_t s_dmaDone;
+static volatile int      s_dmaFailed;
+
+static bool dma_usable(const void *buf, uint32_t len)
+{
+    uint32_t addr = (uint32_t)buf;
+
+    if (s_dmaDone == NULL || len < W25Q_DMA_MIN_BYTES) {
+        return false;
+    }
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING || __get_IPSR() != 0U) {
+        return false;
+    }
+
+    /* Main SRAM, and internal flash for a const transmit source.  CCM is
+     * absent from this list on purpose -- see the note above. */
+    if (addr >= W25Q_SRAM_BASE_ADDR && (addr + len) <= W25Q_SRAM_END_ADDR) {
+        return true;
+    }
+    if (addr >= W25Q_IFLASH_BASE_ADDR && (addr + len) <= W25Q_IFLASH_END_ADDR) {
+        return true;
+    }
+    return false;
+}
+
+/*! Wait for the transfer the caller just started.  Aborts on timeout so the
+ *  peripheral is never left mid-transfer for the next caller to inherit. */
+static eW25qStatus dma_wait(uint32_t timeout_ms)
+{
+    if (xSemaphoreTake(s_dmaDone, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        (void)HAL_SPI_Abort(&W25Q128_SPI_HANDLE);
+        return w25q_timeout;
+    }
+    return (s_dmaFailed != 0) ? w25q_error : w25q_ok;
+}
+
+/*! Discard a completion left over from a transfer that timed out. */
+static void dma_arm(void)
+{
+    (void)xSemaphoreTake(s_dmaDone, 0);
+    s_dmaFailed = 0;
+}
+
+/* HAL SPI callbacks.  SPI2 is the only SPI on this board, so the flash driver
+ * owns them outright rather than dispatching on ->Instance.
+ *
+ * ALL THREE COMPLETION CALLBACKS ARE NEEDED, and which one fires is not
+ * obvious.  HAL_SPI_Receive_DMA in 2-line master mode delegates to
+ * HAL_SPI_TransmitReceive_DMA with State left at BUSY_RX, and that state makes
+ * the HAL install SPI_DMAReceiveCplt -- so a read completes through
+ * HAL_SPI_RxCpltCallback, NOT the TxRx one the delegation would suggest.
+ * Miss it and every DMA read silently waits out its full timeout instead. */
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    BaseType_t woken = pdFALSE;
+    (void)hspi;
+    xSemaphoreGiveFromISR(s_dmaDone, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    BaseType_t woken = pdFALSE;
+    (void)hspi;
+    xSemaphoreGiveFromISR(s_dmaDone, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    BaseType_t woken = pdFALSE;
+    (void)hspi;
+    xSemaphoreGiveFromISR(s_dmaDone, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    BaseType_t woken = pdFALSE;
+    (void)hspi;
+    s_dmaFailed = 1;
+    xSemaphoreGiveFromISR(s_dmaDone, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
 static void bus_lock_init(void)
 {
     if (s_busLock == NULL) {
         s_busLock = xSemaphoreCreateMutex();
+    }
+    if (s_dmaDone == NULL) {
+        s_dmaDone = xSemaphoreCreateBinary();
     }
 }
 #else
@@ -52,6 +172,53 @@ static void bus_lock_init(void)
 #define bus_unlock()
 #define bus_lock_init()
 #endif
+
+/* --------------------------------------------------------------------------
+ * The two bulk transfers, DMA or polled
+ * -------------------------------------------------------------------------- */
+
+/*! Clock @p len bytes out of @p buf. */
+static eW25qStatus spi_write(const uint8_t *buf, uint32_t len)
+{
+#ifndef BOOTLOADER_BUILD
+    if (dma_usable(buf, len)) {
+        dma_arm();
+        if (HAL_SPI_Transmit_DMA(&W25Q128_SPI_HANDLE,
+                                 (uint8_t *)buf, (uint16_t)len) != HAL_OK) {
+            return w25q_error;
+        }
+        return dma_wait(W25Q128_TIMEOUT_MS);
+    }
+#endif
+    return (HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, (uint8_t *)buf,
+                             (uint16_t)len, W25Q128_TIMEOUT_MS) == HAL_OK)
+               ? w25q_ok
+               : w25q_error;
+}
+
+/*! Clock @p len bytes into @p buf. */
+static eW25qStatus spi_read(uint8_t *buf, uint32_t len)
+{
+#ifndef BOOTLOADER_BUILD
+    if (dma_usable(buf, len)) {
+        dma_arm();
+        /* In 2LINES master mode the HAL routes Receive_DMA through
+         * TransmitReceive_DMA, clocking the buffer's own content out on MOSI
+         * as dummy bytes.  The flash ignores MOSI during a read data phase,
+         * so that is harmless -- but it is why BOTH streams are needed, and
+         * why the flash had to take DMA1 stream 3 and 4 from the Trice UART. */
+        if (HAL_SPI_Receive_DMA(&W25Q128_SPI_HANDLE,
+                                buf, (uint16_t)len) != HAL_OK) {
+            return w25q_error;
+        }
+        return dma_wait(W25Q128_TIMEOUT_MS);
+    }
+#endif
+    return (HAL_SPI_Receive(&W25Q128_SPI_HANDLE, buf,
+                            (uint16_t)len, W25Q128_TIMEOUT_MS) == HAL_OK)
+               ? w25q_ok
+               : w25q_error;
+}
 
 /**
  * @brief Initialize the W25Q128 flash device.
@@ -143,7 +310,7 @@ static eW25qStatus read_impl(uint32_t addr, uint8_t *buffer, uint32_t len)
         return w25q_error;
     }
 
-    if (HAL_SPI_Receive(&W25Q128_SPI_HANDLE, buffer, len, W25Q128_TIMEOUT_MS) != HAL_OK) {
+    if (spi_read(buffer, len) != w25q_ok) {
         CS_HIGH();
         return w25q_error;
     }
@@ -188,7 +355,7 @@ static eW25qStatus write_page_impl(uint32_t addr, const uint8_t *buffer, uint32_
         return w25q_error;
     }
 
-    if (HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, (uint8_t*)buffer, len, W25Q128_TIMEOUT_MS) != HAL_OK) {
+    if (spi_write(buffer, len) != w25q_ok) {
         CS_HIGH();
         return w25q_error;
     }

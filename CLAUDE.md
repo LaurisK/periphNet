@@ -75,7 +75,13 @@ those. Headless check:
     -data /tmp/ws -import . -cleanBuild PeriphNet/Debug
 ```
 `.cproject` / `.project` are **gitignored**, so this configuration is
-machine-local; a fresh clone gets a CubeMX-default project again. Whenever
+machine-local; a fresh clone gets a CubeMX-default project again. **That also
+means nothing keeps its include list in step with `APP_INCLUDES` in
+`CMakeLists.txt`** — the drift only shows up as a header not found (this is how
+`Shared/NvDb` went missing until the first CubeIDE build after nvDb landed).
+CMake now **warns at configure time** when `.cproject` is missing a path the
+CMake build has; add missing ones under *Project > Properties > C/C++ Build >
+Settings > MCU GCC Compiler > Include paths*, **for both configurations**. Whenever
 CubeMX adds a peripheral it also adds `Core/Src/<periph>.c` — that file must be
 added to `APP_CORE_SOURCES` in `CMakeLists.txt` by hand (the app's Core list is
 explicit, not globbed).
@@ -146,7 +152,9 @@ live in `docs/modbus.md` §6.
 - **External Flash:** W25Q64 (8MB, SPI2 at 21MHz) — JEDEC 0xEF/0x40/0x17
 - **EEPROM:** AT24C02BN (256 bytes, I2C)
 - **Ethernet PHY:** DP83848IVV (RMII)
-- **Trice:** USART3 PD8/TX PD9/RX, DMA1_Stream3, 460800 baud
+- **Trice:** USART3 PD8/TX PD9/RX, 460800 baud — **output OFF by default**
+  (`TRICE_UART_OUTPUT` in `App/triceConfig.h`); tracing is UDP + USB CDC
+- **DMA1 Stream3/Stream4:** SPI2_RX / SPI2_TX (external flash)
 - **IWDG:** ~16.4s timeout (PRESCALER_128, RELOAD 4095)
 - **TIM14:** Software watchdog, 12s pre-IWDG warning
 
@@ -357,7 +365,10 @@ PeriphNet/
                                   #   nvdb_layout.c (directory, placement,
                                   #   relayout, journal), nvdb_config.c (JSON)
     Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver (tasks: HAL,
-                                  #   tick deadlines, mutex)
+                                  #   tick deadlines, mutex). Bulk read/page
+                                  #   program go by DMA (SPI2, DMA1 S3/S4);
+                                  #   commands and DMA-unreachable buffers
+                                  #   fall back to the polled HAL call
     Drivers/w25q_fault.c/h        # the SAME chip from FAULT context: register
                                   #   level, DWT-cycle budgets, no interrupt
                                   #   dependency. APPLICATION ONLY
@@ -825,6 +836,16 @@ TRice("Message: %d\n", value);
 
 **DO NOT** manually specify IDs — `trice insert` adds them automatically during build.
 
+**Trice does NOT come out of USART3 by default.** Tracing is UDP
+(`App/Log/trice_udp.c`) plus USB CDC. Set `TRICE_UART_OUTPUT` to 1 in
+`App/triceConfig.h` to get the serial wire back — it then transmits
+**interrupt-driven, not DMA**, because DMA1 streams 3 and 4 belong to the
+external flash now and `USART3_TX` has no third stream to move to. Two
+consequences: one interrupt per byte at 460800 while it is enabled, and with
+it off **nothing logged before `Trice_UdpInit()` is captured anywhere** — the
+UDP and USB sinks both hang off the auxiliary hook that init installs. That is
+what the switch is for during bring-up.
+
 **TRICE CANNOT BE USED IN lwIP CALLBACKS** (tcpip_thread context — e.g. MQTT client callbacks). Use only in FreeRTOS tasks (the netconn-based HTTP task is fine), ISRs, and fault handlers.
 
 ## Key Constraints
@@ -848,7 +869,7 @@ TRice("Message: %d\n", value);
 - **`nvDb` is the only authority over the medium, and CMake enforces that too** — no `W25Q128_*` call and no `EXT_FLASH_*_ADDR` anywhere in `App/` or `Shared/` outside the driver, `Shared/NvDb/`, and the three exempt files listed in the External Flash section
 - **A write that only clears bits is programmed in place, never erased.** `boot_status` and the Modbus selector both keep their flags outside their CRCs precisely so a flag update is atomic; routing them through a store that only knew "erased or not" would have turned every one into an erase-and-write-back
 - **Absolute addresses leave `nvDb` only through `nvdb_exceptions.h`** — the crash handler (fault context) and the FWU module. Including `nvdb.h` cannot reach it; that is the enforcement
-- **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. It holds **two** NOLOAD sections with different lifecycles:
+- **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. **This now includes any bulk buffer handed to the flash driver**: `w25q128.c` checks the address and silently drops to polling for anything outside main SRAM / internal flash, and FreeRTOS task stacks are `pvPortMalloc`'d from `.ccmheap`, so a **stack local is CCM too**. A new bulk flash buffer must be static/`.bss` or it quietly loses DMA (`docs/task_flash_wait_and_ota_cost.md`). It holds **two** NOLOAD sections with different lifecycles:
   - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
 - **MQTT publishes happen on `mqttTask` only** — the bridge's Modbus callback copies and posts, so `LOCK_TCPIP_CORE` is off the Modbus sequence path entirely (docs/modbus.md §4.10); never call the raw lwIP MQTT API from app tasks without the core lock

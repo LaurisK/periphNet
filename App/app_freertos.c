@@ -22,6 +22,7 @@
 #include "App/Rs485/rs485_port.h"
 #include "App/Test/modbus_test_port.h"
 #include "App/Fwu/fwu_control.h"
+#include "App/Log/trice_consumer.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "App/Mon/sysmon.h"
@@ -64,9 +65,25 @@ static void triceTask(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(10U));
         SysMon_TaskCheckin(monId);
-        if (MX_USART3_Ready()) {
-            TriceTransfer();
+
+        /* Back-pressure, asked of the consumers directly.
+         *
+         * TriceTransfer() refuses to refill the deferred buffer while
+         * TriceOutDepth() is non-zero, and TriceOutDepth() only sums the
+         * transports trice itself knows about — UARTA, UARTB, RTT.  The UDP
+         * and USB sinks are none of those: they hang off the auxiliary hook,
+         * and their state reached trice ONLY because TriceOutDepthUartA()
+         * quietly returned TriceConsumer_Pending().  Compiling the UART
+         * transport out therefore takes the UDP consumer's back-pressure with
+         * it, and trice starts overwriting the buffer while the udp task is
+         * still reading it — garbled remote traces, no error anywhere.
+         *
+         * Asking here makes the gate independent of which transports are
+         * built, and leaves trice's own depth accounting to do its own job. */
+        if (TriceConsumer_Pending() != 0U) {
+            continue;
         }
+        TriceTransfer();
     }
 }
 

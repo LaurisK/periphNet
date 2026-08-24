@@ -169,7 +169,14 @@ void FwuCtl_RunPromotion(void)
 
     const sImageStoreState *st = ImgStore_GetState();
     uint32_t total = st->blob.blob_size;
-    uint8_t  buf[256];   /* source ≠ destination, so a page bounce suffices */
+    /* STATIC, so it lands in .bss and the DMA controller can see it.
+     * A local would sit on defaultTask's stack, and task stacks are
+     * pvPortMalloc'd out of the CCM heap — invisible to DMA, which would
+     * quietly put this 488 KB copy back on the polled path.  Safe as a
+     * single instance: FwuCtl_RunPromotion has one caller (defaultTask)
+     * and the promote_pending/promoting flags serialize it.
+     * Source ≠ destination, so a page bounce suffices. */
+    static uint8_t buf[256];
 
     if (!st->blob.valid || total == 0) {
         ImgStore_ReleaseRead();

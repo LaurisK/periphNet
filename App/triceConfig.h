@@ -1,10 +1,12 @@
 /**
  * @file    triceConfig.h
- * @brief   Trice configuration for PeriphNet – UART DMA output (USART3)
+ * @brief   Trice configuration for PeriphNet – UDP output, optional USART3
  *
- * Double buffer mode with TCOBS framing. Output via DMA1_Stream3 (USART3 TX)
- * at 460800 baud. Critical sections use raw PRIMASK (safe in any context
- * including HardFault and NMI handlers).
+ * Double buffer mode with TCOBS framing. Critical sections use raw PRIMASK
+ * (safe in any context including HardFault and NMI handlers).
+ *
+ * TRACING IS OVER THE NETWORK BY DEFAULT (App/Log/trice_udp.c, plus USB CDC).
+ * The USART3 wire is off unless TRICE_UART_OUTPUT is set to 1 — see below.
  */
 
 #ifndef TRICE_CONFIG_H_
@@ -28,8 +30,26 @@
 #define TRICE_DEFERRED_TRANSFER_MODE TRICE_MULTI_PACK_MODE
 #define TRICE_DEFERRED_OUT_FRAMING   TRICE_FRAMING_TCOBS
 
-/* USART3 @ 460800 baud, DMA1_Stream3 Ch4 ---------------------------------- */
-#define TRICE_DEFERRED_UARTA       1
+/* USART3 @ 460800 baud — OPT-IN, AND IT COSTS THE FLASH ITS DMA -------------
+ *
+ * Set TRICE_UART_OUTPUT to 1 to get trice out of the USART3 wire again (a
+ * bring-up aid; normal tracing is UDP + USB CDC and needs nothing here).
+ *
+ * It cannot go back on DMA, and that is a hardware fact, not a choice:
+ * USART3_TX exists on DMA1 Stream 3 (ch4) or Stream 4 (ch7) and NOWHERE else,
+ * and both of those now carry the external flash — SPI2_RX is Stream 3 only,
+ * SPI2_TX is Stream 4 only, and SPI2 is APB1 so it cannot reach DMA2 at all.
+ * The flash won that trade deliberately: it is the board's bulk data path and
+ * had no DMA at all, while trice has two other transports.
+ *
+ * So the opt-in path transmits interrupt-driven (HAL_UART_Transmit_IT) — one
+ * interrupt per byte at 460800 baud, which is real CPU cost and exactly why
+ * this is not the default.  Core/Src/usart.c holds the transport. */
+#ifndef TRICE_UART_OUTPUT
+#define TRICE_UART_OUTPUT          0
+#endif
+
+#define TRICE_DEFERRED_UARTA       TRICE_UART_OUTPUT
 #define TRICE_UARTA                USART3
 
 /* Disabled features ------------------------------------------------------- */

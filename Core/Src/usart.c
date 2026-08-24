@@ -28,7 +28,6 @@
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
-DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USART1 init function */
 
@@ -198,25 +197,6 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    /* USART3 DMA Init */
-    /* USART3_TX Init */
-    hdma_usart3_tx.Instance = DMA1_Stream3;
-    hdma_usart3_tx.Init.Channel = DMA_CHANNEL_4;
-    hdma_usart3_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
-    hdma_usart3_tx.Init.PeriphInc = DMA_PINC_DISABLE;
-    hdma_usart3_tx.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_usart3_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-    hdma_usart3_tx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart3_tx.Init.Mode = DMA_NORMAL;
-    hdma_usart3_tx.Init.Priority = DMA_PRIORITY_LOW;
-    hdma_usart3_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
-    if (HAL_DMA_Init(&hdma_usart3_tx) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
-    __HAL_LINKDMA(uartHandle,hdmatx,hdma_usart3_tx);
-
     /* USART3 interrupt Init */
     HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
@@ -281,9 +261,6 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     */
     HAL_GPIO_DeInit(GPIOD, GPIO_PIN_8|GPIO_PIN_9);
 
-    /* USART3 DMA DeInit */
-    HAL_DMA_DeInit(uartHandle->hdmatx);
-
     /* USART3 interrupt Deinit */
     HAL_NVIC_DisableIRQ(USART3_IRQn);
   /* USER CODE BEGIN USART3_MspDeInit 1 */
@@ -296,34 +273,51 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 
 #include "trice.h"
 
+/* Trice over the USART3 wire — OPT-IN, see App/triceConfig.h.
+ *
+ * Default tracing is UDP + USB CDC.  When TRICE_UART_OUTPUT is 1 this
+ * transmits INTERRUPT-DRIVEN, not by DMA, because DMA1 streams 3 and 4 now
+ * belong to the external flash and USART3_TX has no third stream to move to.
+ * One interrupt per byte at 460800 baud is the price of the opt-in. */
+#if TRICE_UART_OUTPUT
+
 void TriceNonBlockingWriteUartA(const void *buf, size_t nByte)
 {
+    /* trice only calls this when TriceOutDepth() reported 0, so the previous
+     * transfer has already completed; the abort is belt-and-braces for the
+     * error paths that leave gState busy without a TC. */
     HAL_UART_Abort(&huart3);
-    HAL_UART_Transmit_DMA(&huart3, (uint8_t *)buf, nByte);
+    HAL_UART_Transmit_IT(&huart3, (uint8_t *)buf, nByte);
 }
 
 unsigned TriceOutDepthUartA(void)
 {
-    if (__HAL_DMA_GET_COUNTER(huart3.hdmatx) != 0U) {
+    if (huart3.gState != HAL_UART_STATE_READY) {
         return 1U;
     }
     return TriceConsumer_Pending();
 }
+
+#endif /* TRICE_UART_OUTPUT */
 
 int MX_USART3_Ready(void)
 {
     return (huart3.gState == HAL_UART_STATE_READY);
 }
 
-/* HAL_DMA_TxCpltCallback is NOT a HAL callback (the DMA driver uses
- * function pointers, and HAL_UART_Transmit_DMA installs its own), so the
- * previous hook there never ran and the UART consumer bit never cleared.
- * The UART TC callback below fires via USART3_IRQn once the DMA transfer
- * has fully drained to the wire. */
+/* One global TX-complete callback for every UART, so this is a dispatcher.
+ *
+ * USART3 arm: HAL_DMA_TxCpltCallback is NOT a HAL callback (the DMA driver
+ * uses function pointers and HAL installs its own), so the hook that once
+ * lived there never ran and the UART consumer bit never cleared.  The UART TC
+ * callback fires via USART3_IRQn once the last byte has drained to the wire,
+ * which is true for the interrupt transport as well as the old DMA one. */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART3) {
+#if TRICE_UART_OUTPUT
         TriceConsumer_Done(TRICE_CONSUMER_UART);
+#endif
     } else if (huart->Instance == USART2) {
         /* RS485: TC has fired, so the last stop bit is on the wire and
          * DE can drop.  The driver owns what happens next; this is only

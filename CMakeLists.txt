@@ -548,6 +548,45 @@ add_dependencies(application.elf trice-insert)
 
 target_include_directories(application.elf PRIVATE ${APP_INCLUDES})
 
+# ------------------------------------------------------------------------------
+# CubeIDE include-path parity
+#
+# CMake is canonical, but the Eclipse project builds the SAME application from
+# the SAME sources with its OWN copy of the include list, kept in `.cproject`.
+# That file is gitignored (machine-local, and CubeMX rewrites it), so nothing
+# keeps the two lists in step and the drift only ever shows up as a header not
+# found — which is exactly how `Shared/NvDb` went missing until the first
+# CubeIDE build after nvDb landed.
+#
+# WARNING, never FATAL: a fresh clone legitimately has no `.cproject` at all,
+# and CMake must not care.  This just makes the drift say so at configure time
+# instead of waiting for someone to open the IDE.
+# ------------------------------------------------------------------------------
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.cproject")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/.cproject" _cproj)
+    set(_missing_inc "")
+    foreach(_inc ${APP_INCLUDES})
+        string(REPLACE "${CMAKE_CURRENT_SOURCE_DIR}/" "" _rel "${_inc}")
+        # `..` is the project root, spelled differently by the two tools
+        if(_rel STREQUAL "." OR _rel STREQUAL "")
+            continue()
+        endif()
+        if(NOT _cproj MATCHES "value=\"\.\./${_rel}\"")
+            list(APPEND _missing_inc "${_rel}")
+        endif()
+    endforeach()
+    if(_missing_inc)
+        string(REPLACE ";" "\n    " _missing_pretty "${_missing_inc}")
+        message(WARNING
+                "CubeIDE (.cproject) is missing include paths that the CMake "
+                "build has:\n    ${_missing_pretty}\n"
+                "The Eclipse Debug/Release build will fail on a missing header. "
+                "Add them under Project > Properties > C/C++ Build > Settings > "
+                "MCU GCC Compiler > Include paths, for BOTH configurations.")
+    endif()
+endif()
+
 target_link_libraries(application.elf PRIVATE trice)
 
 # APPLICATION_BUILD enables VTOR relocation to 0x08008000

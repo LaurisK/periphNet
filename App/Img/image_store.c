@@ -182,9 +182,15 @@ typedef struct {
     char     name[IMG_STORE_NAME_MAX];
 } sUploadSession;
 
-/* CCM RAM: CPU-only — the page buffer goes to ext flash via the polling
- * (non-DMA) W25Q128 driver */
-static sUploadSession upload __attribute__((section(".ccmram")));
+/* PLAIN .bss, NOT .ccmram, and that placement is now load-bearing.
+ *
+ * This used to live in CCM to spare main SRAM, on the stated grounds that the
+ * W25Q128 driver was polling anyway.  That driver takes DMA now, and DMA
+ * cannot address CCM on this part — a buffer left there would silently drop
+ * back to the polled path on the single hottest flash writer on the board.
+ * ~300 bytes of main SRAM (of which ~39 KB is free) buys DMA on every OTA
+ * page program, and hands CCM (~92 % full) those bytes back. */
+static sUploadSession upload;
 
 static bool flush_upload_page(void)
 {
