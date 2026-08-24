@@ -177,48 +177,84 @@ static void bus_lock_init(void)
  * The two bulk transfers, DMA or polled
  * -------------------------------------------------------------------------- */
 
+/*! Largest run either HAL entry point can express.
+ *
+ * Both take the length as uint16_t while every caller here counts in uint32_t,
+ * so a transfer of 64 KB or more silently becomes a short one AND STILL
+ * REPORTS SUCCESS -- the caller gets a partial buffer with no error.  Nothing
+ * in the tree asks for more than 4 KB today, so this is latent rather than
+ * live, but these two helpers are the only place bulk transfers pass through,
+ * so bounding it here covers the polled path as well as the DMA one.  CS stays
+ * asserted across the runs, so the chip sees one continuous stream either
+ * way. */
+#define W25Q_XFER_MAX_BYTES  32768u
+
 /*! Clock @p len bytes out of @p buf. */
 static eW25qStatus spi_write(const uint8_t *buf, uint32_t len)
 {
+    while (len > 0u) {
+        uint32_t run = (len > W25Q_XFER_MAX_BYTES) ? W25Q_XFER_MAX_BYTES : len;
+
 #ifndef BOOTLOADER_BUILD
-    if (dma_usable(buf, len)) {
-        dma_arm();
-        if (HAL_SPI_Transmit_DMA(&W25Q128_SPI_HANDLE,
-                                 (uint8_t *)buf, (uint16_t)len) != HAL_OK) {
+        if (dma_usable(buf, run)) {
+            dma_arm();
+            if (HAL_SPI_Transmit_DMA(&W25Q128_SPI_HANDLE,
+                                     (uint8_t *)buf, (uint16_t)run) != HAL_OK) {
+                return w25q_error;
+            }
+            eW25qStatus res = dma_wait(W25Q128_TIMEOUT_MS);
+            if (res != w25q_ok) {
+                return res;
+            }
+        } else
+#endif
+        if (HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, (uint8_t *)buf,
+                             (uint16_t)run, W25Q128_TIMEOUT_MS) != HAL_OK) {
             return w25q_error;
         }
-        return dma_wait(W25Q128_TIMEOUT_MS);
+
+        buf += run;
+        len -= run;
     }
-#endif
-    return (HAL_SPI_Transmit(&W25Q128_SPI_HANDLE, (uint8_t *)buf,
-                             (uint16_t)len, W25Q128_TIMEOUT_MS) == HAL_OK)
-               ? w25q_ok
-               : w25q_error;
+    return w25q_ok;
 }
 
 /*! Clock @p len bytes into @p buf. */
 static eW25qStatus spi_read(uint8_t *buf, uint32_t len)
 {
+    while (len > 0u) {
+        uint32_t run = (len > W25Q_XFER_MAX_BYTES) ? W25Q_XFER_MAX_BYTES : len;
+
 #ifndef BOOTLOADER_BUILD
-    if (dma_usable(buf, len)) {
-        dma_arm();
-        /* In 2LINES master mode the HAL routes Receive_DMA through
-         * TransmitReceive_DMA, clocking the buffer's own content out on MOSI
-         * as dummy bytes.  The flash ignores MOSI during a read data phase,
-         * so that is harmless -- but it is why BOTH streams are needed, and
-         * why the flash had to take DMA1 stream 3 and 4 from the Trice UART. */
-        if (HAL_SPI_Receive_DMA(&W25Q128_SPI_HANDLE,
-                                buf, (uint16_t)len) != HAL_OK) {
+        if (dma_usable(buf, run)) {
+            dma_arm();
+            /* In 2LINES master mode the HAL routes Receive_DMA through
+             * TransmitReceive_DMA, clocking the buffer's own content out on
+             * MOSI as dummy bytes.  The flash ignores MOSI during a read data
+             * phase, so that is harmless -- but it is why BOTH streams are
+             * needed, and why the flash had to take DMA1 stream 3 and 4 from
+             * the Trice UART. */
+            if (HAL_SPI_Receive_DMA(&W25Q128_SPI_HANDLE,
+                                    buf, (uint16_t)run) != HAL_OK) {
+                return w25q_error;
+            }
+            eW25qStatus res = dma_wait(W25Q128_TIMEOUT_MS);
+            if (res != w25q_ok) {
+                return res;
+            }
+        } else
+#endif
+        if (HAL_SPI_Receive(&W25Q128_SPI_HANDLE, buf,
+                            (uint16_t)run, W25Q128_TIMEOUT_MS) != HAL_OK) {
             return w25q_error;
         }
-        return dma_wait(W25Q128_TIMEOUT_MS);
+
+        buf += run;
+        len -= run;
     }
-#endif
-    return (HAL_SPI_Receive(&W25Q128_SPI_HANDLE, buf,
-                            (uint16_t)len, W25Q128_TIMEOUT_MS) == HAL_OK)
-               ? w25q_ok
-               : w25q_error;
+    return w25q_ok;
 }
+
 
 /**
  * @brief Initialize the W25Q128 flash device.
