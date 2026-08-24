@@ -6,6 +6,18 @@
 
 **Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic MQTT/HA bridge that is now an ordinary consumer. **Not yet run on hardware.**
 
+**External-flash DMA is done and hardware-verified** (`Pd1.1.23`, 2026-08-25,
+installed over the tunnel). SPI2 took DMA1 streams 3 and 4 from the Trice UART,
+which is now opt-in behind `TRICE_UART_OUTPUT` and interrupt-driven when
+enabled. Bulk reads and page programs go by DMA when the buffer is
+DMA-reachable; commands and CCM buffers fall back to the polled HAL call.
+**It did not make OTA cheaper, and that was expected**: an upload still pins the
+CPU at 100 % because the cost is `W25Q128_WaitReady` *waiting*, not
+transferring. Measurements, the ranked risk list for a tunnel-only board, and
+the design assessment of moving that wait to a timer + callback:
+[docs/task_dma_interrupt_audit.md](docs/task_dma_interrupt_audit.md) §7-§8 and
+[docs/task_flash_wait_and_ota_cost.md](docs/task_flash_wait_and_ota_cost.md).
+
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
 
 **Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
@@ -112,11 +124,21 @@ curl http://10.42.0.203/api/image/download -o downloaded.pnfw
 md5sum build/periphnet_fwu.pnfw downloaded.pnfw
 ```
 
+**An OTA pins the CPU at 100 % for its duration** (measured: `http` 991‰,
+`nvdb` collector 735‰ concurrently, IWDG margin still fine at 102 ms of
+16400). That is `W25Q128_WaitReady` busy-waiting on page programs and sector
+erases — DMA does not help it, because DMA cannot shorten a wait. Nothing
+missed a deadline, but treat OTA as a "board is busy" window until
+[docs/task_flash_wait_and_ota_cost.md](docs/task_flash_wait_and_ota_cost.md)
+is done.
+
 **IMPORTANT:** without `confirm`, the bootloader rolls back to the golden
 image after 3 unconfirmed boots. Local-target (`'l'`) builds are exempt from
 attempt counting, so JLink dev flashing is unaffected.
 
-**Trice UART output** (USART3 PD8/TX, 460800 baud, DMA):
+**Trice UART output** (USART3 PD8/TX, 460800 baud) — **off by default**;
+set `TRICE_UART_OUTPUT` to 1 in `App/triceConfig.h` first (interrupt-driven,
+not DMA — DMA1 S3/S4 belong to the flash now):
 ```bash
 ./tools/trice log -p COM -args "/dev/ttyUSB0:460800" -i ./til.json -li ./li.json
 ```
@@ -154,7 +176,10 @@ live in `docs/modbus.md` §6.
 - **Ethernet PHY:** DP83848IVV (RMII)
 - **Trice:** USART3 PD8/TX PD9/RX, 460800 baud — **output OFF by default**
   (`TRICE_UART_OUTPUT` in `App/triceConfig.h`); tracing is UDP + USB CDC
-- **DMA1 Stream3/Stream4:** SPI2_RX / SPI2_TX (external flash)
+- **DMA1 Stream3/Stream4:** SPI2_RX / SPI2_TX (external flash). These are
+  the ONLY streams either request can use, and `USART3_TX` can use only
+  these two as well — hence the trade. **DMA1 S5/S6** are USART2 RX/TX
+  (RS485); **DMA2 is entirely free**
 - **IWDG:** ~16.4s timeout (PRESCALER_128, RELOAD 4095)
 - **TIM14:** Software watchdog, 12s pre-IWDG warning
 
@@ -300,7 +325,8 @@ PeriphNet/
   App/                            # Application modules (+ linker/metadata)
     app_freertos.c/h              # FreeRTOS task init, default task, trice task
     system.c/h                    # Reset cause, KickIwdg(), System_Init()
-    triceConfig.h                 # Trice configuration (USART3 DMA)
+    triceConfig.h                 # Trice config; TRICE_UART_OUTPUT gates the
+                                  #   USART3 wire (default OFF, UDP + USB CDC)
     app_info.c                    # sAppInfo const in .app_header section
     application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
     Can/                          # Pylontech BMS reader + simulator (CAN)
