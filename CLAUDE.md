@@ -228,6 +228,45 @@ address from `NvDb_GetAbsoluteAddress`), `App/Fwu/fwu_control.c` (compares
 nvDb's placement against what the BL was built for), and
 `Shared/Fwu/image_mgmt.c` (streams an HMAC over flash for the *bootloader*).
 
+**The crash recorder does its I/O through a second driver, not the normal
+one** — `Shared/Drivers/w25q_fault.c/.h`, application-only
+(`SHARED_FAULT_SOURCES`, never `SHARED_SOURCES`). The HAL time base is a TIM6
+interrupt at NVIC priority 15, which neither a fault handler (priority −1) nor
+the TIM14 software watchdog (priority 15, equal so no preemption) can be
+preempted by — so `HAL_GetTick()` is a **constant** in every context the
+recorder runs in, and every `(HAL_GetTick() - start) > timeout` on the old
+path was permanently false. A recorder that hangs destroys the evidence it
+exists to preserve. The fault path is therefore register-level (SPI2 rebuilt
+from compile-time constants, never from `hspi2`, whose RAM the fault may have
+wrecked), budgeted in **DWT cycles** — 1 ms per bus flag, 600 ms per chip-BUSY
+poll, 1.5 s for the whole save — and refreshes the IWDG exactly once, at the
+top of `saveToFlash`. It never issues `66h`/`99h`: resetting a W25Q mid
+program/erase would leave somebody else's page indeterminate, so it waits for
+BUSY or gives up. CMake **fails the build** if the tick, a delay, `HAL_SPI_*`,
+`HAL_GPIO_*`, `W25Q128_*` or an RTOS call appears in that one file.
+**Verified on board #1 over the air 2026-08-24** (`Pd1.1.21`): a fault with
+the flash mid-erase records a full log and the board is back in ~4 s by
+software reset, and a build with the busy budget cut to 1 ms writes nothing
+and still resets promptly instead of hanging 16 s for the IWDG. Design,
+results and two defects the testing exposed:
+[docs/task_fault_context_flash.md](docs/task_fault_context_flash.md) §9.
+
+**There is no way to trigger a fault remotely, deliberately.** A temporary
+`POST /api/system/fault/...` endpoint existed only long enough to run those
+acceptance tests and was **removed in `Pd1.1.22`** — a network-reachable
+"crash the board" route is not something to leave on a device. Re-running §5.3
+means re-adding it; the doc records what it took. The three physical buttons
+in `defaultTask` remain the only triggers, and **`BTN1` does not work**: a
+write to `0x00000000` is an alias of internal flash and fails silently rather
+than faulting (`bkpt #0` is the trigger that does work).
+
+**Every crash record currently reads `type: Assert`** whatever the real fault
+was: a `configASSERT` trips late in `Crash_GenerateReport` — in
+`printTaskList` / `scanAllStacks`, which call FreeRTOS from fault context —
+and writes a second record over the first, then resets the board itself
+(hence `SFTRSTF`, not IWDG). PC/LR/SP/CFSR stay correct because
+`g_crashEntry` is still latched; only the type is wrong. Its own task.
+
 **The map above is still exactly what ships, and that is deliberate** — but
 now for one reason only: **the bootloader**. It reads the boot status and
 both blobs at addresses compiled into it, and the FWU→BL handoff that would
@@ -269,6 +308,8 @@ PeriphNet/
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
     Log/                          # crash handler + backtrace, trice transports
+                                  #   crash.c writes through Shared/Drivers/
+                                  #   w25q_fault.c, NOT the normal driver
     Mon/sysmon.c/h                # System monitor: per-task liveness check-ins,
                                   #   stack high-water marks, heap, per-task CPU
                                   #   share and idle time, IWDG kick margin
@@ -315,7 +356,11 @@ PeriphNet/
                                   #   only), nvdb_port.h (the RTOS contract),
                                   #   nvdb_layout.c (directory, placement,
                                   #   relayout, journal), nvdb_config.c (JSON)
-    Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver
+    Drivers/w25q128.c/h           # W25Q64/128 SPI flash driver (tasks: HAL,
+                                  #   tick deadlines, mutex)
+    Drivers/w25q_fault.c/h        # the SAME chip from FAULT context: register
+                                  #   level, DWT-cycle budgets, no interrupt
+                                  #   dependency. APPLICATION ONLY
   Core/                           # CubeMX-OWNED ONLY (regeneration-safe)
     Inc/ Src/                     # main.c, gpio.c, spi.c, HAL config ...
     Startup/startup_stm32f407vetx.s

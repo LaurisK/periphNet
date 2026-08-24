@@ -115,6 +115,17 @@ set(SHARED_MODBUS_SOURCES
     Shared/Modbus/modbus_units.c
 )
 
+# Application-only Shared/ code: the fault-context flash path.  It is a second,
+# minimal driver rather than a mode of w25q128.c — the two differ in their time
+# base, their error policy, their bus-recovery behaviour and whether they may
+# block, which is a different driver, not a flag.  Kept out of SHARED_SOURCES
+# so the 32 KB bootloader never pays for a path it cannot reach: the BL has no
+# RTOS, no crash log and no fault recorder (docs/task_fault_context_flash.md
+# §3.1, §4).
+set(SHARED_FAULT_SOURCES
+    Shared/Drivers/w25q_fault.c
+)
+
 # Application-only Shared/ code: nvDb owns the external flash address space.
 # Host-testable pure logic (libc + W25Q128 + its own port) and, like the
 # Modbus config machinery, kept out of the 32 KB bootloader — the BL runs
@@ -286,7 +297,9 @@ endforeach()
 #   Shared/NvDb/nvdb.c        IS the authority
 #   App/Log/crash.c           writes in fault context, where the RTOS may be
 #                             dead — it takes its address from nvDb through
-#                             nvdb_exceptions.h and does the I/O itself
+#                             nvdb_exceptions.h and does the I/O itself, now
+#                             via w25q_fault.c rather than the ordinary driver
+#                             (docs/task_fault_context_flash.md)
 #   App/Fwu/fwu_control.c     compares nvDb's placement against what the
 #                             bootloader was built for, and refuses to arm an
 #                             install if they have diverged (§1.6)
@@ -306,6 +319,27 @@ foreach(_f ${_medium_srcs})
         message(FATAL_ERROR
                 "nvDb is the only authority over the medium: ${_f} reaches it "
                 "directly: ${_hits}")
+    endif()
+endforeach()
+
+# ------------------------------------------------------------------------------
+# The fault-context flash path may depend on nothing that an interrupt has to
+# deliver (docs/task_fault_context_flash.md §2, §5.1).  The tick is a TIM6
+# interrupt the recorder's context cannot be preempted by, so a deadline
+# expressed in it never expires — which is how a crash recorder came to hang
+# and destroy the evidence it exists to preserve.
+#
+# Checked here rather than trusted, because the last convention of this kind
+# decayed the same way.  It is a plain text scan, so w25q_fault.c also avoids
+# these names in its comments and says what it means in words instead.
+# ------------------------------------------------------------------------------
+
+foreach(_f ${SHARED_FAULT_SOURCES} Shared/Drivers/w25q_fault.h)
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}" _hits
+         REGEX "HAL_GetTick|HAL_Delay|HAL_SPI_|HAL_GPIO_|osDelay|osThread|osMutex|xSemaphore|xTaskGet|vTaskDelay|taskENTER_CRITICAL|portMAX_DELAY|W25Q128_")
+    if(_hits)
+        message(FATAL_ERROR
+                "fault-context path depends on an interrupt: ${_f}: ${_hits}")
     endif()
 endforeach()
 
@@ -500,6 +534,7 @@ add_executable(application.elf
     ${APP_MODULE_SOURCES}
     ${SHARED_MODBUS_SOURCES}
     ${SHARED_NVDB_SOURCES}
+    ${SHARED_FAULT_SOURCES}
     ${BACKTRACE_SOURCES}
     ${WIREGUARD_SOURCES}
     ${HAL_SOURCES}

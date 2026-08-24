@@ -15,7 +15,7 @@
 #include "image_mgmt.h"
 #include "nvdb.h"
 #include "nvdb_exceptions.h"
-#include "w25q128.h"
+#include "w25q_fault.h"
 #include "trice.h"
 #include "usart.h"
 #include "FreeRTOS.h"
@@ -437,26 +437,32 @@ static void printRegisters(eCrashType type, const sCrashRegs *regs)
 /* --------------------------------------------------------------------------
  * Flash storage — save crash log to external SPI flash
  *
- * Called from exception context. SPI driver uses polling, so it works
- * even when interrupts are disabled. We force SPI handle state to READY
- * in case a transfer was in progress when the fault occurred.
+ * Called from exception context, where the ordinary driver cannot be used:
+ * every wait on its path is bounded by the peripheral-library tick, and that
+ * tick is incremented by a TIM6 interrupt which a fault handler (priority -1)
+ * and the TIM14 software watchdog (priority 15, so equal-priority) both
+ * prevent from running.  Those deadlines therefore never expire, and a
+ * recorder that hangs destroys the evidence it exists to preserve.
+ *
+ * w25q_fault.c is the path that has no such dependency: register-level,
+ * budgeted in CPU cycles, and terminating in every case.  Writing nothing is
+ * an acceptable outcome here; not returning is not.
  * -------------------------------------------------------------------------- */
-
-static void flash_force_ready(void)
-{
-    extern SPI_HandleTypeDef W25Q128_SPI_HANDLE;
-
-    /* Deassert CS in case a transaction was in progress */
-    HAL_GPIO_WritePin(W25Q128_CS_GPIO_PORT, W25Q128_CS_GPIO_PIN, GPIO_PIN_SET);
-
-    /* Force SPI handle to READY so HAL polling functions accept new transfers */
-    W25Q128_SPI_HANDLE.State = HAL_SPI_STATE_READY;
-    __HAL_UNLOCK(&W25Q128_SPI_HANDLE);
-}
 
 static void saveToFlash(eCrashType type, const sCrashRegs *regs)
 {
     static sCrashLog log;  /* static to avoid stack overflow in exception ctx */
+    sW25qFaultBudget saveBudget;
+
+    /* Feed the independent watchdog EXACTLY once, here.  In fault context
+     * nothing else will, and a fault arriving 16 s into the window would
+     * otherwise leave the recorder no time at all; one refresh buys a
+     * deterministic full window.  Refusing to refresh again is what still
+     * guarantees the board resets if this path is wrong about something.
+     *
+     * The key register directly, not KickIwdg(): that also touches TIM14 and
+     * the watchdog-gap statistics, neither of which belongs here. */
+    IWDG->KR = 0xAAAAU;
 
     memset(&log, 0, sizeof(log));
     log.magic      = CRASH_LOG_MAGIC;
@@ -547,8 +553,9 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
 
     /* Where to put it comes from nvDb; putting it there does not.  This runs
      * in fault context, where the RTOS may be dead and an SPI transaction may
-     * have been in flight, so it resets the peripheral by hand and writes
-     * directly — one of the two clients nvdb_exceptions.h exists for.
+     * have been in flight, so it goes through w25q_fault.c — the path that
+     * rebuilds the bus from constants and bounds every wait in CPU cycles.
+     * One of the two clients nvdb_exceptions.h exists for.
      *
      * Before nvDb has run there is nowhere to write: the flash driver has not
      * been brought up either at that point, so nothing is lost that could
@@ -561,18 +568,34 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
         return;
     }
 
-    flash_force_ready();
-    W25Q128_EraseSector(base);
-    W25Q128_WaitReady(W25Q128_ERASE_TIMEOUT_MS);
+    if (W25qFault_Begin() != w25qf_ok) {
+        return;
+    }
+
+    /* One budget for the whole save, checked between steps.  The per-call
+     * budgets bound each wait but not their sum, and an erase that legitimately
+     * eats its own 600 ms must not then be followed by four more waits that
+     * each eat theirs. */
+    W25qFault_BudgetStart(&saveBudget, W25Q_FAULT_SAVE_BUDGET_CYCLES);
+
+    if (W25qFault_EraseSector(base) != w25qf_ok) {
+        return;
+    }
 
     /* Write in 256-byte pages */
     const uint8_t *src = (const uint8_t *)&log;
     uint32_t remaining = sizeof(sCrashLog);
     uint32_t addr = base;
     while (remaining > 0) {
-        uint32_t chunk = (remaining > W25Q128_PAGE_SIZE) ? W25Q128_PAGE_SIZE : remaining;
-        W25Q128_WritePage(addr, src, chunk);
-        W25Q128_WaitReady(W25Q128_TIMEOUT_MS);
+        uint32_t chunk = (remaining > W25Q_FAULT_PAGE_SIZE)
+                       ? W25Q_FAULT_PAGE_SIZE : remaining;
+
+        if (W25qFault_BudgetExpired(&saveBudget)) {
+            return;
+        }
+        if (W25qFault_WritePage(addr, src, chunk) != w25qf_ok) {
+            return;
+        }
         src += chunk;
         addr += chunk;
         remaining -= chunk;

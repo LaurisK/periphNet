@@ -978,8 +978,13 @@ static void handle_fwu_verify(struct netconn *conn)
  * Crash log endpoints
  * -------------------------------------------------------------------------- */
 
+/* All EIGHT of eCrashType.  It used to stop at SwWatchdog with a hard-coded
+ * `< 6` bound, so a StackOverflow or an Assert report — the two the enum
+ * gained later — read back as "Unknown", which is indistinguishable from a
+ * corrupt record exactly when the type is the thing you need. */
 static const char * const crash_type_names[] = {
-    "HardFault", "NMI", "BusFault", "UsageFault", "MemManage", "SwWatchdog"
+    "HardFault", "NMI", "BusFault", "UsageFault",
+    "MemManage", "SwWatchdog", "StackOverflow", "Assert"
 };
 static const char * const task_state_names[] = {
     "Run", "Rdy", "Blk", "Sus", "Del"
@@ -1039,8 +1044,9 @@ static void handle_crash_get(struct netconn *conn)
         return;
     }
 
-    const char *type_str = (log->crash_type < 6)
-        ? crash_type_names[log->crash_type] : "Unknown";
+    const char *type_str =
+        (log->crash_type < (sizeof(crash_type_names) / sizeof(crash_type_names[0])))
+            ? crash_type_names[log->crash_type] : "Unknown";
 
     pos = json_cat(js, CRASH_JSON_CAP, pos,
         "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
