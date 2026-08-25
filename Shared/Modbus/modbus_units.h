@@ -36,6 +36,7 @@ extern "C" {
 #define MB_UNIT_VARH        32u    /* reactive energy                       */
 #define MB_UNIT_A           33u
 #define MB_UNIT_V           35u
+#define MB_UNIT_OHM         38u    /* resistance (DLMS "Resistance")        */
 #define MB_UNIT_HZ          44u
 #define MB_UNIT_PERCENT     56u
 #define MB_UNIT_AH          57u    /* ampere-hours                          */

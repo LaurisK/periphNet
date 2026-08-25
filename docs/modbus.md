@@ -1510,7 +1510,7 @@ it re-serialises the records rather than replaying an uploaded file.
   gives it), `fc` (`"holding"`/`"input"`), `decodeType` (`u16` `s16` `u32_be`
   `u32_le` `s32_be` `s32_le` `float32_be` `float32_le` `bitfield` `ascii`),
   `scale` (**exact power of ten**, 0.001…1000), `unit` (`""` `V` `A` `W` `VA`
-  `var` `Hz` `Wh` `kWh` `varh` `VAh` `%` `Ah` `C` `min` `s`), `name` (≤23 chars —
+  `var` `Hz` `ohm` `Wh` `kWh` `varh` `VAh` `%` `Ah` `C` `min` `s`), `name` (≤23 chars —
   the MQTT topic suffix, and **only** that: it links nothing and need not be
   unique), `length` (registers, ASCII only), `access`, `writeMin`/`writeMax`.
   **No `offset` and no enclosing transaction.**
@@ -2677,6 +2677,52 @@ Board #1 was re-scanned deliberately, because §11a.1 means a second BMS there
 after it would time out and read as absent. Scanning with slave 1 excluded —
 so every candidate is preceded by a timeout, i.e. a gap — found nothing. The
 one-BMS conclusion for board #1 is therefore a measurement, not an assumption.
+
+### 11a.13 Config extended from the firmware read-out (2026-08-25)
+
+`configs/gen_jk_config.py` grew from **87 points to 114** after
+[design_bms_cell_health_estimation.md](design_bms_cell_health_estimation.md)
+read the JK's realtime block out of its own firmware and cross-checked it
+against the vendor Windows app's decrypted `.jsonds` datasource. Nothing about
+the dialect changed; every addition is a point record.
+
+| Added | Where | Why it matters |
+|---|---|---|
+| `cell_wire_res00..15` | `0x1200 + 0x4A`, 32 × u16, **1 mΩ/count** | per-cell **balance-lead** resistance, measured by the BMS. The one per-cell health signal available without an estimator |
+| `wire_res_alarm_bits` | `+0x8C`, u32 | which leads the BMS itself considers out of range |
+| `balance_pwm_chg` / `balance_pwm_dsg` | `+0xE0` / `+0xE2` | how hard each balancer converter is working. `0xE0` is **suspect** — the firmware's snapshot builder appears to skip it; polled so that can be observed |
+| `shunt_vol_charge` / `shunt_vol_discharge` | `+0xD8` / `+0xDA` | raw shunt-amplifier voltages — the input to `BatCurrent`, and the way to see through a current dead-band |
+| `dsg_cur_correct` / `chg_cur_correct` | `+0xD6` / `+0xFE` | the BMS's own current calibration factors |
+| `rtc_counter` | `+0x100`, u32 s | seconds since 2020-01-01 — a timestamp source independent of ours |
+| `pcl_celltype` | `+0x10C` | lo byte = **cell chemistry** (LFP / Li-ion / LTO), so an OCV curve can be selected rather than assumed |
+| `charge_stage_time`, `chgstage_switch` | `+0x110`, `+0x112` | hi byte of `chgstage_switch` = **Bulk / Absorption / Float**, and how long it has been there |
+
+**`unit: "ohm"` is new** — DLMS/IEC 62056-6-2 code 38 (`Resistance`), appended
+to `Shared/Modbus/modbus_units.c`. Appended, never inserted: the code is stored
+in the point record. A config using it is rejected with a clean `422 unit /
+unknown unit` by any firmware built before it, which is the right failure.
+
+Two grouping changes, both driven by §2.5 of that document — the balancer moves
+charge between `MaxVolCellNbr` and `MinVolCellNbr`, **two cells and never
+more**, re-selecting the pair about every 5 s:
+
+- `cell_minmax_nbr` and `balance_current` moved into the **5 s** table, joining
+  `pack_current`. Those four plus `balance_pwm_dsg` are what makes the balancer
+  reconstructable from telemetry, and they only mean anything in one coherent
+  frame. Exactly 8 points, so exactly one time table (§11a.7), spanning 78
+  registers, so still one transaction.
+- Balance-lead resistance got its own **300 s** table set: it moves over months,
+  and it only refreshes while the balancer is allowed to run at all.
+
+Cost on the wire: **0.53 transactions/s** for a one-BMS board, **1.05/s** for
+two — roughly 2 % and 4 % duty at 115200. 3 plans of the 8 available, 17 time
+tables, all ≤ 8 points, widest single-block span 80 registers against the
+123-register ceiling.
+
+Verified host-side by compiling both generated files through the real
+`MbCfgCompile` before deployment, and by checking every point against the
+firmware's own `quantity + (byteOffset/2) < 0x93` bound. **Not yet uploaded to
+a board.**
 
 ## 12. Undesigned
 

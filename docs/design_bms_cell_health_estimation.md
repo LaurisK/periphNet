@@ -321,9 +321,19 @@ Three details that matter for §5.5:
   stale buffer contents over RS485. **Verify before using it**; `0xE2` is
   unaffected and is the one to rely on.
 
-### 2.6 Fields worth having that nobody currently reads
+### 2.6 Fields worth having
 
-Beyond the balance-lead array, the region past byte `0xEF` is new surface:
+PeriphNet's shipped JK config already reached past `0xEF` — `TempBat3/4/5`,
+`SysRunTicks`, `TempSensorAbsent`, `TotalBatVol` and `HeatCurrent` were added
+by hand and are **hardware-verified** across three BMS
+(`configs/readout_2026-08-18.tsv`). So the region is known-readable, not
+speculative; what follows is what was still missing from it.
+
+That read-out also settles the `SysRunTicks` scale independently of the vendor
+datasource. Board #1 reports `sys_run_ticks` = 2 759 524.6 s (31.9 days) against
+`total_runtime` = 25 671 489 s (297 days) over 21 power cycles. At a 1 s LSB the
+same raw value would be 319 days — longer than the device's entire lifetime
+runtime, which is impossible. **0.1 s per count, confirmed on hardware.**
 
 - **`ChargeStatus2` (`0x112`): Bulk / Absorption / Float**, with
   `ChargeStatusTime` (`0x110`) counting seconds in the current stage. The JK
@@ -337,7 +347,21 @@ Beyond the balance-lead array, the region past byte `0xEF` is new surface:
 - **`RtcCounter` (`0x100`)** — seconds since 2020-01-01. A real timestamp
   source for logged anchors, independent of our own clock.
 - **`VolChargCur` / `VolDischargCur` (`0xD8`/`0xDA`)** — raw shunt-amplifier
-  voltages, the input to whatever filtering produces `BatCurrent`.
+  voltages, the input to whatever filtering produces `BatCurrent`. §10's
+  current dead-band question is answerable by watching these move while
+  `BatCurrent` reads zero.
+- **`DischrgCurCorrect` / `ChrgCurCorrect` (`0xD6`/`0xFE`)** — the BMS's own
+  current calibration factors, which bear directly on §10's gain question.
+
+**All of this is now in the config** — `configs/gen_jk_config.py` went from 87
+points to 114 on 2026-08-25, including the 16-cell balance-lead array, its
+alarm bitmask, both balancer duty registers and everything listed above. See
+[modbus.md](modbus.md) §11a.13 for what changed and what it costs on the wire
+(≈2 % bus duty for one BMS, 4 % for two). Both generated files were compiled
+through the real `MbCfgCompile` on the host; **neither has been uploaded to a
+board yet.** That upload is phase 0 (§9), and it is now a config upload rather
+than any firmware work — except for one two-line addition, `unit: "ohm"`
+(DLMS code 38), without which the resistance array has no unit to report.
 
 ---
 
@@ -900,7 +924,7 @@ Each phase is useful on its own and none commits the next.
 
 | # | Phase | Delivers | Risk |
 |---|---|---|---|
-| 0 | **Observe.** JK capability in the Modbus config — **both reads** (§2.3) — frames assembled and logged. Persist nothing, publish nothing, change no behaviour. | Answers every §10 hardware question, including the balancer efficiency `η` (§5.5). Data for the replay harness. | none |
+| 0 | **Observe.** Upload the extended config (§2.6 — already written, compiled host-side, not yet on a board), frames assembled and logged. Persist nothing, publish nothing, change no behaviour. | Answers every §10 hardware question, including the balancer efficiency `η` (§5.5). Data for the replay harness. | none |
 | 1 | **Resistance and balancer telemetry.** §5.4 plus the `CellWireRes` array, plus balance source/sink/current/duty (§2.5) and the §2.6 fields, published to MQTT. | A real per-cell health signal and a visible balancer, immediately — no anchors, no persistence, no estimator. | low |
 | 2 | **Pack coulomb + anchors.** Shared integrator, anchor gate, pack SOC with confidence. Published alongside the JK's, not instead of it. | A comparable second opinion; proves the gate against a live pack. | low — nothing consumes it |
 | 3 | **Per-cell regression.** §5.2, §5.5, persistence. Per-cell capacity and SOH published. | The stated goal. | medium — balancer, §5.5 |

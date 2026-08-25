@@ -14,6 +14,8 @@ static const sMbUnitInfo s_units[] = {
     { "VA",  MB_UNIT_VA,      "VA",           "apparent_power", "measurement" },
     { "var", MB_UNIT_VAR,     "var",          "reactive_power", "measurement" },
     { "Hz",  MB_UNIT_HZ,      "Hz",           "frequency",   "measurement" },
+    /* HA has no resistance device_class, so the unit string carries it. */
+    { "ohm", MB_UNIT_OHM,     "\xce\xa9",     NULL,          "measurement" },
     { "Wh",  MB_UNIT_WH,      "Wh",           "energy",      "total_increasing" },
     { "kWh", MB_UNIT_KWH,     "kWh",          "energy",      "total_increasing" },
     { "varh", MB_UNIT_VARH,   "varh",         NULL,          "total_increasing" },
