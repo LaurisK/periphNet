@@ -2688,7 +2688,7 @@ the dialect changed; every addition is a point record.
 
 | Added | Where | Why it matters |
 |---|---|---|
-| `cell_wire_res00..15` | `0x1200 + 0x4A`, 32 × u16, **1 mΩ/count** | per-cell **balance-lead** resistance, measured by the BMS. The one per-cell health signal available without an estimator |
+| `cell_wire_res00..15` | `0x1200 + 0x4A`, **1 mΩ/count** (16 of the array's 32 u16 entries — these packs are 16S) | per-cell **balance-lead** resistance, measured by the BMS. The one per-cell health signal available without an estimator |
 | `wire_res_alarm_bits` | `+0x8C`, u32 | which leads the BMS itself considers out of range |
 | `balance_pwm_chg` / `balance_pwm_dsg` | `+0xE0` / `+0xE2` | how hard each balancer converter is working. `0xE0` is **suspect** — the firmware's snapshot builder appears to skip it; polled so that can be observed |
 | `shunt_vol_charge` / `shunt_vol_discharge` | `+0xD8` / `+0xDA` | raw shunt-amplifier voltages — the input to `BatCurrent`, and the way to see through a current dead-band |

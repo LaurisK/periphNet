@@ -18,12 +18,12 @@ Windows app's own decrypted `.jsonds` protocol datasource
 firmware wins; the datasource is the tie-breaker on field *names, scales and
 units*, since it is what the vendor's own tooling decodes with.
 
-> **Revised 2026-08-25 (second pass).** The first pass concluded the JK never
-> says which cells it is balancing. That was wrong, and §2.5 now answers it
-> from the firmware's scan loop. The same pass mapped the 54 bytes of realtime
-> data past `0xEF` that no tooling here reads, settled the balance-lead
-> resistance LSB, and settled the firmware tick unit. §5.5 changed materially
-> as a result — the balancer is now a *correction*, not just an exclusion.
+> **Two corrections worth recording**, both from re-reading the firmware after
+> the first draft. (a) The JK *does* say which cells it is balancing — §2.5;
+> the first draft said it did not, and §5.5 changed materially as a result:
+> the balancer became a correction rather than an exclusion. (b) The balancer
+> **topology** is not settled by anything here; a draft claimed cell↔pack on
+> thin evidence and §2.5 now states only what the binary pins down.
 
 ---
 
@@ -50,11 +50,12 @@ not, what can be built from what the JK actually measures. Short answers:
 - **There is no per-cell capacity, per-cell SOH or per-cell SOC anywhere in
   the JK.** It carries exactly one capacity number for the whole pack.
 - **The raw measurements are good enough to do considerably better on our
-  side**, including per-cell. Three things the JK exposes and no tooling here
-  reads: the per-cell **balance-lead resistance** array (§2.2), the identity of
-  the two cells the **balancer** is currently working between (§2.5), and 54
-  bytes past `0xEF` that include the **charge stage** (Bulk/Absorption/Float),
-  the **cell chemistry**, and three more temperature sensors (§2.6).
+  side**, including per-cell. Three things the JK exposes that nothing was
+  reading before this pass: the per-cell **balance-lead resistance** array
+  (§2.2), the identity of the two cells the **balancer** is working between
+  (§2.5), and the **charge stage** (Bulk/Absorption/Float), **cell chemistry**
+  and three further thermistors past `0xEF` (§2.6). All are in the config as
+  of 2026-08-25; none has been read from a board yet.
 
 ---
 
@@ -62,9 +63,10 @@ not, what can be built from what the JK actually measures. Short answers:
 
 ### 2.1 The measurement surface
 
-One FC03 read of 120 registers from block base `0x1200` returns bytes
-`0x00..0xEF` and covers everything below. That is the whole realtime surface;
-there is no second read worth making at telemetry rates.
+The realtime block is **294 bytes / 147 registers**, and covering it takes two
+FC03 reads (§2.3). The first 120 registers (`0x00`–`0xEF`) hold everything the
+estimator needs every frame; the rest is slow-moving state that older maps here
+stopped short of.
 
 | Byte off | Type | Unit | Field | Measured or derived |
 |---|---|---|---|---|
@@ -82,7 +84,7 @@ there is no second read worth making at telemetry rates.
 | `0x9C` / `0x9E` | INT16 | 0.1 °C | `TempBat1` / `TempBat2` | measured |
 | `0xA0` | UINT32 | bitmask | `Alarm` (22 defined bits) | derived |
 | `0xA4` | INT16 | mA | `BalanCurrent` | measured |
-| `0xA6` | UINT8 | — | `BalanSta` 0=off 1=charge 2=discharge | derived |
+| `0xA6` | UINT8 | — | `BalanSta` — 0 = not balancing, 1 = low side, 2 = high side (**not** the PDF's "charge/discharge", see §2.5) | state |
 | `0xA7` | UINT8 | % | `SOC` | **derived — see §3** |
 | `0xA8` | UINT32 | mAh | `SOCCapRemain` | **derived — see §3** |
 | `0xAC` | UINT32 | mAh | `SOCFullChargeCap` | **derived — see §3.5** |
@@ -100,8 +102,8 @@ there is no second read worth making at telemetry rates.
 | `0xD6` | UINT16 | — | `DischrgCurCorrect` — discharge current calibration factor | config |
 | `0xD8` / `0xDA` | UINT16 | mV | `VolChargCur` / `VolDischargCur` — **raw shunt-amplifier voltages** | **measured** |
 | `0xDC` | FLOAT32 | — | `BatVolCorrect` — pack-voltage calibration factor | config |
-| `0xE0` | UINT16 | % | `ChargPWMDutyCycle` — balancer duty, **see §2.5: not populated over Modbus** | measured |
-| `0xE2` | UINT16 | % | `DischargPWMDutyCycle` — balancer duty | **measured** |
+| `0xE0` | UINT16 | — | `ChargPWMDutyCycle` — high-side balancer duty. **Suspect: appears not to be populated over Modbus, §2.5** | state |
+| `0xE2` | UINT16 | — | `DischargPWMDutyCycle` — low-side balancer duty. Zero between bursts, which is what makes it usable (§5.5a) | state |
 | `0xE4` | UINT16 | 0.01 V | `TotalBatVol` — second pack-voltage measurement | measured |
 | `0xE6` | INT16 | mA | `HeatCurrent` | measured |
 | `0xE9`–`0xED` | UINT8 | — | `AccStatus`, `SpecialChargerSta`, `StartupFlag`, `VolC-`, `McuId` | state |
@@ -120,13 +122,11 @@ there is no second read worth making at telemetry rates.
 | `0x113` | UINT8 | bitmask | `SwitchStatus` — LCD buzzer / DRY1 / DRY2 alarm | state |
 | `0x119`–`0x124` | 12 B | — | `EnableFlags` | config |
 
-**The realtime block is 294 bytes (147 registers), not 240.** Everything from
-`0xF0` on is past the 120 registers the Qt app reads, and is undocumented in
-its `jk::rt` map. The 147-register figure is exactly the firmware's own
-`quantity + (byteOffset/2) < 0x93` bound (§2.3) — the cap *is* the block size.
-Two FC03 reads cover it (registers 0–119, then 26 registers from offset 120);
-the final two bytes of `EnableFlags` fall outside the firmware's bound and are
-unreachable, which costs nothing.
+147 registers is exactly the firmware's own `quantity + (byteOffset/2) < 0x93`
+bound (§2.3) — **the cap *is* the block size**. The final two bytes of
+`EnableFlags` fall outside that bound and are unreachable, which costs nothing.
+The Qt monitor app's `jk::rt` map stops at register 120 and leaves everything
+from `0xF0` on undocumented.
 
 Field names, sizes and scales for the whole block are corroborated
 independently by the vendor Windows app's own decrypted `.jsonds` datasource
@@ -142,11 +142,11 @@ points, `VolSOC100` / `VolSOC0`, `VolCellRCV` (recommended charge) and
 `CellConWireRes` (µΩ, the compensation values). Device info (`0x1400`) has
 `OddRunTime` (cumulative seconds) and `PwrOnTimes` — a crude pack age.
 
-### 2.2 The per-cell balance-lead resistance array is real, and nothing reads it
+### 2.2 The per-cell balance-lead resistance array
 
 `jk::rt` in the Qt app leaves a 64-byte hole between `MinVolCellNbr_off`
-(`0x49`) and `TempMos_off` (`0x8A`). That hole is **`CellWireRes0..31`, 32 ×
-UINT16**, confirmed three ways:
+(`0x49`) and `TempMos_off` (`0x8A`), and nothing here read it before this pass.
+That hole is **`CellWireRes0..31`, 32 × UINT16**, confirmed three ways:
 
 - The vendor PDF's realtime table lists 32 rows `均衡线电阻n / CellWireResn`
   there, unit column `mΩ`.
@@ -204,9 +204,13 @@ can write has 1000× the resolution of the value the BMS measures.
 
 At 115200 8N1 a 120-register FC03 is 8 bytes out and 245 back ≈ 22 ms of
 wire time, plus turnaround and the 3.5-character silences. Call it 50–80 ms
-per frame. **1 Hz costs under 10 % of the bus**; 2 Hz is affordable if the
-estimator ever wants it (it does not — see §5.3, the anchors are what matter,
-not the rate).
+per frame, so **1 Hz costs under 10 % of the bus**.
+
+The anchors, not the sample rate, set how well capacity is estimated (§5.9) —
+but the rate is not free either: §5.4's resistance estimate needs to catch
+current *steps*, and a 5 s poll aliases them badly. The shipped config polls
+its live table at 5 s with the period a named constant, so moving to 1 Hz for
+the estimator is a one-line change once the shared-bus budget is measured.
 
 Hard caps from the firmware's own parser (`Modbus_ParseRequest`,
 `shared_04.c:4358`): quantity < 124 registers, and `quantity + (byteOffset/2)
@@ -233,9 +237,6 @@ This list is the real constraint on §5, more than any algorithm choice.
   single thing that breaks it.
 - **No per-cell temperature.** Two pack sensors plus the MOS. Cell-to-cell
   thermal gradients across a 16S pack are real and invisible here.
-- ~~No indication of which cell is being balanced.~~ **This turned out to be
-  wrong — see §2.5.** `MaxVolCellNbr` / `MinVolCellNbr` are not a guess about
-  the balancer's target; they *are* the balancer's target, by construction.
 - **No timestamps.** Frames are whatever the wire hands us; the local tick at
   reply time is the only timebase. Integration error from that is negligible
   next to current-sensor offset (§5.2).
@@ -250,9 +251,11 @@ This list is the real constraint on §5, more than any algorithm choice.
 
 ### 2.5 Which cells the balancer is working on — answered
 
-The vendor app shows it, so the information exists. It is not a hidden
-bitmask: **it is `MaxVolCellNbr` and `MinVolCellNbr`, which the balancer uses
-as its operands by construction.**
+The vendor's mobile app highlights the cells being balanced, so the
+information is derivable from what the BMS reports. It is not a hidden bitmask
+— the Windows monitor's own datasource has no such field. **It is
+`MaxVolCellNbr` and `MinVolCellNbr`, which the balancer uses as its operands by
+construction.**
 
 The balancer/measurement task (`shared_04.c:2160`) scans every cell once per
 pass, and inside that scan does exactly this:
@@ -277,31 +280,69 @@ directions of the balancer: `FUN_0800d9e8` runs on the highest cell,
 both writing the resulting current to `BalanCurrent` (`RT[0xA4]`) and the
 state to `BalanSta` (`RT[0xA6]`).
 
-**Which cells, is settled. The topology, is not** — and it changes the
-bookkeeping in §5.5:
+**`BalanSta` is a hand-off, not a direction.** The two routines gate on it and
+pass it back and forth: `FUN_0800dbb6` runs only while `BalanSta == 1` and sets
+it to `2` on completion; `FUN_0800d9e8` runs only while `BalanSta == 2` and
+sets it to `1`. `BalanSta` becomes `0` only when `FUN_0800d8f0` withdraws
+permission entirely. So:
 
-- **cell↔cell**: charge taken from the max cell is delivered to the min cell.
-  Only two cells' coulomb counts move; the pack is untouched.
-- **cell↔pack**, two independent converters: one bleeds the max cell into the
-  pack, the other charges the min cell from it. Then *every* cell's count
-  moves a little as well as the two moving a lot.
+| `BalanSta` | Meaning |
+|---|---|
+| 0 | balancing not permitted (disabled, below `VolStartBalan`, delta under `VolBalanTrig`, a wire-res fault, or a cell-OV alarm) |
+| 2 | the **high side** owns the converter — charge is leaving `MaxVolCellNbr` |
+| 1 | the **low side** owns it — charge is entering `MinVolCellNbr` |
 
-Two separately-named duty registers and two separate state machines lean
-towards cell↔pack; a single shared `BalanCurrent` register that both routines
-write leans towards one converter running at a time. **§10 has the
-discriminating test** — it is a straight observation, not an inference: watch
-whether thirty cells move in the opposite direction to the two, and whether
-the pack current sensor sees the balance current at all.
+**Only one direction is live at a time, and both share one current sense**
+(`FUN_0800d1c6(3, …)`, the same ADC channel in both routines). That removes the
+ambiguity that would otherwise sink the accounting: `BalanCurrent` is never a
+mixture, and `BalanSta` says which cell it belongs to.
+
+**The topology is open.** The vendor's own description of the PB line is
+cell-to-cell by flyback / capacitive energy transfer, and nothing found here
+contradicts it. What the firmware and the binary do pin down:
+
+| Fact | Where |
+|---|---|
+| The two duty registers drive **different timers at different switching frequencies** — `RT[0xE2]` (low side) is `TIM1_CCR1` at **60 kHz**, `RT[0xE0]` (high side) is `TIM3_CCR2` at **300 kHz** | `FUN_0800a210` / `FUN_0800a22a`; the pointers resolve to `0x40012C00` and `0x40000400` in the `.bin`, and the ARR basis is `f_clk/60000` and `f_clk/300000` |
+| One shared current sense serves both | both routines read `FUN_0800d1c6(3, 0x2a)` |
+| Cell selection is a **serially shifted switch matrix**, one 4-byte pattern per cell (with an odd/even bit distinction), taking milliseconds to change | `FUN_0800add6` / `FUN_0800aea6` → `FUN_0800acf4` |
+| A separate 3-state path selector plus a balance-path enable | `FUN_0800ae60` (bit 1 / bit 2, mutually exclusive, or neither) and `FUN_0800ae48` (bit 0) |
+
+Two different switching frequencies on two different timers say **two distinct
+converter stages**, not two switches of one. And the millisecond-scale serial
+mux says the max and min cells are **never connected at the same instant** —
+which rules out a direct cell-to-cell transfer *within a switching cycle*, but
+not one time-multiplexed across the 1 s bursts, which is what a flyback with an
+intermediate store looks like from software.
+
+The one argument against a purely passive intermediate is energetic: a burst
+moves 2 A for up to 1 s — **2 coulombs** — and no capacitor at BMS voltages
+holds that (0.2 F at 10 V), nor does any inductor. So either the store is
+recycled at switching frequency against something large, or the other side of
+the transformer sits on the pack or a sub-string. Which of those it is, this
+analysis cannot say.
+
+**It also does not gate anything.** §5.5 carries both variants, and §5.5a's
+estimator B computes the per-cell transfer independently for every cell — so it
+produces the answer rather than assuming it (§10 item 4).
+
+**Bursts are ≤ 1 s, current-regulated.** Each routine latches
+`SysRunTicks + 10` on entry and exits when the tick passes it — exactly 1.0 s
+at 0.1 s per count. Inside, it ramps a PWM duty byte from 20 upward in steps of
+5 every 10 ms, backing off whenever `|BalanCurrent|` exceeds `CurBalanMax`. So
+a burst is a closed-loop current source at the configured limit, not an
+open-loop bleed. **Both routines zero their duty register on exit**, which is
+what makes those registers a usable "transferring right now" flag.
 
 So the complete, exact answer, all from fields already on the wire:
 
 | Question | Field |
 |---|---|
-| Is balancing happening? | `BalanSta != 0` (the vendor datasource maps 1, 2 **and** 3 all to "ON", so treat it as a boolean, not the tri-state the PDF implies) |
+| Is a balancing **phase** active? | `BalanSta != 0`. It does **not** mean charge is moving right now — see the duty note below |
 | Which cell is charge being taken *from*? | `MaxVolCellNbr` (`0x48`) |
 | Which cell is it going *to*? | `MinVolCellNbr` (`0x49`) |
 | How much? | `BalanCurrent` (`0xA4`, mA) |
-| How hard is the converter working? | `DischargPWMDutyCycle` (`0xE2`, %) — and `ChargPWMDutyCycle` (`0xE0`), with the caveat below |
+| Is charge moving **right now**? | duty register non-zero — `0xE2` for the low side, `0xE0` for the high side (suspect, below) |
 
 Three details that matter for §5.5:
 
@@ -353,15 +394,15 @@ runtime, which is impossible. **0.1 s per count, confirmed on hardware.**
 - **`DischrgCurCorrect` / `ChrgCurCorrect` (`0xD6`/`0xFE`)** — the BMS's own
   current calibration factors, which bear directly on §10's gain question.
 
-**All of this is now in the config** — `configs/gen_jk_config.py` went from 87
-points to 114 on 2026-08-25, including the 16-cell balance-lead array, its
-alarm bitmask, both balancer duty registers and everything listed above. See
-[modbus.md](modbus.md) §11a.13 for what changed and what it costs on the wire
-(≈2 % bus duty for one BMS, 4 % for two). Both generated files were compiled
-through the real `MbCfgCompile` on the host; **neither has been uploaded to a
-board yet.** That upload is phase 0 (§9), and it is now a config upload rather
-than any firmware work — except for one two-line addition, `unit: "ohm"`
-(DLMS code 38), without which the resistance array has no unit to report.
+**All of this is now in the config.** `configs/gen_jk_config.py` went from 87
+points to 114 on 2026-08-25 — the 16-cell balance-lead array, its alarm
+bitmask, both balancer duty registers, and everything listed above.
+[modbus.md](modbus.md) §11a.13 has what changed, the grouping decisions and the
+measured wire cost. Both generated files compile through the real
+`MbCfgCompile` on the host; **neither has been uploaded to a board.** That
+upload is phase 0 (§9). It needs no firmware work beyond one two-line addition,
+`unit: "ohm"` (DLMS code 38), without which the resistance array has no unit —
+so a board must be flashed with that before the config will be accepted.
 
 ---
 
@@ -391,15 +432,13 @@ share the wire offsets is corroborated at four independent points —
 `SET[0x7C]` used as design capacity, `SET[0x18]` as the SOC-100 % voltage,
 `SET[0x1C]` as SOC-0 %, `SET[0x114]` bit 9 as the float-charge flag.
 
-### 3.1 The claim under test
+### 3.1 Is the JK's SOC "just linear voltage estimation"?
 
-"JK's SOC is a linear estimation, which for LiFePO4 is useless."
-
-**Half right, and the half that is right matters.** The linear estimation
-exists and is exactly as bad as expected — but it is the seed, not the
+**Half. And the half that is true matters.** A linear interpolation exists and
+is exactly as bad as expected — but it is the cold-start *seed*, not the
 running estimate. What runs is coulomb counting. The practical damage comes
-from *when* the seed fires and from how rarely the anchors that correct it
-are reachable.
+from *when* the seed fires (§3.2) and from how rarely the anchors that correct
+the counter are reachable (§3.4).
 
 ### 3.2 The cold-start seed — linear interpolation on average cell voltage
 
@@ -427,8 +466,8 @@ settings and are used elsewhere (§3.4). With typical LFP settings
 (UV 2500 mV, OV 3650 mV) a pack resting at 3.30 V/cell seeds to
 `(3300−2500)/(3650−2500) = 69.6 %`. The true SOC of an LFP cell resting at
 3.300 V is anywhere from roughly 30 % to 90 %. At 3.35 V the seed says 74 %
-while the cell is very likely above 95 %. The user's characterisation of this
-as useless is correct.
+while the cell is very likely above 95 %. As an SOC estimate for LFP it is
+worthless, and §4 explains why no variation on it could be better.
 
 **When does it fire?** `RT[0xd3]` is set by the boot-time restore path
 `FUN_08005960` (`shared_01.c:1988-2013`) when the persisted state cannot be
@@ -550,9 +589,9 @@ history**. Read `SOCCycleCap` and derive your own if you want a cycle number.
 | Value | Trust | Why |
 |---|---|---|
 | Cell voltages, pack V/I, temperatures | **Yes** | direct measurements |
-| `CellWireRes` array | **Yes** (1 mΩ/LSB, §2.2) | direct measurement, currently unread — but of the *balance lead*, and only fresh while the balancer runs |
+| `CellWireRes` array | **Yes** (1 mΩ/LSB, §2.2) | direct measurement — but of the *balance lead*, not the busbar, and only fresh while the balancer runs |
 | `MaxVolCellNbr` / `MinVolCellNbr` | **Yes, and more than they look** | argmax/argmin *and* the balancer's two operands (§2.5) |
-| `ChargeStatus2` (Bulk/Abs/Float), `CellType` | **Yes** | firmware state, past the region anything here reads (§2.6) |
+| `ChargeStatus2` (Bulk/Abs/Float), `CellType` | **Yes** | firmware state, in the region older maps here stopped short of (§2.6) |
 | `SOCCycleCap` (throughput) | **Yes** | genuine integrator, persisted |
 | `SOC` / `SOCCapRemain` | **Conditionally** | coulomb counting, but open-loop between anchors, 1 % resolution, and re-seeded by §3.2 whenever config changes |
 | `SOCFullChargeCap` | **No** | equals design capacity unless a full empty→full charge has completed; clamped to nameplate |
@@ -573,21 +612,29 @@ Approximate rest OCV for a prismatic LFP cell at 25 °C:
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | OCV | 2.50 | 3.10 | 3.20 | 3.25 | 3.27 | 3.29 | 3.31 | 3.32 | 3.34 | 3.37 | 3.45 |
 
-The working slope:
+Differentiating that table gives the working slope `k = dOCV/ds`, and with a
+cell-voltage noise of `σ_V` ≈ 3 mV (the figure §10 item 7 measures) the SOC a
+single voltage reading can resolve is just `σ_V / k`:
 
-- **30–80 % SOC: ≈ 0.2 mV per 1 % SOC.** With a realistic ±5 mV of combined
-  measurement and cell-offset error, voltage alone locates SOC to about
-  **±25 %**. No filter fixes this; the information is not present.
-- **Below ~10 %: ≈ 10 mV/%.** Error ≈ ±0.5 %.
-- **Above ~95 %: ≈ 15 mV/%.** Error ≈ ±0.3 %.
+| Region | `k` | SOC from one reading |
+|---|---|---|
+| 30–80 % (plateau) | 0.2 mV/% | **±15 %** — no filter fixes this; the information is not present |
+| ~90 % (shoulder) | 2 mV/% | ±1.5 % |
+| above ~95 % (top knee) | 20 mV/% | ±0.15 % |
+| below ~10 % (bottom knee) | 10 mV/% | ±0.3 % |
+
+Add cell-to-cell offset on top of `σ_V` when comparing *different* cells'
+absolute SOC; it cancels when tracking one cell over time, which is what §5.2
+does. §5.9.3 carries the same figures expressed in amp-hours.
 
 Two conclusions drive the whole proposal:
 
 1. **Voltage is an anchor, never a continuous estimate.** Any scheme that
    maps volts to SOC in the plateau — the JK's seed, or a naive Kalman filter
    with an OCV measurement model — is fitting noise.
-2. **The knees are where all the information is**, and a solar ESS visits the
-   top knee most sunny days. That is enough, if you spend the visits well.
+2. **The knees are where the information is**, and they are visited far less
+   often than daily on a self-consumption battery. Spending those visits well
+   is most of the design; §5.9 is what makes rare visits sufficient.
 
 Hysteresis compounds it: LFP charge-OCV and discharge-OCV differ by roughly
 10–20 mV across the plateau — which is 50–100 % SOC of apparent shift there,
@@ -639,9 +686,11 @@ accumulators in `float`. Do not reach for `double`.
 
 **Current integration error** is dominated by sensor *offset*, not by the
 1 Hz sampling. A 50 mA offset integrates to 1.2 Ah/day — 0.43 %/day on a
-280 Ah pack. That is exactly what the anchors exist to erase, and it sets the
-useful anchor interval at "at least weekly", which a solar site clears
-easily.
+280 Ah pack. Anchors erase the accumulated error, but the important move is to
+**estimate the offset itself** as a shared parameter and subtract it, which
+turns anchor scarcity from a threat into an asset. That argument, with its
+numbers, is §5.9 — it is what separates this from the JK's own estimator, and
+it should be read before treating the anchor rate as a requirement.
 
 ### 5.3 The anchor gate
 
@@ -652,7 +701,7 @@ A sample enters the fit only if **all** hold:
 | Curve steep enough | `\|dOCV/ds\| > 4 mV/%` | excludes the plateau |
 | Current small, or IR-corrected | `\|I\| < C/50`, else use `V_ocv = V_i − I·R_i` | terminal voltage ≠ OCV under load |
 | Relaxed | ≥ 10 min since `\|I\|` last exceeded C/20, when using the rest path | LFP relaxation is slow |
-| Balancer accounted for | `BalanSta == 0`, **or** cell is neither `MaxVolCellNbr` nor `MinVolCellNbr`, **or** §5.5's correction applied at reduced weight | the balancer breaks the shared-coulomb identity — but only for two known cells (§2.5), so 30 of 32 cells stay clean even mid-balance |
+| Balancer accounted for | `BalanSta == 0`, **or** cell is neither `MaxVolCellNbr` nor `MinVolCellNbr`, **or** §5.5's correction applied at reduced weight | the balancer breaks the shared-coulomb identity — but only for two known cells (§2.5), so all but two stay clean even mid-balance. Deliberately stricter than §5.5's bookkeeping gate: that one keys on the duty register, this one on `BalanSta`, because an anchor is worth being conservative about and a coulomb is not |
 | Sense path trustworthy | `CellWireRes_i` below threshold when that cell is the balance source/sink | balance current through a degraded lead adds an IR error to the very voltage being used as OCV |
 | Temperature in band | 10–35 °C, and recorded with the sample | capacity and OCV are both temperature-dependent |
 | No active protection | `Alarm` clear of the voltage/current bits | the pack is not in a normal operating state |
@@ -709,14 +758,18 @@ does, line by line. So the per-cell charge bookkeeping becomes:
 
 ```
 for every cell i:      q_i += I_pack · Δt
-if BalanSta != 0:      q_[MaxVolCellNbr] −= I_bal · Δt
-                       q_[MinVolCellNbr] += I_bal · Δt · η
+if duty != 0:          q_[MaxVolCellNbr] −= I_bal · Δt          /* BalanSta == 2 */
+                       q_[MinVolCellNbr] += I_bal · Δt · η      /* BalanSta == 1 */
 ```
+
+Note the gate is the **duty register**, not `BalanSta`. `BalanSta != 0` marks
+the balancing phase, which continues between bursts; only the duty says charge
+is moving right now (§2.5, §5.5a).
 
 — that being the **cell↔cell** form. If the topology turns out to be
 cell↔pack (§2.5, undecided), the same two lines apply plus a `∓ I_bal·Δt/N`
-spread across every cell, which is a small correction to thirty cells and no
-change at all to the two that matter. Either way the structure is the same and
+spread across every cell, which is a small correction to the untouched ones
+and no change at all to the two that matter. Either way the structure is the same and
 the phase-0 log picks the variant.
 
 `η` is the converter's transfer efficiency — unknown, order 0.8–0.9, and a
@@ -725,11 +778,11 @@ other approximation left is the ≤ 1 s of aliasing against the balancer's own
 5 s re-selection. Both are small next to the amp-hours the naive model gets
 wrong.
 
-That changes the ordering of the three responses:
+Three responses, in order of preference:
 
 1. **Correct, and keep the anchor.** Apply the bookkeeping above and admit the
-   sample at moderately reduced weight. This is now the default, and it keeps
-   the top-knee anchors that make the whole method work.
+   sample at moderately reduced weight. The default, because it keeps the
+   top-knee anchors that make the whole method work.
 2. **Exclude** (`BalanSta != 0` → no anchor) stays as the conservative
    fallback and as the phase-2 starting point, since it needs no `η` and no
    trust in the correction. Expect it to converge much more slowly.
@@ -743,10 +796,9 @@ That changes the ordering of the three responses:
 
 Two secondary signals sharpen it further:
 
-- **`DischargPWMDutyCycle` (`0xE2`)** says how hard the converter is working,
-  which is an independent cross-check on `BalanCurrent` and catches the case
-  where the balancer is enabled but achieving nothing (a degraded balance
-  lead — §5.4).
+- **`DischargPWMDutyCycle` (`0xE2`)** is the gate that makes the transfer
+  integrable at all — it is zero between bursts, where `BalanSta` is not.
+  §5.5a is the error budget that follows from it.
 - **`CellWireRes_i`** bounds the sense-path IR error on the very cell being
   balanced, and the magnitude is not subtle. The JK senses and balances
   through the same harness, so at 2 A even a healthy 20 mΩ lead puts **40 mV**
@@ -757,16 +809,164 @@ Two secondary signals sharpen it further:
   not supply an OCV anchor unless its lead resistance is low *and* the
   correction is applied.
 
-**Consequence for scope:** pack-level capacity and SOC were always robust
-(charge is conserved within the pack, less transfer losses). The bigger shift
-is per-cell: because the balancer touches **exactly two cells at a time**, the
-other 30 of a 16S–32S pack keep a clean shared-coulomb identity even in the
-middle of an absorption phase. The first pass treated balancing as poisoning
-the whole frame; it poisons two cells, and names them. Per-cell capacity
-therefore looks tractable on a normal cycle rather than needing weeks of
-balancer-idle windows — *provided* the correction survives contact with real
-data, which is precisely what the phase-0 log and the replay harness exist to
-decide. Per-cell resistance (§5.4) is unaffected either way.
+**Consequence for scope:** pack-level capacity and SOC are robust regardless
+— charge is conserved within the pack, less transfer losses. The per-cell case
+is what the observability buys: the balancer touches **exactly two cells at a
+time and names them**, so the other `N−2` (14 of 16 on these packs) keep a
+clean shared-coulomb identity even mid-absorption. Per-cell capacity is
+therefore tractable on ordinary cycling rather than needing balancer-idle
+windows — *provided* the correction survives contact with real data, which is
+what the phase-0 log and the replay harness exist to decide. Per-cell
+resistance (§5.4) is unaffected either way.
+
+### 5.5a Measuring the balance transfer, and what its error actually is
+
+The bookkeeping above needs one number per episode: **how many amp-hours left
+`MaxVolCellNbr` and arrived at `MinVolCellNbr`.** It is worth being precise
+about how well that can be known, because it is the difference between per-cell
+capacity being a real measurement and being a plausible-looking guess.
+
+There are **two independent estimators**, and having two is the whole point —
+one is precise but has an unknown scale, the other is unbiased but noisy. Each
+alone is a guess; together they give a bounded error.
+
+#### A — integrate the sensed balance current
+
+`BalanCurrent` is better instrumentation than it looks. From §2.5's routines:
+
+- It is a **difference of two ADC reads** on one channel — a baseline taken
+  before the converter is enabled, subtracted from the reading during. Offset
+  and drift cancel by construction, which is the opposite of the pack current
+  sensor's situation (§10).
+- The scaling is `(ΔmV × 1000) / 510`, i.e. an effective transimpedance of
+  **0.510 V/A** (shunt × amplifier gain), off a 12-bit ADC with a 3000 mV
+  reference. One LSB is `3000/4096/0.510` = **1.44 mA**; on a 2 A transfer that
+  is 0.07 %.
+- The converter is **current-regulated to `CurBalanMax`**, so within a burst the
+  current is close to constant and close to a value we already know.
+- `BalanSta` says which cell it belongs to, unambiguously (§2.5).
+
+The error is therefore not in the current. It is entirely in **for how long**:
+
+| Term | Size | Why |
+|---|---|---|
+| Duty cycle | **the dominant term** | bursts are ≤ 1 s inside a scan pass of roughly 4–5 s, and the duty register is zeroed between them. Integrating `BalanCurrent × Δt` without gating over-counts by the pass/burst ratio — 2× to 5×, systematically |
+| Sample-fraction estimate of duty | ≈ ±1 % | gate on `duty != 0` and simply count the fraction of samples that are on. Bernoulli: over an 8 h window at 1 Hz, `N` = 28 800 and `p` ≈ 0.25 give `σ_p` = 0.26 %. Duty is *measurable*, not a fudge factor |
+| Phase-locking | unquantified | that estimate is only unbiased if the poll is not commensurate with the scan pass. Check the run-length distribution of `duty != 0`; a scan pass whose length varies with convergence makes lock-in unlikely, but do not assume it |
+| Transimpedance tolerance | ±2 % | shunt plus gain resistors, uncalibrated |
+| Transfer efficiency `η` | unknown, ~0.8–0.9 | matters only on the sink side |
+
+**One catch, and it is the reason §10 item 3 matters.** The low-side duty lives
+at `0xE2` and is published. The high-side duty lives at `0x00E0` — the register
+the snapshot builder appears to skip. `BalanSta` does *not* substitute for it:
+it stays non-zero between bursts, so it marks the balancing *phase*, not the
+transfer. If `0xE0` really is dead on the wire, the high-side (source) duty has
+no direct observation, and estimator A can only measure the sink side directly.
+The source side then has to come from charge conservation (below) or from B.
+
+#### B — measure the transfer by its effect on the untouched cells
+
+This one needs no duty, no `η` and no trust in the current sense at all. Over an
+interval, with `ΔQ` the shared pack charge integral:
+
+```
+b_i = C_i · Δs_i − ΔQ
+```
+
+`b_i` is the net balance charge into cell *i*, and it is **zero for every cell
+the balancer did not touch** — all but two at any moment, 14 of 16 on these
+packs (§5.5). So the untouched cells calibrate `ΔQ` and supply `C_i`
+through the §5.2 regression,
+and the two touched cells' residual against that reference *is* the transfer.
+No circularity: a cell contributes to its own `C_i` only from intervals in
+which it was untouched.
+
+Error budget, for a 280 Ah cell over one top-of-charge episode:
+
+```
+σ(b_i)² = (Δs_i · σ_C)²  +  (C_i · σ_Δs)²          σ_Δs = √2 · σ_V / k
+```
+
+with `k = dOCV/ds`. At the top knee `k` ≈ 20 mV per % SOC (2000 mV per unit
+fraction). Taking `σ_V` = 3 mV, `σ_C` = 2 % and `Δs` = 0.05 over the episode:
+
+- voltage term: `280 × √2 × 3/2000` = **0.59 Ah**
+- capacity term: `0.05 × 5.6` = **0.28 Ah**
+- total **σ(b_i) ≈ 0.65 Ah**
+
+Against a typical episode — 2 A at ~40 % duty for 4 h ≈ 3.2 Ah — that is
+**±20 % on a single episode.** If `σ_V` turns out to be quantisation-limited at
+1 mV, it improves to about ±11 % — the capacity term then dominates.
+
+**This method lives or dies on `k`.** In the plateau `k` ≈ 0.2 mV/%, a hundred
+times worse, and the same arithmetic gives ±2000 % — i.e. nothing. It works
+only at the knee. The saving grace is that **balancing happens at the knee**:
+`VolStartBalan` is set to 3.450 V on board #1, so the balancer only runs where
+the curve is steep enough to measure it.
+
+#### C — use B to calibrate A, which is the actual answer
+
+A is precise per-sample with an unknown scale; B is unbiased per-episode with
+noise. So fit **one scalar α per direction** across episodes:
+
+```
+b_i (from B)  ≈  α · ∫ I_bal · 1{duty ≠ 0} dt
+```
+
+α absorbs `η`, the duty estimate's residual bias, the transimpedance tolerance
+and the source/sink sense polarity in one measured number instead of four
+assumed ones. Per-episode noise of ±20 % averages down as `1/√N`:
+
+| Episodes | α known to |
+|---|---|
+| 1 | ±20 % |
+| 9 | ±7 % |
+| 25 | ±4 % |
+| 100 | ±2 % |
+
+An "episode" is a balancing phase that also produced a usable knee anchor, so
+the calendar rate is the anchor rate of §5.9, not the balancing rate — the
+balancer runs above `VolStartBalan` far more often than the pack reaches an
+anchor. Do not assume one per day.
+
+With α known, estimator A gives continuous balance charge at roughly
+**±5 %**, which is well inside what the per-cell capacity fit needs — the
+balance transfer over an episode is a few percent of cell capacity, so a ±5 %
+error on it is a fraction of a percent of `C_i`.
+
+#### The free consistency check
+
+Charge is conserved, so across any window the estimated transfers must satisfy
+
+```
+Σ_i b_i  =  −(1 − η) · Σ |b_source|   ≤ 0
+```
+
+A positive sum means the model is wrong — wrong cells, wrong sign, or a missed
+episode. It costs nothing, needs no extra data, and it is the single best
+guard against the estimator quietly drifting into fiction. It also recovers the
+source-side transfer when `0x00E0` is unreadable: `b_source ≈ −b_sink / η`.
+
+The second check is closure — over a full cycle returning to the same pack SOC,
+the pack coulomb count must come back to itself, and any non-closure bounds the
+total accounting error including the balance term.
+
+#### Two error terms the JK's own scan loop removes
+
+- **Sense-lead IR while balancing.** At 2 A through even a healthy 20 mΩ
+  balance lead there is 40 mV between the cell and the ADC — 2 % SOC at the
+  knee, 5.6 Ah on a 280 Ah cell, which would dwarf every term above. **The JK
+  avoids it for us**: in the scan loop (§2.5) the balance routine runs *and
+  zeroes its duty* before that cell's voltage is read. Reported cell voltages
+  are balancer-off readings by construction. This is worth re-verifying on
+  hardware, because it is load-bearing.
+- **Frame skew.** The flip side of the same loop: cell voltages are written one
+  cell at a time across a scan pass, so the 16 voltages in one Modbus frame are
+  spread over ~4–5 s and are up to a pass old, while `BalanCurrent` and the duty
+  are instantaneous. During absorption — steady current, which is when anchors
+  are taken — this is harmless. Under a swinging load it is not, and it is
+  another reason §5.3 gates on low and stable current rather than merely
+  correcting for it.
 
 ### 5.6 Pack SOC as the weakest link
 
@@ -831,18 +1031,161 @@ Cross-check against the JK's own restored `SOCCapRemain` (independent
 integrator, §3.2) and against terminal voltage *if* it happens to sit in a
 steep region. Never re-seed linearly — that is the mistake being corrected.
 
----
+### 5.9 Anchor scarcity and drift — how this actually differs from the JK
+
+A fair objection to everything above: **structurally this is still coulomb
+counting corrected at the knees, which is what the JK does.** A solar ESS
+rarely reaches the bottom, reaches the top more often but far from daily, and
+open-loop integration between rare anchors drifts. If the answer were only
+"better anchors", the objection would stand.
+
+It is not only better anchors. There are four differences, and the third is the
+one that matters.
+
+| | JK | This |
+|---|---|---|
+| Anchor form | threshold: max cell ≥ `VolSOC100` for 3 s | OCV lookup, weighted by local curve slope |
+| Anchor value | binary — `remaining := full` | an SOC estimate carrying a σ |
+| A charge that stops at 90 % | **nothing** | a usable ±2.1 % anchor |
+| **Current-sensor offset** | **never estimated** | **estimated from anchor pairs — §5.9.2** |
+| Granularity | one pack number, 1 % integer | per cell |
+| Uncertainty | none reported | explicit, grows between anchors |
+| Capacity update | only on a complete empty→full inside a timeout | continuous weighted regression |
+
+#### 5.9.1 What the drift actually is
+
+Two error terms, and they behave completely differently:
+
+- **Gain error** integrates with *throughput* and largely self-cancels over a
+  cycle: a +2 % error on 150 Ah in and −2 % on 150 Ah out nets to almost
+  nothing. It is not the problem.
+- **Offset error** integrates with *time*, in one direction, whether or not the
+  pack is doing anything. It is the entire problem.
+
+On a 280 Ah pack:
+
+| Offset | Per day | Over 30 d | Over 60 d |
+|---|---|---|---|
+| 50 mA | 0.43 % | 12.9 % | 25.7 % |
+| 20 mA | 0.17 % | 5.1 % | 10.3 % |
+| 5 mA | 0.043 % | 1.3 % | 2.6 % |
+| 2.5 mA | 0.021 % | 0.64 % | 1.3 % |
+
+So the objection is quantitatively right: an uncharacterised 50 mA offset and a
+two-month winter with no top-of-charge makes the SOC meaningless. The JK, which
+never estimates its own offset, has exactly this failure mode and no way to
+know it is happening.
+
+#### 5.9.2 Anchor scarcity is self-limiting, which is the counter-intuitive part
+
+Two anchors separated by time `T` measure the offset directly:
+
+```
+ε = ( ∫I dt  −  C·(s₂ − s₁) ) / T
+```
+
+The numerator's error is fixed — it is the two-anchor uncertainty,
+`√2 · C · σ_V / k` = **0.59 Ah** at the top knee, the same term §5.5a uses —
+while the denominator grows with the gap. **A sparser anchor gives a *more*
+precise offset**, not a less precise one:
+
+| Anchor gap | Offset resolved to | Residual drift after correction |
+|---|---|---|
+| 7 d | 3.5 mA | 0.030 %/day |
+| 14 d | 1.8 mA | 0.015 %/day |
+| 30 d | 0.8 mA | 0.007 %/day |
+| 60 d | 0.4 mA | 0.004 %/day |
+
+And the two effects cancel exactly. Residual drift over the *next* gap of the
+same length is `σ_ε × T` = 0.59 Ah — **the anchor uncertainty itself, 0.21 %
+SOC, whatever the gap length.** Once the offset is being learned, the length of
+the anchor drought stops mattering to first order.
+
+The honest caveat: this holds only while `ε` is constant across the two
+intervals. It is not — it drifts thermally and with age. So model it as a
+slowly-varying state (a random walk), and **its own drift rate is what really
+bounds long gaps**. That rate is measurable from consecutive `ε` estimates, so
+it becomes a number in the confidence budget rather than an assumption. This is
+the single most valuable thing phase 2 produces, and it needs no knee at all
+after the first pair.
+
+Implementation is nearly free: `ε` is one **shared** parameter across all 32
+cells' equations, so it is far better determined than any per-cell quantity.
+Either add it to the §5.2 fit directly, or estimate it pack-level from anchor
+pairs and feed it back — the second is simpler and loses little.
+
+#### 5.9.3 Graded anchors mean partial charges count
+
+The JK's anchor is a step function: below `VolSOC100` it learns nothing at all.
+An OCV lookup weighted by slope degrades gracefully instead:
+
+| Where the charge stopped | `dOCV/ds` | One anchor, on a 280 Ah cell |
+|---|---|---|
+| ~97 % (top knee) | 20 mV/% | 0.42 Ah — **0.15 % SOC** |
+| ~90 % (shoulder) | 2 mV/% | 4.2 Ah — **1.5 % SOC** |
+| 30–80 % (plateau) | 0.2 mV/% | 42 Ah — 15 % SOC, i.e. nothing |
+
+(These are `C · σ_V / k` for a single reading. A *pair* of anchors, which is
+what §5.9.2 and §5.5a difference, carries √2 times as much — 0.59 Ah at the
+top knee.)
+
+A 90 % shoulder is a mediocre anchor. It is also **nine times better than a
+month of uncorrected 50 mA drift**, and a solar ESS reaches 90 % vastly more
+often than it reaches 100 %. Those anchors are worth taking precisely because
+the good ones are rare.
+
+The plateau row is the boundary of what is possible: no algorithm extracts SOC
+from a flat curve. Plateau OCV is therefore used as a **contradiction check**,
+never as an estimate — if the filter claims 95 % while a rested cell sits at
+3.29 V, something is wrong and confidence should collapse.
+
+#### 5.9.4 SOH is not exposed to this, and the reason is worth stating
+
+The objection applies to **SOC**, which must be right continuously. It largely
+does not apply to **capacity and SOH**, for two reasons:
+
+- Capacity moves over *months*. An anchor every few weeks is not a compromise;
+  it is oversampling.
+- **The knee is a readout amplifier, not a required operating point.** Two cells
+  differing by 2 % in capacity diverge by 1.1 % SOC over 150 Ah of throughput.
+  In the plateau that divergence is 0.22 mV — invisible, below the 1 mV
+  quantisation. At the top knee the *same* accumulated divergence reads
+  **22 mV**, a hundred times larger and unmistakable. The divergence accrues
+  silently during weeks of plateau cycling and is *read out* the moment the pack
+  next touches the knee.
+
+Two caveats. The balancer erases exactly this divergence at the top — which is
+why §5.5a exists, so it can be added back rather than lost. And **differential
+self-discharge** mimics capacity mismatch; the two separate because
+self-discharge divergence accumulates with *time* while capacity divergence
+accumulates with *throughput*, so regressing on both splits them — the same
+trick that separates balancing from capacity.
+
+#### 5.9.5 What this obliges the implementation to do
+
+- **Estimate `ε` and persist it** (§5.8's slow record). Without it, everything
+  above is just the JK with a nicer OCV table.
+- **Measure `ε` honestly at rest too.** §10's dead-band question decides whether
+  `BatCurrent` can even show a resting offset. If it clamps small currents to
+  zero, use the raw shunt-amplifier voltages at `0xD8`/`0xDA` — which is why
+  they are now in the config (§2.6).
+- **Carry σ(SOC) as a first-class output**, growing with time since the last
+  anchor and collapsing at each one. The CAN `0x355` value can then be reported
+  conservatively, and §5.7's fallback to the JK's own number triggers on a
+  number instead of a guess.
+- **Never re-seed from the plateau.** That is the §3.2 mistake. When confidence
+  is gone, say so; do not manufacture a value from a flat curve.
 
 ## 6. What it costs
 
 | Resource | Estimate | Notes |
 |---|---|---|
-| RAM | **≈ 2.2 KB** `.bss` | 32 cells × 52 B (capacity, SOC, resistance, 5 capacity accumulators, 2 resistance accumulators, counters) + two frame snapshots + module scalars |
+| RAM | **≈ 2.2 KB** `.bss` | sized for the JK's maximum 32 cells (these packs are 16S) × 52 B — capacity, SOC, resistance, 5 capacity accumulators, 2 resistance accumulators, counters — plus two frame snapshots and module scalars |
 | RAM placement | **main SRAM, not CCM** | CCM is ~92 % full and this is not hot. Main SRAM is ~86 KB of 128 KB used |
-| CPU | **< 50 µs per 1 Hz frame** | 32 × (OCV table lookup + two rank-1 regression updates) ≈ 2000 single-precision flops at 168 MHz with the FPU |
+| CPU | **< 50 µs per 1 Hz frame** | ≤ 32 × (OCV table lookup + two rank-1 regression updates) ≈ 2000 single-precision flops at 168 MHz with the FPU |
 | Flash | **6–8 KB** | application has ~97 KB of its 480 KB free |
 | Ext flash | one nvDb area, 16 KB suggested | ring + record, §5.8 |
-| Bus | **< 10 %** of the RS485 port at 1 Hz | §2.3 |
+| Bus | **≈ 2 %** for one BMS, 4 % for two | measured from the shipped config, [modbus.md](modbus.md) §11a.13. §2.3 has the per-transaction arithmetic |
 | New task | **none** | runs inside the existing Modbus subscriber callback, or on `mqttTask`-style deferral if the callback contract forbids the work |
 
 Nothing here is close to a limit. The scarce resource in this project is CCM,
@@ -863,16 +1206,27 @@ the MQTT bridge now has:
 | `pack_ocv.c` | OCV table + inverse lookup + temperature correction |
 | `pack_store.c` | the nvDb ring + record of §5.8 |
 
-**Frame coherence is the one contract to check.** The estimator needs all 32
-cell voltages *and* the current from the same transaction. The subscription
-surface delivers one `mbEvt_sample` per point plus an `mbEvt_txn` keyed by
-`{devOrd, planId, timeTableId}` (`App/Modbus/modbus.h:176-226`). The natural
-implementation accumulates samples and closes the frame on the matching
-`mbEvt_txn`. That requires the engine to raise every sample of a transaction
-before that transaction's `txn` event — **verify this against
-[modbus.md](modbus.md) §4 before committing to it**; if it does not hold, the
-frame boundary has to come from somewhere else and that is a design change,
-not an implementation detail.
+**Frame coherence — settled, and not the way this section first assumed.**
+`service_block` (`modbus_engine.c:314-346`) dispatches `mbEvt_txn` immediately
+after the wire returns and *then* decodes and emits the points. So **a txn is a
+LEADING marker, not a closing one**: everything between txn *N* and txn *N+1*
+belongs to txn *N*. Worse for the naive reading, **a transaction is a read
+block, not a device poll, and there is no end-of-sequence event at all** — one
+timer firing derives 1..N blocks and emits one txn each.
+
+That turns out not to matter, because of how the config was grouped: the **live
+table is exactly 8 points in one block, so it is exactly one transaction**, and
+current, voltage, SOC, remaining and the balancer fields therefore arrive
+atomically. Cells span three tables and are anyway skewed ~4–5 s by the JK's own
+scan (§5.5a).
+
+> **Strict whole-device coherence is neither achievable nor needed.** What a
+> consumer needs is a per-field timestamp and a stated skew budget. The one
+> group that must be coherent already is.
+
+[design_battery_pack.md](design_battery_pack.md) Part I §8 carries the same
+finding, and its Part II §10.4 is the API that acts on it — per-group ages
+rather than one age for a whole pack.
 
 Everything else is existing machinery:
 
@@ -888,9 +1242,9 @@ Everything else is existing machinery:
   inspection, matching `sysmon` and `nvdb`.
 - **`App/Data/telemetry.c`** is currently reserved with no producers or
   consumers, and this is plausibly what it was reserved for — but its
-  `sEnergyTelemetry` is inverter-shaped and has no room for 32 cells. Either
-  extend it with a separate pack structure or leave it alone; do not force the
-  pack model through a struct built for a Solis.
+  `sEnergyTelemetry` is inverter-shaped and has no room for per-cell data.
+  Either extend it with a separate pack structure or leave it alone; do not
+  force the pack model through a struct built for a Solis.
 
 ---
 
@@ -900,8 +1254,9 @@ The project already tests flash-shaped things host-native against a
 NOR-faithful mock. The same approach applies, and it is what makes this
 tractable without a board:
 
-1. **A synthetic pack model** in `tests/` — 32 cells with individual
-   capacities, resistances and an OCV table; a simulated 2 A active balancer;
+1. **A synthetic pack model** in `tests/` — 16 cells with individual
+   capacities, resistances and an OCV table; a simulated 2 A active balancer
+   that moves charge between the max and min cells as §2.5 describes;
    measurement quantisation (1 mV, 1 mA) and noise; a current-sensor offset
    knob. Drive it with recorded or synthesised solar-day current profiles.
    Assertions: converges to true `C_i` within X % after N simulated days;
@@ -924,9 +1279,9 @@ Each phase is useful on its own and none commits the next.
 
 | # | Phase | Delivers | Risk |
 |---|---|---|---|
-| 0 | **Observe.** Upload the extended config (§2.6 — already written, compiled host-side, not yet on a board), frames assembled and logged. Persist nothing, publish nothing, change no behaviour. | Answers every §10 hardware question, including the balancer efficiency `η` (§5.5). Data for the replay harness. | none |
+| 0 | **Observe.** Upload the extended config (§2.6 — already written, compiled host-side, not yet on a board), frames assembled and logged. Persist nothing, publish nothing, change no behaviour. | Answers every §10 hardware question, including the balancer efficiency `η` (§5.5a). Data for the replay harness. | none |
 | 1 | **Resistance and balancer telemetry.** §5.4 plus the `CellWireRes` array, plus balance source/sink/current/duty (§2.5) and the §2.6 fields, published to MQTT. | A real per-cell health signal and a visible balancer, immediately — no anchors, no persistence, no estimator. | low |
-| 2 | **Pack coulomb + anchors.** Shared integrator, anchor gate, pack SOC with confidence. Published alongside the JK's, not instead of it. | A comparable second opinion; proves the gate against a live pack. | low — nothing consumes it |
+| 2 | **Pack coulomb + anchors + offset.** Shared integrator, graded anchor gate, and the shared current-offset estimate of §5.9.2. Pack SOC with an explicit σ, published alongside the JK's, not instead of it. | A second opinion, and the offset number — the thing that actually bounds drift. Two anchors is the whole prerequisite. | low — nothing consumes it |
 | 3 | **Per-cell regression.** §5.2, §5.5, persistence. Per-cell capacity and SOH published. | The stated goal. | medium — balancer, §5.5 |
 | 4 | **Onto the control path.** CAN `0x355`/`0x351` from `Pack_GetState()`, gated on confidence with JK fallback. | The edge-controller win: CCL taper that stops the pack tripping OV. | **highest — a wrong number here drops the battery.** Requires a season of phase-2/3 agreement first |
 
@@ -936,50 +1291,73 @@ Each phase is useful on its own and none commits the next.
 
 **Hardware checks — all answerable in phase 0, most in minutes:**
 
-1. ~~`CellWireRes` LSB.~~ **Closed** — 1 mΩ per count, confirmed by the
-   firmware's own threshold arithmetic (§2.2). What remains is a sanity check
-   that live values sit inside the 5–260 mΩ band the firmware itself expects,
-   and that they are non-zero at all (they only update while the balancer
-   runs).
-2. **The second read.** Does the JK actually serve registers 120–145
+1. **The second read.** Does the JK actually serve registers 120–145
    (bytes `0xF0`–`0x123`)? The firmware's bound says yes; nothing has ever
    asked it. Everything in §2.6 depends on this one transaction working.
-3. **Is `ChargPWMDutyCycle` (`0xE0`) garbage over Modbus?** §2.5 — the
-   snapshot builder appears to skip it. Read it alongside `0xE2` while the
-   balancer runs; if `0xE0` is stale or nonsensical, that is a genuine vendor
-   firmware bug worth writing down.
-4. **Balancer topology and correction (§2.5, §5.5).** Log `BalanSta`,
-   `BalanCurrent`, both duty registers, `MaxVolCellNbr`, `MinVolCellNbr`, all
-   32 cell voltages and `BatCurrent` at 1 Hz through a full absorption phase.
+2. **Is `ChargPWMDutyCycle` (`0xE0`) garbage over Modbus?** §2.5 — the
+   snapshot builder appears to skip it. **The most consequential unknown for
+   §5.5a**, because it shows the duty register is the
+   only direct observation of *when* charge is actually moving (`BalanSta`
+   stays non-zero between bursts, so it does not substitute). If `0xE0` is
+   dead, the high-side transfer has no direct measurement and must come from
+   charge conservation instead. Test: read `0xE0` and `0xE2` together at 1 Hz
+   through a balancing phase and check that `0xE0` goes non-zero while
+   `BalanSta == 2`.
+3. **Balancer topology and correction (§2.5, §5.5).** Log `BalanSta`,
+   `BalanCurrent`, both duty registers, `MaxVolCellNbr`, `MinVolCellNbr`, every
+   cell voltage and `BatCurrent` at 1 Hz through a full absorption phase.
    Three things to extract:
-   - **cell↔cell or cell↔pack?** If the thirty non-selected cells drift
-     measurably *opposite* to the two selected ones, it is cell↔pack. If they
-     sit still, it is cell↔cell. A second tell: does `BatCurrent` show the
-     balance current when the pack is otherwise at rest?
-   - the transfer efficiency `η`;
+   - **cell↔cell or cell↔pack?** Genuinely open (§2.5) — two converter stages
+     on two timers at 60 kHz and 300 kHz, a millisecond-scale cell mux, and a
+     vendor description of flyback/capacitive cell-to-cell transfer that the
+     code does not contradict. Settle it by observation, not inference: over a
+     balancing phase, does the *common mode* of the non-selected cells move
+     against the two selected ones? If yes, charge routed through the
+     pack; if they sit still, it went cell to cell. §5.5a's estimator B
+     produces this as a by-product, so this costs no extra instrumentation.
+   - **The duty cycle**, by the sample-fraction method of §5.5a — and the
+     run-length distribution of `duty != 0`, which is what says whether the
+     1 Hz poll has phase-locked to the ~4–5 s scan pass. A locked poll makes
+     the duty estimate biased in a way no averaging removes.
+   - the transfer efficiency `η`, and hence α (§5.5a);
    - whether the max/min pair really is piecewise-constant over ~5 s.
-5. **Current zero-clamp.** Log `BatCurrent` at true rest for an hour. If it
-   reads exactly 0 always, there is a deadband, the offset is hidden inside
-   it, and the drift model in §5.2 is optimistic. Cross-check against the raw
-   shunt voltages at `0xD8`/`0xDA`, which should still move.
-6. **Current gain error.** Integrate a known charge (inverter-metered kWh, or
+   - **that cell voltages really are balancer-off readings** (§5.5a). Look for
+     a step in the balanced cell's reported voltage synchronised with
+     `BalanSta` changing — there should be none. If there is one of ~40 mV,
+     the anchor gate needs the lead-IR correction after all.
+4. **Current zero-clamp — the other first-order question, and the one §5.9
+   turns on.** Log
+   `BatCurrent` at true rest for an hour. If it reads exactly 0 always, there
+   is a dead-band and the resting offset is invisible in that register, which
+   removes the cheapest of the two ways to estimate `ε`. Cross-check against
+   the raw shunt voltages at `0xD8`/`0xDA`, which should still move — that is
+   what they were added to the config for. Note the anchor-pair method of
+   §5.9.2 works regardless, so a dead-band delays the offset estimate to the
+   second anchor rather than preventing it.
+5. **Current gain error.** Integrate a known charge (inverter-metered kWh, or
    a measured discharge) and compare against the JK's `SOCCycleCap` delta.
-7. **Cell voltage noise floor.** Standard deviation of a resting cell over an
-   hour — this sets `σ_V`, which sets every weight in §5.2.
+6. **Cell voltage noise floor.** Standard deviation of a resting cell over an
+   hour. This sets `σ_V` = 3 mV, the assumption every error budget in §4, §5.5a
+   and §5.9 rests on — and the one most likely to be wrong.
+7. **Balance-lead resistance sanity.** Live `CellWireRes` values should sit in
+   the 5–260 mΩ band the firmware itself expects (§2.2), and be non-zero at all
+   — they only update while the balancer runs.
 
 **Design questions:**
 
-8. **Modbus event ordering** (§7) — are all samples of a transaction raised
-   before its `txn` event? If not, where does the frame boundary come from?
-   Now slightly harder: a coherent frame spans **two** transactions (§2.1), so
-   the estimator must either tolerate the split or read only the first.
+8. ~~Modbus event ordering.~~ **Closed** — `mbEvt_txn` leads its samples
+   rather than closing them, a transaction is a read block rather than a device
+   poll, and there is no end-of-sequence event (§7). The frame boundary is
+   therefore "a txn for this device closes the previously open frame", and the
+   live table's 8 points in one block are already atomic.
 9. **Bus sharing.** Solis at 9600 and JK at 115200 on one pair is
    *expressible*; whether it is acceptable is
    [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md)
-   §5, still open, and phase 0's timing data is what should settle it. Note
-   the JK poll is now two transactions per second, not one.
-10. **Do we ever want to write to the JK?** After §5.5's rewrite, nothing on
-    the critical path needs it. Keep it that way.
+   §5, still open, and phase 0's timing data is what should settle it. The
+   shipped config costs 0.53 transactions/s for one BMS and 1.05 for two.
+10. **Do we ever want to write to the JK?** Nothing on the critical path needs
+    it (§5.5 option 3 is the only candidate, and it is the worst of the three).
+    Keep it that way.
 11. **Where the OCV table lives.** Proposed: its own uploaded JSON record —
     though `CellType` (§2.6) means the *chemistry* can be read from the pack
     rather than configured, so the record only has to hold the curve for each

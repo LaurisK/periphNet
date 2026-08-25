@@ -1,0 +1,17 @@
+# CubeMX 6.13 writes CRLF into every file it generates.  This repo has a mix
+# committed (27 CubeMX-owned files are CRLF, 13 are LF — whichever the last
+# writer happened to use), so a regeneration rewrites the LF ones end to end
+# and the real change disappears into a whole-file diff.  That is not
+# hypothetical: it is how a reverted WireGuard checksum fix went unnoticed.
+#
+# With this in place `git diff` normalises and shows only real changes.
+# `git status` may still mark a freshly regenerated file as modified until Git
+# refreshes its stat cache — trust `git diff`, not the status letter.
+#
+# To convert everything once and be rid of the mixture (its own commit, please,
+# it touches ~40 files):   git add --renormalize . && git commit
+* text=auto eol=lf
+
+*.bin  binary
+*.pnfw binary
+*.png  binary

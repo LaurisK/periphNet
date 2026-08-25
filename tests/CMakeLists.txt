@@ -181,6 +181,35 @@ target_include_directories(test_wg_conf PRIVATE
 )
 add_test(NAME wg_conf COMMAND test_wg_conf)
 
+# App/Pack: the battery pack module (docs/design_battery_pack.md).  pack_fsm.c
+# and pack_cfg.c are libc-only APPLICATION code, on the wg_conf.c precedent
+# and for the same reason — everything interesting is a pure function of
+# (previous condition, group ticks, now) or of the bytes of a config, so it is
+# testable here with no board, no RTOS and no flash.  §17: "defer the test
+# pack type; do not defer testability".
+#
+# THESE TESTS ARE EXPECTED TO FAIL: the module is scaffolding, and the suite
+# is the executable form of the contract it must grow into.
+add_executable(test_pack_fsm
+    test_pack_fsm.c
+    ${PROJECT_ROOT}/App/Pack/pack_fsm.c
+)
+target_include_directories(test_pack_fsm PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME pack_fsm COMMAND test_pack_fsm)
+
+add_executable(test_pack_cfg
+    test_pack_cfg.c
+    ${PROJECT_ROOT}/App/Pack/pack_cfg.c
+)
+target_include_directories(test_pack_cfg PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME pack_cfg COMMAND test_pack_cfg)
+
 # ==============================================================================
 # CppUTest suite (fetched from GitHub) — OFF by default.
 #
