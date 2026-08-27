@@ -97,6 +97,8 @@ static const char *const s_userNames[nvdbUser_last] = {
     [nvdbUser_wgCfg]            = "wgCfg",
     [nvdbUser_mqttCfg]          = "mqttCfg",
     [nvdbUser_triceUdpCfg]      = "triceUdpCfg",
+    [nvdbUser_packCfg]          = "packCfg",
+    [nvdbUser_packState]        = "packState",
 };
 
 /* Private function prototypes ----------------------------------------------*/

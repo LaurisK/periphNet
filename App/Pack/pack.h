@@ -18,11 +18,10 @@
  * been disconnected by something outside itself (§4); a borrowed pointer into
  * live state; a float.
  *
- * STATUS: SCAFFOLDING.  Every declaration below is the contract from
- * docs/design_battery_pack.md §10; no body behind it does the work yet.  Each
- * stub returns a defined failure so nothing can mistake it for an
- * implementation.  Where this header and that document disagree, the document
- * wins.
+ * STATUS: IMPLEMENTED, NOT YET WIRED IN -- App_DefaultTaskEntry does not
+ * call Func_Init/Func_Start, so nothing here runs on a board yet.  Every
+ * declaration below is the contract from docs/design_battery_pack.md §10.
+ * Where this header and that document disagree, the document wins.
  *
  * BOUNDARY (§9):
  *   - A consumer includes ONLY this header.  pack_type.h, pack_fsm.h and
@@ -37,6 +36,8 @@
 #define PACK_H_
 
 /* Includes -----------------------------------------------------------------*/
+
+#include "App/Func/func.h"
 
 #include <stdint.h>
 
@@ -103,6 +104,10 @@ typedef enum {
  * group by age_ms[].
  * ========================================================================== */
 
+/** No cell.  Staging is zeroed at bind, so a plain 0 sentinel would read as
+ *  "cell 0 is the balance source" — which is what it did. */
+#define PACK_CELL_NONE          0xFFu
+
 typedef enum {
     packCap_capacityAh      = 1u << 0,  /* remaining_mAh, capacity_mAh, soc  */
     packCap_learnedCapacity = 1u << 1,  /* capacity_mAh is MEASURED          */
@@ -117,6 +122,12 @@ typedef enum {
     packCap_cellEstimator   = 1u << 10, /* soc/soh/capacity are ESTIMATED
                                            here.  Reserved; no type sets it
                                            until the estimator lands         */
+    /* BIT 11, NOT 10.  This was added on 1u << 10, which cellEstimator above
+     * already held -- caught on hardware 2026-08-26.  Latent, because nothing
+     * produced either bit yet; but two capabilities sharing one bit means a
+     * consumer asking "can this pack report voltage limits" gets "yes" from
+     * an estimator.  tests/test_pack_fsm.c now asserts all bits are distinct. */
+    packCap_voltageLimits   = 1u << 11, /* charge/dischargeVoltLimit_mV      */
 } ePackCap;
 
 /* ==========================================================================
@@ -246,11 +257,24 @@ typedef struct {
     uint32_t        vendorAlarms[2];    /* the type's own raw words         */
     uint32_t        nameplate_mAh;      /* FROM CONFIGURATION, so valid even
                                            for a pack that never answered   */
-    uint32_t        groupsStale;        /* PACK_GRP_BIT set = past ITS budget.
-                                           Computed by the core, because the
-                                           budget is the core's and a
-                                           consumer must not need to know it */
-    uint32_t        age_ms[packGrp_last];   /* PACK_AGE_NEVER = never seen  */
+    /* PER-GROUP AGE, PURELY INFORMATIONAL.  PACK_AGE_NEVER = never seen.
+     *
+     * THERE IS NO PER-GROUP "STALE" VERDICT, deliberately.  A group's natural
+     * refresh period is a property of whatever transport plan reads it -- on a
+     * JK, of the Modbus plan the operator configured -- and this module has no
+     * way to know it.  Judging each group against a budget it invented made
+     * `charge_current_max` "stale" fifteen seconds after a read, when it is a
+     * SETTING that changes only when somebody writes it, and the pack was
+     * answering perfectly well the whole time.
+     *
+     * STALENESS IS A PROPERTY OF THE PACK, NOT OF ITS ATTRIBUTES: if the pack
+     * is talking, every register is being refreshed on its own schedule and
+     * carries its own age here.  `cond` is the verdict; these are the facts.
+     *
+     * A CONSUMER THAT AGGREGATES MUST FILTER ON `cond` FIRST -- summing the
+     * limits or the amp-hours of a pack that is not packCond_online is what
+     * gives a cluster phantom capacity from a battery that left the bus. */
+    uint32_t        age_ms[packGrp_last];
 
     /* --- packGrp_electrical ------------------------------------------- */
     uint32_t        voltage_mV;
@@ -261,6 +285,13 @@ typedef struct {
     uint32_t        capacity_mAh;       /* usable; nameplate unless
                                            packFlag_capacityLearnt          */
     /* --- packCap_currentLimits ---------------------------------------- */
+    /* THE OTHER HALF OF A PYLONTECH 0x351.  A cluster's first output frame
+     * carries charge voltage, charge current, discharge current AND
+     * discharge voltage; only the two currents were here, so the cluster
+     * could not have been written without a breaking change to this struct.
+     * Gated by packCap_voltageLimits, and members of packGrp_limits. */
+    uint32_t        chargeVoltLimit_mV;
+    uint32_t        dischargeVoltLimit_mV;
     uint32_t        chargeLimit_mA;
     uint32_t        dischargeLimit_mA;
 
@@ -306,8 +337,8 @@ typedef struct {
     uint16_t        leadRes_mOhm[PACK_CELLS_MAX];   /* packCap_leadResistance */
     uint16_t        balanceDuty_pm;     /* packCap_balancer                 */
     uint8_t         cellCount;          /* entries actually filled          */
-    uint8_t         balanceSrcIdx;      /* 0xFF = none                      */
-    uint8_t         balanceSinkIdx;     /* 0xFF = none                      */
+    uint8_t         balanceSrcIdx;      /* PACK_CELL_NONE = none            */
+    uint8_t         balanceSinkIdx;     /* PACK_CELL_NONE = none            */
     uint8_t         balanceActive;
 } sPackCells;
 
@@ -418,6 +449,12 @@ typedef struct {
     uint32_t cmdFailed;
     uint32_t cmdUnknown;    /* went stale mid-command — the one to watch     */
     uint32_t staleEvents;   /* online -> stale transitions                   */
+    uint32_t cmdRefused;    /* refused synchronously, before any wire
+                               traffic -- the counter that says consumers
+                               are asking for things this pack will not do */
+    uint32_t bindFailures;  /* instances that could not bind at all; pairs
+                               with ePackAbsentReason to answer "why is
+                               this pack absent"                          */
     uint32_t lateCompletes; /* a type answered AFTER the core gave up        */
     uint8_t  provisioned;
 } sPackStats;
@@ -431,9 +468,9 @@ typedef struct {
  *  count is exported rather than the enum so the two cannot drift. */
 #define PACK_EVT_COUNT     8u
 
-/** The shared task's post function.  Handed down at Pack_Init; the module
- *  never sees the queue or the task itself. */
-typedef void (*fFuncPostEvt)(uint16_t evtId, void *arg);
+/* The shared task's post function is fFuncPost, declared ONCE in
+ * App/Func/func.h and included above.  The module never sees the queue or the
+ * task itself, only its event-id base and this. */
 
 /* Exported functions -------------------------------------------------------*/
 
@@ -460,7 +497,34 @@ typedef void (*fFuncPostEvt)(uint16_t evtId, void *arg);
  * @note   Shared functionality task, at init.  May block briefly (bind walks
  *         a Modbus catalogue from flash).
  */
-int Pack_Init(uint16_t evtIdBase, fFuncPostEvt post);
+int Pack_Init(uint16_t evtIdBase, fFuncPost post);
+
+/**
+ * @brief  Dispatch one of the module's internal events.
+ *
+ *         FOR App/Func/func.c ONLY, like Pack_Init.  A consumer never calls
+ *         it and never learns what a local event id means: func.c strips its
+ *         base and hands over the remainder, so the shared task stays
+ *         ignorant of the module and the module stays ignorant of the queue.
+ *
+ * @param  localEvt - the id with func.c's base already subtracted
+ * @param  arg - the event's payload word; an instance index for most
+ * @note   Runs on the shared functionality task.  Must not block.
+ */
+void Pack_HandleEvent(uint16_t localEvt, void *arg);
+
+/**
+ * @brief  THE TICK.  Evaluate every instance's condition and expire command
+ *         deadlines.
+ *
+ *         FOR App/Func/func.c ONLY.  This is the half of the contract that
+ *         SILENCE needs: a pack that stops answering posts nothing, so the
+ *         only thing that can notice is something which runs anyway.
+ *
+ * @param  now_ms - the shared task's monotonic clock
+ * @note   Runs on the shared functionality task.  Must not block.
+ */
+void Pack_Tick(uint32_t now_ms);
 
 /**
  * @brief  How many pack instances the live configuration declares.
@@ -486,7 +550,7 @@ int Pack_FindByName(const char *name);
  * @brief  Copy one instance's whole state.
  *
  * COPIES, so there are no borrowed pointers and no lifetime rules.  age_ms[]
- * and groupsStale are computed inside the SAME critical section as the copy,
+ * are computed inside the SAME critical section as the copy,
  * so an age can never disagree with the value it describes.
  *
  * WHEN IMPLEMENTED: a field group whose capability is clear reads zero and
@@ -667,6 +731,40 @@ int Pack_ConfigErase(void);
  * @note   Any TASK, NOT an ISR — copies under the same critical section.
  */
 int Pack_Stats(sPackStats *out);
+
+/* --- names, for a UI ------------------------------------------------------
+ *
+ * Thin forwarders over pack_cfg.c's tables.  They exist so a consumer can
+ * render a type and parse a command name WITHOUT including pack_cfg.h, which
+ * is module-internal and which CMake rule 6 refuses (§9).  Rendering a pack
+ * and accepting a named command are ordinary consumer needs; reaching into
+ * the configuration parser to do it is not.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * @brief  The config key for an ePackTypeId ("jkbms", "pylontech").
+ * @param  typeId - ePackTypeId, e.g. sPackState.typeId
+ * @retval the key, or NULL when no such type
+ * @note   Pure.  Any task.
+ */
+const char *Pack_TypeName(uint8_t typeId);
+
+/**
+ * @brief  Map a command name ("chargeLimit", ...) to an ePackCmdId.
+ * @param  name - NUL-terminated
+ * @param  out - the id, written only on success
+ * @retval packErr_ok, packErr_notFound, packErr_badArg
+ * @note   Pure.  Any task.
+ */
+int Pack_CmdIdFromName(const char *name, ePackCmdId *out);
+
+/**
+ * @brief  The name for an ePackCmdId — the reverse of Pack_CmdIdFromName.
+ * @param  cmd - ePackCmdId
+ * @retval the name, or NULL when no such command
+ * @note   Pure.  Any task.
+ */
+const char *Pack_CmdName(ePackCmdId cmd);
 
 /**
  * @brief  Log one line per instance plus the counters — `pack status` on the

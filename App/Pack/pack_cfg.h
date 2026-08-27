@@ -17,8 +17,8 @@
  *
  * BOUNDARY: internal to App/Pack.  Nothing outside the module includes it.
  *
- * STATUS: SCAFFOLDING.  Signatures and the reject matrix are complete; the
- * bodies reject everything.
+ * STATUS: IMPLEMENTED and host-tested (tests/test_pack_cfg.c), including the
+ * reject matrix and an ASan/UBSan fuzz of the parser.
  */
 
 #ifndef PACK_CFG_H_
@@ -53,6 +53,11 @@ extern "C" {
 #define PACK_CFG_NAME_MAX_CHARS (PACK_NAME_LEN - 1u)
 
 /** Per-type defaults, applied when the document omits them (§12). */
+/* The widest current a `commands` domain may name, in AMPS.  It exists to
+ * keep the amps -> milliamps multiply inside int32_t; the per-type `ceiling`
+ * is what actually narrows a domain to something the hardware could accept. */
+#define PACK_CFG_MAX_AMPS         2000000
+
 #define PACK_CFG_JK_STALE_MS         15000u  /* three missed 5 s laps        */
 #define PACK_CFG_JK_CELL_STALE_MS    60000u  /* four missed 15 s cell laps   */
 #define PACK_CFG_PYLON_STALE_MS       5000u  /* five missed 1 Hz frames      */
@@ -63,7 +68,6 @@ extern "C" {
 typedef struct {
     uint32_t      nameplate_mAh;
     uint32_t      staleAfter_ms;
-    uint32_t      cellStaleAfter_ms;
     uint32_t      cmdAllow;             /* PACK_CMD_BIT set the operator
                                            permits.  Absent `commands` means
                                            EVERY command the type confirms,

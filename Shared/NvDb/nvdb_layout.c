@@ -23,12 +23,6 @@
 
 /* Private defines ----------------------------------------------------------*/
 
-/* The layout this image wants.  Applying it is the image's own business: it
- * takes effect on a board whose directory does not already record it, unless
- * an operator has taken ownership of the layout (NVDB_DIRFLAG_OPERATOR). */
-#define NVDB_TARGET_NAME        "periphnet"
-#define NVDB_TARGET_VER         1u
-
 /* The name the first adoption records, so an operator can see on the status
  * that the board came from the pre-nvDb map. */
 #define NVDB_LEGACY_NAME        "legacy"
@@ -102,6 +96,8 @@ static const uint32_t s_targetSizes[nvdbUser_last] = {
     [nvdbUser_wgCfg]            = EXT_FLASH_WG_CFG_SIZE,
     [nvdbUser_mqttCfg]          = 0x1000u,
     [nvdbUser_triceUdpCfg]      = 0x1000u,
+    [nvdbUser_packCfg]          = 0x1000u,   /*  4 KB, rarely written */
+    [nvdbUser_packState]        = 0x4000u,   /* 16 KB, reserved       */
 };
 
 /* The assumed-current layout (§4.4.1): the board's existing hand-assigned map

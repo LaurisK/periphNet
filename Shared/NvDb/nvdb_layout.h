@@ -29,6 +29,15 @@ extern "C" {
 
 #define NVDB_LAYOUT_NAME_LEN    16u
 
+/* The layout THIS IMAGE wants.  Exported because it is the layout's outward
+ * identity — NvDb_GetStatus reports both — and because a test that pins a
+ * literal version breaks on every legitimate bump instead of tracking it.
+ * Applying it is the image's own business: it takes effect on a board whose
+ * directory does not already record it, unless an operator has taken
+ * ownership (NVDB_DIRFLAG_OPERATOR). */
+#define NVDB_TARGET_NAME        "periphnet"
+#define NVDB_TARGET_VER         2u
+
 /* ==========================================================================
  * Mode and status
  * ========================================================================== */

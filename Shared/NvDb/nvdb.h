@@ -93,6 +93,15 @@ typedef enum {
     nvdbUser_mqttCfg,           /* broker + topic prefix — RAM-only today   */
     nvdbUser_triceUdpCfg,       /* Trice UDP destination — RAM-only today   */
 
+    /* Battery pack module.  TWO users, not one, and not one per pack: this
+     * header's own rule is that separable concerns get separate users, and
+     * these differ in size, lifecycle and in when each should be wiped.
+     * packState is RESERVED — nothing writes it until the per-cell estimator
+     * lands — and reserving it now costs one enum value that could never be
+     * inserted later (docs/design_battery_pack.md §14). */
+    nvdbUser_packCfg,           /* the uploaded pack configuration          */
+    nvdbUser_packState,         /* per-pack learned state — reserved        */
+
     nvdbUser_last               /* sentinel — a count, never stored         */
 } eNvDbUser;
 

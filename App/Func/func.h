@@ -36,9 +36,11 @@
  * it exists to enforce.  The receive carries FUNC_TICK_MS, exactly as
  * modbus_engine.c:459-465 established.
  *
- * STATUS: SCAFFOLDING.  NO TASK IS CREATED, nothing registers with sysmon,
- * and Func_Init is not called from App_DefaultTaskEntry.  Nothing runs on a
- * board yet.
+ * STATUS: IMPLEMENTED, NOT YET WIRED IN.  Func_Init creates the task and
+ * registers it with sysmon; Func_Start then brings the clients up ON that
+ * task.  What is still missing is the call site: App_DefaultTaskEntry does
+ * not call either, so nothing in this module runs on a board yet and the
+ * linker garbage-collects all of it.
  */
 
 #ifndef FUNC_H_

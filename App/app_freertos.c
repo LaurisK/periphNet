@@ -19,6 +19,8 @@
 #include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
 #include "App/Modbus/modbus.h"
+#include "App/Func/func.h"
+#include "App/Pack/pack_types.h"
 #include "App/Rs485/rs485_port.h"
 #include "App/Test/modbus_test_port.h"
 #include "App/Fwu/fwu_control.h"
@@ -227,6 +229,29 @@ void App_DefaultTaskEntry(void)
      * W25Q128_Init, which ran above. */
     if (Modbus_Init() != 0) {
         TRice("Modbus: init failed\n");
+    }
+
+    /* Battery packs, on the shared functionality task.
+     *
+     * ORDER MATTERS TWICE.  Types must be registered before Pack_Init runs,
+     * or their instances come up packWhy_noType; and Pack_Init walks the
+     * Modbus device catalogue to resolve a bind token, so Modbus_Init must
+     * have happened -- it did, just above.
+     *
+     * Func_Init only creates the task.  Func_Start posts the event that
+     * brings the clients up ON that task, deliberately: a bind is flash I/O
+     * and belongs there rather than on defaultTask
+     * (docs/design_battery_pack.md §13). */
+    if (Func_Init() != 0) {
+        TRice("err:Pack: shared task init failed\n");
+    } else {
+        if (PackJkBms_Register() != 0) {
+            TRice("err:Pack: jkbms register failed\n");
+        }
+        if (PackPylontech_Register() != 0) {
+            TRice("err:Pack: pylontech register failed\n");
+        }
+        (void)Func_Start();
     }
 
     /* Hand the Ethernet netif back to the ETH DMA's checksum offload.

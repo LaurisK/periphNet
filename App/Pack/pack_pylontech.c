@@ -1,156 +1,185 @@
 /*
  * pack_pylontech.c
  *
- * Pack type: a Pylontech-speaking pack over CAN — a PUSH type
- * (docs/design_battery_pack.md §11.2).  A Dyness Powerbrick speaks it.
+ * Pack type: a Pylontech-speaking battery on CAN — the PUSH side of the type
+ * contract (docs/design_battery_pack.md §11.2).  A Dyness Powerbrick speaks
+ * this dialect.
  *
- * NO CAN WIRING IS PRESENT AND NONE MAY BE ADDED HERE YET.
- * App/Can/bms_reader.c:158 already defines the single weak
- * HAL_CAN_RxFifo0MsgPendingCallback; a second definition is a link error, and
- * "whoever wins" is not a design.  THIS TYPE IS BLOCKED until App/Can grows
- * ONE RX dispatcher — Can_RxSubscribe(id, mask, cb, ctx) — that owns the
- * callback and fans out to bms_reader and to this file.  A prerequisite, not
- * a detail (§16 item 5).
+ * IT CANNOT BIND YET, AND THAT IS THE HONEST STATE RATHER THAN A STUB.
+ * App/Can/bms_reader.c:158 defines the single weak
+ * HAL_CAN_RxFifo0MsgPendingCallback, and a second definition of a weak symbol
+ * is a link error — "whoever wins" is not a design.  So this type registers
+ * its blueprint, parses its bind token, and refuses to bind with a stated
+ * reason until App/Can grows one RX dispatcher that owns the callback and
+ * fans out to bms_reader and to this file (§16 item 5).
  *
- * WHEN THAT EXISTS, this type accumulates into staging from the CAN RX path
- * and publishes when its rxMask completes, or when tick() finds a frame set
- * older than 1.2 s.  It reads the PACKED FRAME STRUCTS in pylontech.h and
- * NEVER touches sPylonBatteryData, whose fields are floats and which is a
- * display struct (§16 item 6).
+ * The core maps that refusal to packWhy_typeUnavailable, which is distinct
+ * from packWhy_noType precisely for this case: the operator's configuration
+ * is correct and the firmware is the limitation.
  *
- * IT MAY NOT TAKE A LOCK (§9), and here the ban is load-bearing rather than
- * theoretical: this exact code runs in an ISR.  PackType_Publish is the one
- * function that knows there are two contexts, and it is the core's.
- *
- * CAPACITY IS ABSENT FROM THE IMPLEMENTED FRAME SET — sPylonBatteryData has
- * no capacity field and 0x35F is unimplemented — so an instance of this type
- * advertises NO packCap_capacityAh.  That is precisely why nameplate_mAh is
- * always valid in sPackState: it comes from configuration, not from the wire.
- *
- * STILL OPEN (§18 item 2, deferred by decision until the hardware arrives):
- * which Pylontech dialect the Dyness speaks, whether it accepts any inbound
- * command, and whether several packs are distinguishable on one bus.  The
- * last one decides maxInstances, which is set to 1 below as the SAFE reading:
- * a transport that cannot distinguish two of its packs says so HERE rather
- * than letting a config declare three of them and having them overwrite each
- * other.
- *
- * STATUS: SCAFFOLDING.  Every callback refuses.
+ * Deliberately does NOT include pylontech.h yet.  When the dispatcher lands
+ * this file will parse the PACKED FRAME STRUCTS into integers directly and
+ * never touch sPylonBatteryData, whose fields are floats — no float crosses
+ * this API, and none is created behind it.
  */
 
 /* Includes -----------------------------------------------------------------*/
 
 #include "App/Pack/pack_type.h"
+#include "App/Pack/pack_types.h"
+#include "App/Pack/pack_cfg.h"
 
-#include <stddef.h>
+#include "trice.h"
 
-/* Private defines ----------------------------------------------------------*/
+#include <stdlib.h>
+#include <string.h>
 
-#define PACK_PYLON_UNUSED(x)   ((void)(x))
+/* Private types ------------------------------------------------------------*/
+
+typedef struct {
+    uint16_t nodeId;
+    uint8_t  used;
+} sPylonInst;
+
+/* Private variables --------------------------------------------------------*/
+
+static sPylonInst s_pylon[PACK_MAX];
 
 /* Private function prototypes ----------------------------------------------*/
 
 static int  Bind(const sPackBindInfo *info, sPackBindResult *res);
 static int  Unbind(uint8_t idx);
 static int  Submit(uint8_t idx, const sPackCommand *cmd, uint32_t timeout_ms);
-static void Tick(uint32_t now_ms);
-
-/* Private variables --------------------------------------------------------*/
+static void Tick(uint8_t idx, uint32_t now_ms);
 
 /**
- * The blueprint.  No packCap_capacityAh, no cell detail, no learned capacity:
- * the implemented frame set carries pack-level numbers only, which is also
- * why the per-cell estimator can never run behind this type.  cmdsMax is 0
- * until §18 item 2 is answered — advertising a command whose acceptance is
- * unknown is the §16-item-10 failure.
+ * The blueprint.
+ *
+ * capsMax is what an instance COULD offer once the dispatcher exists, and it
+ * is deliberately short of the JK's: **capacity in amp-hours is absent from
+ * the Pylontech frame set as implemented** — sPylonBatteryData has no capacity
+ * field and 0x35F is unimplemented — so a consumer gets nameplate_mAh from
+ * configuration and nothing else, which is exactly why nameplate is always
+ * valid (§5, §6).
+ *
+ * cmdsMax is ZERO: nothing inbound is accepted in this dialect as
+ * implemented.  §18 item 2 is an open question, not a guess made here.
+ *
+ * maxInstances is ONE: bms_reader.c's acceptance filter takes 0x350-0x35F with
+ * no node discrimination at all, so two Pylontech packs on one bus are
+ * indistinguishable.  A transport that cannot tell its packs apart says so
+ * HERE, rather than letting a config declare three and having them overwrite
+ * each other.
  */
 static const sPackType s_pylontechType = {
-    .name                     = "pylontech",
-    .id                       = packType_pylontech,
-    .capsMax                  = (uint32_t)packCap_soh |
-                                (uint32_t)packCap_temperatures |
-                                (uint32_t)packCap_currentLimits |
-                                (uint32_t)packCap_switchState |
-                                (uint32_t)packCap_cellSummary,
-    .cmdsMax                  = 0u,
-    .defaultStaleAfter_ms     = 5000u,      /* five missed 1 Hz frames      */
-    .defaultCellStaleAfter_ms = 60000u,
-    .maxInstances             = 1u,
-    .bind                     = Bind,
-    .unbind                   = Unbind,
-    .submit                   = Submit,
-    .tick                     = Tick,
+    .name                    = "pylontech",
+    .id                      = packType_pylontech,
+    .capsMax                 = (uint32_t)packCap_temperatures  |
+                               (uint32_t)packCap_currentLimits |
+                               (uint32_t)packCap_switchState   |
+                               (uint32_t)packCap_soh,
+    .cmdsMax                 = 0u,   /* accepts nothing inbound              */
+    .defaultStaleAfter_ms     = PACK_CFG_PYLON_STALE_MS,
+    .ceiling                 = NULL,
+    .ceilingCount            = 0u,
+    .maxInstances            = 1u,
+    .bind                    = Bind,
+    .unbind                  = Unbind,
+    .submit                  = Submit,
+    .tick                    = Tick,
 };
 
 /* Private functions --------------------------------------------------------*/
 
-/**
- * @brief  Parse bindKey "can:<nodeId>" and register the node filter with the
- *         CAN RX dispatcher.
- * @retval packErr_notSupported (STUB, and correct until the dispatcher of
- *         §16 item 5 exists).  The instance stays packCond_absent with
- *         caps = 0.
- * @note   Shared func task only.
- */
+/** "can:<nodeId>".  A CAN node id is a PROTOCOL ADDRESS, not a position in
+ *  anyone's array — which is the whole reason bind tokens name physical
+ *  addresses (§12). */
+static int parse_bind(const char *bindKey, uint16_t *nodeId)
+{
+    const char *colon;
+    long        v;
+
+    if (bindKey == NULL) {
+        return -1;
+    }
+    colon = strchr(bindKey, ':');
+    if ((colon == NULL) || (strncmp(bindKey, "can", 3) != 0) ||
+        ((colon - bindKey) != 3)) {
+        return -1;
+    }
+    v = strtol(colon + 1, NULL, 0);
+    if ((v < 0) || (v > 0xFFFF)) {
+        return -1;
+    }
+    *nodeId = (uint16_t)v;
+    return 0;
+}
+
 static int Bind(const sPackBindInfo *info, sPackBindResult *res)
 {
-    PACK_PYLON_UNUSED(info);
+    uint16_t nodeId = 0u;
 
-    if (NULL != res) {
-        res->caps       = 0u;
-        res->cmds       = 0u;
-        res->bounds     = NULL;
-        res->boundCount = 0u;
+    if ((info == NULL) || (res == NULL) || (info->idx >= PACK_MAX)) {
+        return packErr_badArg;
     }
+
+    /* The token is checked even though the bind cannot succeed, so a
+     * malformed one is reported as malformed rather than being hidden behind
+     * the missing dispatcher. */
+    if (parse_bind(info->bindKey, &nodeId) != 0) {
+        /* THE OPERATOR'S CONFIG is wrong here, not the firmware -- say so,
+         * rather than letting this be relabelled "type unavailable". */
+        res->why = (uint8_t)packWhy_noBinding;
+        TRice("[Pack] pylontech: bad bind token\n");
+        return packErr_badArg;
+    }
+
+    s_pylon[info->idx].nodeId = nodeId;
+    s_pylon[info->idx].used   = 0u;
+
+    /* THE PREREQUISITE, not a stub.  Until App/Can owns one RX dispatcher
+     * this type has no way to receive a frame, and advertising capabilities
+     * it cannot deliver is how a consumer learns to distrust the API. */
+    res->why = (uint8_t)packWhy_typeUnavailable;
+    TRice("[Pack] pylontech node %u: no CAN RX dispatcher, cannot bind\n",
+          (unsigned)nodeId);
     return packErr_notSupported;
 }
 
-/**
- * @brief  Drop the CAN RX subscription.
- * @retval packErr_notSupported (STUB)
- * @note   Shared func task only.
- */
 static int Unbind(uint8_t idx)
 {
-    PACK_PYLON_UNUSED(idx);
-    return packErr_notSupported;
+    if (idx >= PACK_MAX) {
+        return packErr_badArg;
+    }
+    (void)memset(&s_pylon[idx], 0, sizeof(s_pylon[idx]));
+    return packErr_ok;
 }
 
-/**
- * @brief  Would put a command on the CAN bus.  Refuses unconditionally: the
- *         blueprint advertises cmdsMax = 0, so the core refuses first and
- *         this is never reached — belt and braces, because a type that could
- *         be reached with an unadvertised command is one that has to re-check
- *         bounds, and re-checking is expressly forbidden.
- * @retval packErr_notSupported
- * @note   Shared func task only.
- */
 static int Submit(uint8_t idx, const sPackCommand *cmd, uint32_t timeout_ms)
 {
-    PACK_PYLON_UNUSED(idx);
-    PACK_PYLON_UNUSED(cmd);
-    PACK_PYLON_UNUSED(timeout_ms);
+    (void)idx;
+    (void)cmd;
+    (void)timeout_ms;
+
+    /* cmdsMax is 0, so the core refuses every command before it reaches
+     * here.  This is the belt to that braces. */
     return packErr_notSupported;
 }
 
-/**
- * @brief  Close a frame set that stopped arriving (older than 1.2 s) and
- *         publish what did arrive, naming ONLY the groups it actually filled
- *         so a partial delivery stays visible.
- * @note   Shared func task, ~4 Hz.  MUST NOT BLOCK.
- */
-static void Tick(uint32_t now_ms)
+static void Tick(uint8_t idx, uint32_t now_ms)
 {
-    PACK_PYLON_UNUSED(now_ms);
+    (void)idx;
+    (void)now_ms;
+
+    /* WHEN THE DISPATCHER LANDS this is where a push type closes a partial
+     * frame set that stopped arriving: publish when rxMask completes, or when
+     * the tick finds an incomplete set older than ~1.2 s.  A sticky rxMask
+     * that never completes because a frame is simply absent from the dialect
+     * is why the timeout half has to exist at all. */
 }
 
 /* Exported functions -------------------------------------------------------*/
 
-/**
- * @brief  Register the pylontech blueprint.
- * @retval whatever PackType_Register returned
- * @note   Shared func task, at init.  Never blocks.
- */
 int PackPylontech_Register(void)
 {
     return PackType_Register(&s_pylontechType);

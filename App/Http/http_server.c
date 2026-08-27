@@ -28,6 +28,7 @@
 #include "usbd_cdc.h"
 #include "App/Modbus/modbus.h"
 #include "App/Modbus/modbus_trice_sink.h"
+#include "App/Pack/pack.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -855,6 +856,32 @@ static void handle_nvdb_layout_delete(struct netconn *conn)
  * Deliberately not a search of req_buf: that holds the headers too, and a
  * client with the word in a User-Agent would otherwise trigger a scan of the
  * whole medium. */
+/** `?key=N` from the request line, or @p dflt when absent or malformed.
+ *  Bounded to the request line like query_has, so a header cannot supply it. */
+static int query_int(const char *key, int dflt)
+{
+    const char *eol = strpbrk(req_buf, "\r\n");
+    const char *q   = strchr(req_buf, '?');
+    const char *hit;
+
+    if ((q == NULL) || ((eol != NULL) && (q > eol))) {
+        return dflt;
+    }
+    hit = strstr(q, key);
+    if ((hit == NULL) || ((eol != NULL) && (hit >= eol))) {
+        return dflt;
+    }
+    hit += strlen(key);
+    if (*hit != '=') {
+        return dflt;
+    }
+    hit++;
+    if ((*hit < '0') || (*hit > '9')) {
+        return dflt;
+    }
+    return atoi(hit);
+}
+
 static bool query_has(const char *key)
 {
     const char *eol = strpbrk(req_buf, "\r\n");
@@ -2003,6 +2030,291 @@ static void wg_status_json(char *buf, size_t sz)
         peerStats);
 }
 
+
+/* ==========================================================================
+ * Battery packs (docs/design_battery_pack.md §10)
+ *
+ * READ-ONLY except for the configuration routes.  There is deliberately no
+ * generic write-through: a command is a named, capability-gated, bounded
+ * thing or it is nothing (§16 item 1).
+ * ========================================================================== */
+
+#define PACK_STATUS_JSON_CAP    4096u
+#define PACK_CELLS_JSON_CAP     2048u
+
+/** GET /api/pack/status — every pack, plus the module's own counters. */
+static void handle_pack_status(struct netconn *conn)
+{
+    char    *js;
+    uint32_t n = 0u;
+    uint8_t  i;
+    sPackStats stats;
+
+    js = (char *)pvPortMalloc(PACK_STATUS_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    (void)Pack_Stats(&stats);
+
+    n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+        "{\"provisioned\":%s,\"count\":%d,"
+        "\"stats\":{\"updates\":%u,\"stale\":%u,\"bindFailures\":%u,"
+        "\"cmdAccepted\":%u,\"cmdOk\":%u,\"cmdFailed\":%u,"
+        "\"cmdUnknown\":%u,\"cmdRefused\":%u,\"lateCompletes\":%u},"
+        "\"packs\":[",
+        stats.provisioned ? "true" : "false", Pack_Count(),
+        (unsigned)stats.updates, (unsigned)stats.staleEvents,
+        (unsigned)stats.bindFailures, (unsigned)stats.cmdAccepted,
+        (unsigned)stats.cmdOk, (unsigned)stats.cmdFailed,
+        (unsigned)stats.cmdUnknown, (unsigned)stats.cmdRefused,
+        (unsigned)stats.lateCompletes);
+
+    for (i = 0u; i < PACK_MAX; i++) {
+        sPackState st;
+        uint32_t   g;
+        int        first = 1;
+
+        if (Pack_GetState(i, &st) != packErr_ok) {
+            continue;
+        }
+        if (n > (PACK_STATUS_JSON_CAP - 512u)) {
+            break;                      /* never overrun; report what fits */
+        }
+        n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+            "%s{\"idx\":%u,\"name\":\"%s\",\"type\":\"%s\","
+            "\"cond\":\"%s\",\"why\":%u,"
+            "\"caps\":%u,\"cmds\":%u,\"flags\":%u,"
+            "\"voltage_mV\":%u,\"current_mA\":%d,"
+            "\"soc_pm\":%u,\"soh_pm\":%u,"
+            "\"socConf_pm\":%u,\"sohConf_pm\":%u,"
+            "\"remaining_mAh\":%u,\"capacity_mAh\":%u,\"nameplate_mAh\":%u,"
+            "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
+            "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
+            "\"chargeSwitch\":%u,\"dischargeSwitch\":%u,"
+            "\"tempMin_dC\":%d,\"tempMax_dC\":%d,"
+            "\"cellMin_mV\":%u,\"cellMax_mV\":%u,"
+            "\"cellMinIdx\":%u,\"cellMaxIdx\":%u,"
+            "\"alarms\":%u,\"vendorAlarms\":[%u,%u],"
+            "\"age_ms\":[",
+            (i == 0u) ? "" : ",",
+            (unsigned)st.idx, st.name, Pack_TypeName(st.typeId),
+            (st.cond == (uint8_t)packCond_online) ? "online" :
+            (st.cond == (uint8_t)packCond_stale)  ? "stale" : "absent",
+            (unsigned)st.why,
+            (unsigned)st.caps, (unsigned)st.cmds, (unsigned)st.flags,
+            (unsigned)st.voltage_mV, (int)st.current_mA,
+            (unsigned)st.soc_pm, (unsigned)st.soh_pm,
+            (unsigned)st.socConf_pm, (unsigned)st.sohConf_pm,
+            (unsigned)st.remaining_mAh, (unsigned)st.capacity_mAh,
+            (unsigned)st.nameplate_mAh,
+            (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,
+            (unsigned)st.chargeVoltLimit_mV,
+            (unsigned)st.dischargeVoltLimit_mV,
+            (unsigned)st.chargeSwitch, (unsigned)st.dischargeSwitch,
+            (int)st.tempMin_dC, (int)st.tempMax_dC,
+            (unsigned)st.cellMin_mV, (unsigned)st.cellMax_mV,
+            (unsigned)st.cellMinIdx, (unsigned)st.cellMaxIdx,
+            (unsigned)st.alarms,
+            (unsigned)st.vendorAlarms[0], (unsigned)st.vendorAlarms[1]);
+
+        /* PER-GROUP AGES.  A consumer applies its own staleness policy, and
+         * on a JK the cell group runs 4-5 s behind the electrical one by
+         * construction -- one age per pack would be a lie (§3). */
+        for (g = 0u; g < (uint32_t)packGrp_last; g++) {
+            if (st.age_ms[g] == PACK_AGE_NEVER) {
+                n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+                                        "%snull", first ? "" : ",");
+            } else {
+                n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+                                        "%s%u", first ? "" : ",",
+                                        (unsigned)st.age_ms[g]);
+            }
+            first = 0;
+        }
+        n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n, "]}");
+    }
+
+    (void)snprintf(&js[n], PACK_STATUS_JSON_CAP - n, "]}");
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
+/** GET /api/pack/cells?idx=N — cell detail, where the type has it. */
+static void handle_pack_cells(struct netconn *conn, uint8_t idx)
+{
+    sPackCells cl;
+    char      *js;
+    uint32_t   n = 0u;
+    uint8_t    c;
+    int        r;
+
+    r = Pack_GetCells(idx, &cl);
+    if (r == packErr_notSupported) {
+        /* A capability that is absent is not an error in the pack -- this
+         * type simply does not report cells (a Pylontech-speaking pack never
+         * will).  Say which it is. */
+        send_json(conn, "404 Not Found",
+                  "{\"error\":\"this pack type reports no cell detail\"}");
+        return;
+    }
+    if (r != packErr_ok) {
+        send_json(conn, "404 Not Found", "{\"error\":\"no such pack\"}");
+        return;
+    }
+
+    js = (char *)pvPortMalloc(PACK_CELLS_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+        "{\"idx\":%u,\"cellCount\":%u,\"age_ms\":%u,"
+        "\"balance\":{\"active\":%u,\"current_mA\":%d,\"duty_pm\":%u,"
+        "\"srcIdx\":%d,\"sinkIdx\":%d},\"cells\":[",
+        (unsigned)idx, (unsigned)cl.cellCount, (unsigned)cl.age_ms,
+        (unsigned)cl.balanceActive, (int)cl.balanceCurrent_mA,
+        (unsigned)cl.balanceDuty_pm,
+        (cl.balanceSrcIdx  == PACK_CELL_NONE) ? -1 : (int)cl.balanceSrcIdx,
+        (cl.balanceSinkIdx == PACK_CELL_NONE) ? -1 : (int)cl.balanceSinkIdx);
+
+    for (c = 0u; (c < cl.cellCount) && (n < (PACK_CELLS_JSON_CAP - 64u)); c++) {
+        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+                                "%s{\"mV\":%u,\"leadRes_mOhm\":%u}",
+                                (c == 0u) ? "" : ",",
+                                (unsigned)cl.cell_mV[c],
+                                (unsigned)cl.leadRes_mOhm[c]);
+    }
+    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]}");
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
+/** Report a pack config parse failure the way the Modbus one does: point at
+ *  the offending pack and field rather than saying "invalid". */
+static void send_pack_cfg_result(struct netconn *conn,
+                                 const sPackCfgResult *res, int applied)
+{
+    char body[256];
+
+    if (res->ok != 0) {
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":true,\"packs\":%d,\"applied\":%s}",
+                       Pack_Count(), applied ? "true" : "false");
+        send_json(conn, "200 OK", body);
+        return;
+    }
+    /* POINT AT THE OFFENDING PACK AND KEY, as the Modbus compiler does --
+     * "invalid" is not a diagnosis an operator can act on. */
+    (void)snprintf(body, sizeof(body),
+                   "{\"ok\":false,\"pack\":%d,\"field\":\"%s\","
+                   "\"reason\":\"%s\"}",
+                   res->packIdx, res->field, res->reason);
+    send_json(conn, "422 Unprocessable Entity", body);
+}
+
+/** POST /api/pack/config[/verify] — upload a pack configuration.
+ *
+ *  Verify and apply share ONE parser and one result struct, so there is never
+ *  a second validator that can disagree with the first (§10.10). */
+static void handle_pack_cfg_post(struct netconn *conn, sConnStream *s,
+                                 int apply)
+{
+    uint32_t       content_length = parse_content_length(req_buf);
+    sPackCfgResult res;
+    int            r;
+
+    if ((content_length == 0u) || (content_length > 16u * 1024u)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required (max 16 KB)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    sBodySource src = { s, content_length };
+    (void)memset(&res, 0, sizeof(res));
+
+    r = apply ? Pack_ConfigApply(body_source, &src, &res)
+              : Pack_ConfigVerify(body_source, &src, &res);
+
+    if (r == packErr_busy) {
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"a configuration is already being parsed\"}");
+        return;
+    }
+    if ((r != packErr_ok) && (res.ok != 0)) {
+        /* Parsed cleanly but could not be stored. */
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"could not persist the configuration\"}");
+        return;
+    }
+    send_pack_cfg_result(conn, &res, apply);
+}
+
+/** Accumulate the exported document into a fixed buffer. */
+typedef struct {
+    char    *buf;
+    uint32_t cap;
+    uint32_t len;
+} sPackExportSink;
+
+static int pack_http_sink(void *ctx, const char *data, uint32_t len)
+{
+    sPackExportSink *sk = (sPackExportSink *)ctx;
+
+    if ((sk->len + len) >= sk->cap) {
+        return -1;                      /* refuse rather than truncate */
+    }
+    (void)memcpy(&sk->buf[sk->len], data, len);
+    sk->len += len;
+    return (int)len;
+}
+
+/** GET /api/pack/config — the active configuration, re-serialised.
+ *
+ *  Data-faithful, not byte-identical: what comes back out must parse to an
+ *  identical sPackCfg, which is what the round-trip test asserts. */
+static void handle_pack_cfg_get(struct netconn *conn)
+{
+    char           *body;
+    sPackExportSink sk;
+
+    body = (char *)pvPortMalloc(PACK_CELLS_JSON_CAP);
+    if (body == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    sk.buf = body;
+    sk.cap = PACK_CELLS_JSON_CAP;
+    sk.len = 0u;
+
+    if (Pack_ConfigExport(pack_http_sink, &sk) != packErr_ok) {
+        vPortFree(body);
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"export failed\"}");
+        return;
+    }
+    body[sk.len] = '\0';
+    send_json(conn, "200 OK", body);
+    vPortFree(body);
+}
+
+/** DELETE /api/pack/config — the board becomes unprovisioned. */
+static void handle_pack_cfg_delete(struct netconn *conn)
+{
+    if (Pack_ConfigErase() != packErr_ok) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"erase failed\"}");
+        return;
+    }
+    /* THERE IS NO BUILT-IN DEFAULT, so there is nothing to reset *to*: a pack
+     * configuration describes hardware this board may not have. */
+    send_json(conn, "200 OK",
+              "{\"ok\":true,\"provisioned\":false}");
+}
+
 static void handle_wg_status(struct netconn *conn)
 {
     wg_status_json(resp_buf, sizeof(resp_buf));
@@ -2451,6 +2763,18 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_cfg_download(conn);
     } else if (route_is("DELETE /api/modbus/config ")) {
         handle_modbus_cfg_erase(conn);
+    } else if (route_is("GET /api/pack/status")) {
+        handle_pack_status(conn);
+    } else if (route_is("GET /api/pack/cells")) {
+        handle_pack_cells(conn, (uint8_t)query_int("idx", 0));
+    } else if (route_is("POST /api/pack/config/verify")) {
+        handle_pack_cfg_post(conn, &stream, 0);
+    } else if (route_is("POST /api/pack/config")) {
+        handle_pack_cfg_post(conn, &stream, 1);
+    } else if (route_is("GET /api/pack/config")) {
+        handle_pack_cfg_get(conn);
+    } else if (route_is("DELETE /api/pack/config")) {
+        handle_pack_cfg_delete(conn);
     } else if (route_is("GET /api/wg/status")) {
         handle_wg_status(conn);
     } else if (route_is("POST /api/wg/config")) {

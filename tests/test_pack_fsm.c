@@ -38,7 +38,35 @@
 
 static void test_layout_is_as_budgeted(void)
 {
-    TEST_ASSERT(sizeof(sPackState) == 132u);
+    /* 140 since the 2026-08-26 review added chargeVoltLimit_mV and
+     * dischargeVoltLimit_mV -- a cluster's first output frame (Pylontech
+     * 0x351) carries charge AND discharge VOLTAGE limits, and without them
+     * here the cluster could not have been written without a breaking
+     * change to this struct. */
+    /* NO TWO CAPABILITIES MAY SHARE A BIT.  packCap_voltageLimits was added
+     * on 1u << 10, which packCap_cellEstimator already held -- found on
+     * hardware, latent only because neither bit was produced yet. */
+    {
+        const uint32_t all[] = {
+            packCap_capacityAh, packCap_learnedCapacity, packCap_soh,
+            packCap_temperatures, packCap_currentLimits, packCap_switchState,
+            packCap_cellSummary, packCap_cellDetail, packCap_leadResistance,
+            packCap_balancer, packCap_cellEstimator, packCap_voltageLimits,
+        };
+        uint32_t seen = 0u;
+        unsigned i;
+
+        for (i = 0u; i < (sizeof(all) / sizeof(all[0])); i++) {
+            TEST_ASSERT((seen & all[i]) == 0u);   /* bit already taken */
+            seen |= all[i];
+        }
+    }
+
+    /* 136: +8 for chargeVoltLimit_mV / dischargeVoltLimit_mV (a cluster's
+     * first output frame, Pylontech 0x351, carries charge AND discharge
+     * VOLTAGE limits), -4 for groupsStale, removed when staleness became a
+     * property of the PACK rather than of each of its attributes. */
+    TEST_ASSERT(sizeof(sPackState) == 136u);
     TEST_ASSERT(sizeof(sPackCells) == 80u);
 
     /* Persisted in the pack configuration: never renumbered, append only. */
@@ -58,10 +86,19 @@ static void test_layout_is_as_budgeted(void)
     TEST_ASSERT(PACK_AGE_NEVER == 0xFFFFFFFFu);
 
     /* A command is one id, a capability set is a mask, and PACK_CMD_BIT is
-     * the only bridge between them. */
-    TEST_ASSERT(PACK_CMD_BIT(packCmd_chargeEnable) == 1u);
-    TEST_ASSERT(PACK_CMD_BIT(packCmd_dischargeLimit) == 16u);
-    TEST_ASSERT((int)packCmd_last == 5);
+     * the only bridge between them.  IDS START AT 1 (§10.3): with them dense
+     * from 0 the two-bit mask chargeEnable|dischargeEnable was 3, which was a
+     * valid id, so a mask passed where an id belongs commanded a third
+     * unrelated thing and satisfied every check. */
+    TEST_ASSERT((int)packCmd_undefined == 0);
+    TEST_ASSERT(PACK_CMD_BIT(packCmd_chargeEnable) == 2u);
+    TEST_ASSERT(PACK_CMD_BIT(packCmd_dischargeLimit) == 32u);
+    TEST_ASSERT((int)packCmd_last == 6);
+
+    /* The invariant that keeps the above true as commands are added.  It is a
+     * _Static_assert in pack.h; asserting it here documents WHY the ids are
+     * not dense from zero, where a reader will look for the reason. */
+    TEST_ASSERT(((1u << 1) | (1u << 2)) >= (uint32_t)packCmd_last);
     TEST_ASSERT((int)packGrp_last == 8);
 
     /* §13: the module's internal event ids are exactly the eight listed, and
@@ -77,7 +114,7 @@ static void test_starts_absent_never_seen(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
     TEST_ASSERT(fsm.cond == (uint8_t)packCond_absent);
 
@@ -96,7 +133,7 @@ static void test_absent_to_online_to_stale(void)
     ePackCondition from = packCond_last;
     ePackCondition to   = packCond_last;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
     /* A publish is EVIDENCE, not a transition: recording it must not move
      * the condition by itself. */
@@ -132,7 +169,7 @@ static void test_silence_produces_no_event_only_the_tick_fires(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     (void)PackFsm_NotePublish(&fsm, PACK_GRP_BIT(packGrp_electrical), 1000u);
     (void)PackFsm_Evaluate(&fsm, 1000u, NULL, NULL);
     TEST_ASSERT(fsm.cond == (uint8_t)packCond_online);
@@ -143,10 +180,7 @@ static void test_silence_produces_no_event_only_the_tick_fires(void)
                 == 3600000u);
     TEST_ASSERT(fsm.cond == (uint8_t)packCond_online);
 
-    /* GroupsStale is a query too, and it already knows the truth — which is
-     * why the condition transition genuinely needs its own decision point. */
-    TEST_ASSERT((PackFsm_GroupsStale(&fsm, 1000u + 3600000u) &
-                 PACK_GRP_BIT(packGrp_electrical)) != 0u);
+    /* A query never moves the condition -- only PackFsm_Evaluate does. */
     TEST_ASSERT(fsm.cond == (uint8_t)packCond_online);
 
     /* Only now. */
@@ -161,7 +195,7 @@ static void test_stale_never_decays_back_to_absent(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     (void)PackFsm_NotePublish(&fsm, PACK_GRP_BIT(packGrp_electrical), 1000u);
     (void)PackFsm_Evaluate(&fsm, 1000u, NULL, NULL);
     (void)PackFsm_Evaluate(&fsm, 1000u + STALE_MS + 1u, NULL, NULL);
@@ -185,7 +219,7 @@ static void test_liveness_without_a_measurement(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
     PackFsm_NoteLiveness(&fsm, 1, 500u);
     TEST_ASSERT(PackFsm_Evaluate(&fsm, 500u, NULL, NULL) == 1);
@@ -209,7 +243,7 @@ static void test_age_zero_is_not_never(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     (void)PackFsm_NotePublish(&fsm, PACK_GRP_BIT(packGrp_electrical), 7000u);
 
     /* Delivered this instant. */
@@ -227,7 +261,7 @@ static void test_partial_publish_leaves_unnamed_groups_untouched(void)
     sPackFsm fsm;
     uint32_t firstSeen;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
     firstSeen = PackFsm_NotePublish(&fsm,
                                     PACK_GRP_BIT(packGrp_electrical) |
@@ -249,52 +283,26 @@ static void test_partial_publish_leaves_unnamed_groups_untouched(void)
     TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_temperature, 9000u) ==
                 PACK_AGE_NEVER);
     TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_cells, 9000u) == PACK_AGE_NEVER);
-
-    /* A no-op publish is a no-op. */
-    TEST_ASSERT(PackFsm_NotePublish(&fsm, 0u, 12000u) == 0u);
-    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_electrical, 12000u) == 3000u);
 }
 
-/* The cell group has ITS OWN CLOCK: on a JK it runs 4-5 s behind the
- * electrical group and is judged against cellStaleAfter_ms, not staleAfter_ms.
- * A pack whose cells lag by 20 s is perfectly healthy. */
-static void test_cell_group_has_its_own_budget(void)
+/** A group never delivered reads PACK_AGE_NEVER, and that is the whole
+ *  report: there is no per-group "stale" verdict for it to be folded into.
+ *  PACK_AGE_NEVER must stay distinct from 0, which means "delivered, now". */
+static void test_never_delivered_reads_age_never(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
-    (void)PackFsm_NotePublish(&fsm,
-                              PACK_GRP_BIT(packGrp_electrical) |
-                              PACK_GRP_BIT(packGrp_cells), 1000u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
-    /* 20 s later: past the 15 s electrical budget, well inside the 60 s cell
-     * budget.  The electrical group is stale, the cell group is not. */
-    {
-        uint32_t stale = PackFsm_GroupsStale(&fsm, 1000u + 20000u);
-        TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_electrical)) != 0u);
-        TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_cells)) == 0u);
-    }
+    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_electrical, 0u) == PACK_AGE_NEVER);
+    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_charge, 5000u) == PACK_AGE_NEVER);
+    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_cells, 5000u) == PACK_AGE_NEVER);
 
-    /* 70 s later: both. */
-    {
-        uint32_t stale = PackFsm_GroupsStale(&fsm, 1000u + 70000u);
-        TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_electrical)) != 0u);
-        TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_cells)) != 0u);
-    }
-}
-
-static void test_never_delivered_counts_as_stale(void)
-{
-    sPackFsm fsm;
-    uint32_t stale;
-
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
-
-    stale = PackFsm_GroupsStale(&fsm, 0u);
-    TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_electrical)) != 0u);
-    TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_charge)) != 0u);
-    TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_cells)) != 0u);
-    TEST_ASSERT((stale & PACK_GRP_BIT(packGrp_vendorInfo)) != 0u);
+    /* Delivering one group leaves every OTHER group never-seen -- a partial
+     * delivery stays visible instead of being smeared over the whole pack. */
+    (void)PackFsm_NotePublish(&fsm, PACK_GRP_BIT(packGrp_electrical), 1000u);
+    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_electrical, 1000u) == 0u);
+    TEST_ASSERT(PackFsm_AgeMs(&fsm, packGrp_cells, 1000u) == PACK_AGE_NEVER);
 }
 
 /* ============================================================================
@@ -310,7 +318,7 @@ static void test_confidence_cap_decays_before_stale(void)
     uint16_t atQuarter;
     uint16_t atHalf;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
 
     /* Never delivered: believe nothing. */
     TEST_ASSERT(PackFsm_ConfidenceCap_pm(&fsm, 0u) == 0u);
@@ -397,7 +405,7 @@ static void test_absent_reason_no_type(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     PackFsm_SetBindReason(&fsm, packWhy_noType);
 
     (void)PackFsm_Evaluate(&fsm, 1000u, NULL, NULL);
@@ -409,7 +417,7 @@ static void test_absent_reason_no_binding(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     /* bindKey resolved to zero devices, or to several. */
     PackFsm_SetBindReason(&fsm, packWhy_noBinding);
 
@@ -424,7 +432,7 @@ static void test_absent_reason_not_polled(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     PackFsm_SetBindReason(&fsm, packWhy_notPolled);
 
     (void)PackFsm_Evaluate(&fsm, 1000u, NULL, NULL);
@@ -437,7 +445,7 @@ static void test_absent_reason_no_reply_and_none_when_online(void)
 {
     sPackFsm fsm;
 
-    PackFsm_Init(&fsm, STALE_MS, CELL_STALE_MS, 0u);
+    PackFsm_Init(&fsm, STALE_MS, 0u);
     PackFsm_SetBindReason(&fsm, packWhy_none);   /* the binding is fine */
 
     (void)PackFsm_Evaluate(&fsm, 1000u, NULL, NULL);
@@ -527,8 +535,21 @@ static void test_a_capability_mask_cannot_pass_as_a_command_id(void)
 
     ctx_init(&ctx);
 
+    /* THE REGRESSION CASE.  With ids dense from 0 this mask was 3, which was
+     * a valid id (packCmd_chargeLimit) -- so a mask passed where an id belongs
+     * commanded a third, unrelated thing and satisfied every check.  Ids now
+     * start at 1 so the smallest two-bit mask (6) exceeds the largest id (5).
+     * design_battery_pack.md §10.3. */
     cmd.cmd = (ePackCmdId)(PACK_CMD_BIT(packCmd_chargeEnable) |
-                           PACK_CMD_BIT(packCmd_chargeLimit));   /* 9 */
+                           PACK_CMD_BIT(packCmd_dischargeEnable));  /* 6 */
+    TEST_ASSERT(PackFsm_ValidateCommand(&ctx, &cmd, 5000u) == packErr_badArg);
+
+    /* An all-zero sPackCommand is not a command. */
+    cmd.cmd = packCmd_undefined;
+    TEST_ASSERT(PackFsm_ValidateCommand(&ctx, &cmd, 5000u) == packErr_badArg);
+
+    cmd.cmd = (ePackCmdId)(PACK_CMD_BIT(packCmd_chargeEnable) |
+                           PACK_CMD_BIT(packCmd_chargeLimit));   /* 18 */
     TEST_ASSERT(PackFsm_ValidateCommand(&ctx, &cmd, 5000u) == packErr_badArg);
 
     cmd.cmd = (ePackCmdId)(PACK_CMD_BIT(packCmd_dischargeLimit));  /* 16 */
@@ -898,8 +919,7 @@ int main(void)
 
     RUN_TEST(test_age_zero_is_not_never);
     RUN_TEST(test_partial_publish_leaves_unnamed_groups_untouched);
-    RUN_TEST(test_cell_group_has_its_own_budget);
-    RUN_TEST(test_never_delivered_counts_as_stale);
+    RUN_TEST(test_never_delivered_reads_age_never);
 
     RUN_TEST(test_confidence_cap_decays_before_stale);
 

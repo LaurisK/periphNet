@@ -21,8 +21,9 @@
  * Evaluate immediately after every commit and once per 250 ms tick, so the
  * two paths meet at exactly one decision point.
  *
- * STATUS: SCAFFOLDING.  Signatures and semantics are complete; the bodies are
- * stubs that return the documented "nothing valid" answer.
+ * STATUS: IMPLEMENTED and host-tested (tests/test_pack_fsm.c).  Pure, libc
+ * only, wrap-safe: every age is an unsigned difference and nothing compares
+ * absolute tick stamps.
  */
 
 #ifndef PACK_FSM_H_
@@ -68,8 +69,11 @@ extern "C" {
 typedef struct {
     uint32_t groupTick_ms[packGrp_last]; /* absolute stamp of last delivery  */
     uint32_t groupSeen;                  /* PACK_GRP_BIT set EVER delivered  */
-    uint32_t staleAfter_ms;              /* the electrical group's budget    */
-    uint32_t cellStaleAfter_ms;          /* the cell group's                 */
+    /* THE ONLY BUDGET.  It answers one question -- "is this pack talking?"
+     * -- and it is measured against the liveness group, because any answer
+     * from the pack proves the pack is there.  There is deliberately no
+     * second, per-attribute budget: see sPackState.age_ms. */
+    uint32_t staleAfter_ms;
     uint32_t caps;                       /* ePackCap, confirmed at bind      */
     uint8_t  cond;                       /* ePackCondition                   */
     uint8_t  why;                        /* ePackAbsentReason, computed      */
@@ -120,13 +124,11 @@ typedef struct {
  * bind left behind and why is derived from it.
  *
  * @param  fsm - the instance's state
- * @param  staleAfter_ms - the electrical group's budget, > 0
- * @param  cellStaleAfter_ms - the cell group's budget, > 0
+ * @param  staleAfter_ms - how long without ANY answer means stale, > 0
  * @param  caps - the capability set bind() confirmed
  * @note   Pure.  Any context.  Never blocks.
  */
-void PackFsm_Init(sPackFsm *fsm, uint32_t staleAfter_ms,
-                  uint32_t cellStaleAfter_ms, uint32_t caps);
+void PackFsm_Init(sPackFsm *fsm, uint32_t staleAfter_ms, uint32_t caps);
 
 /**
  * @brief  Record why the binding, rather than the battery, is the problem.
@@ -210,20 +212,6 @@ int PackFsm_Evaluate(sPackFsm *fsm, uint32_t now_ms,
  */
 uint32_t PackFsm_AgeMs(const sPackFsm *fsm, ePackGroup grp, uint32_t now_ms);
 
-/**
- * @brief  Which groups are past THEIR OWN budget.
- *
- * Computed by the core because the budget is the core's and a consumer must
- * not need to know it.  packGrp_cells is judged against cellStaleAfter_ms;
- * every other group against staleAfter_ms.  A group never delivered counts as
- * stale.
- *
- * @param  fsm - the instance's state
- * @param  now_ms - the caller's monotonic clock
- * @retval a PACK_GRP_BIT set
- * @note   Pure.  Any context.  Never blocks.
- */
-uint32_t PackFsm_GroupsStale(const sPackFsm *fsm, uint32_t now_ms);
 
 /**
  * @brief  The ceiling the electrical group's freshness puts on any confidence.

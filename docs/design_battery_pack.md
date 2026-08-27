@@ -907,6 +907,8 @@ typedef struct {
     uint32_t cmdAccepted, cmdOk, cmdFailed;
     uint32_t cmdUnknown;    /* went stale mid-command — the one to watch     */
     uint32_t staleEvents;   /* online → stale transitions                    */
+    uint32_t cmdRefused;    /* refused synchronously, before any wire        */
+    uint32_t bindFailures;  /* instances that could not bind at all          */
     uint32_t lateCompletes; /* a type answered AFTER the core gave up        */
     uint8_t  provisioned;
 } sPackStats;
@@ -1334,6 +1336,49 @@ confidence for every instance, expire command deadlines, and call each type's
 optional `tick`. 250 ms gives ≤ 250 ms of latency on a staleness transition
 against budgets of 5–60 s, for ~4 wakes/s of a few microseconds each.
 
+### Bring-up order
+
+Nothing above says who calls what, and an implementer should not have to invent
+it. `App_DefaultTaskEntry` (`App/app_freertos.c`) is the project's bring-up
+sequence and the module joins it in one place, **after `NvDbPlatform_Init()`**
+(the configuration lives in flash) and **after `Modbus_Init()`** (a `jkbms`
+bind resolves against the live Modbus config):
+
+```c
+/* ... W25Q128_Init(), NvDbPlatform_Init(), DHCP, Modbus_Init() ... */
+
+PackJkBms_Register();        /* blueprints first: Pack_Init binds against    */
+PackPylontech_Register();    /*   whatever is registered when it runs        */
+
+Func_Init();                 /* creates the shared task + static queue       */
+Func_Start();                /* posts func_start; the task then calls
+                                Pack_Init(func_packEvt, SendPackedEvent)     */
+```
+
+Four rules that fall out of it, each with a reason:
+
+1. **Blueprints register before `Pack_Init`.** A configured pack whose type is
+   not yet registered binds to nothing and reports `packWhy_noType` — which is
+   correct for a firmware that genuinely lacks the type, and misleading for one
+   that merely started in the wrong order.
+2. **`Pack_Init` runs on the shared task, not on `defaultTask`.** It binds, and
+   a bind walks the Modbus catalogue (§11.2) — that is flash I/O and belongs on
+   the task that owns the module, which is why `Func_Start` posts rather than
+   calling directly.
+3. **A failed bring-up is never fatal.** No pack configuration is
+   *unprovisioned*; a type that will not bind leaves its instance
+   `packCond_absent` with a reason. Neither stops the boot, exactly as a missing
+   WireGuard identity does not (`app_freertos.c:286-289`).
+4. **`pack_pylontech` registers but cannot bind** until the CAN RX dispatcher
+   exists (§16 item 5). It reports `packWhy_typeUnavailable`, which is why that
+   value is distinct from `packWhy_noType`: the operator's configuration is
+   right and the firmware is the limitation.
+
+**Nothing in this sequence exists yet.** The module is stubbed and deliberately
+has no caller — `--gc-sections` strips it entirely, which is why it currently
+costs zero bytes. Wiring it up is the first step of implementation, not of
+scaffolding.
+
 ### Priorities and sysmon
 
 | Task | Stack | Priority | Why |
@@ -1465,22 +1510,40 @@ Current occupancy: `.bss` 91 136 B + `.data` 464 + `._user_heap_stack` 1 536 ≈
 **93 KB of 128 KB** main SRAM; `.ccmram` 11 884 + `.ccmheap` 48 000 =
 **59 884 of 65 536 CCM (91.4 %)**; text+rodata ≈ **397 KB of 480 KB** flash.
 
-| Allocation | Size | Region |
-|---|---|---|
-| `sPackState` live + staged, 8 instances | 132 × 2 × 8 = **2 112 B** | `.bss` |
-| `sPackCells` live + staged, 8 instances | 80 × 2 × 8 = **1 280 B** | `.bss` |
-| Per-group tick array | 8 × 8 × 4 = **256 B** | `.bss` |
-| Instance config records | 8 × 64 = **512 B** | `.bss` |
-| Subscription table | 8 × 16 = **128 B** | `.bss` |
-| In-flight command slots | 8 × 32 = **256 B** | `.bss` |
-| `func` queue storage + control block | **208 B** | `.bss` |
-| **`func` task stack** | **2 048 B** | **`.bss`** — via `xTaskCreateStatic`, deliberately not `.ccmheap` |
-| `pack_jkbms` state (name→ptOrd maps, frame assembly) | 8 × ~160 = **1 280 B** | `.bss` |
-| `pack_pylontech` state | 8 × 64 = **512 B** | `.bss` |
-| `GET /api/pack/status` JSON | ~2 KB transient | `.ccmheap` via `pvPortMalloc` |
-| **Total resident** | **8 592 B ≈ 8.4 KB** | **`.bss` — CCM untouched** |
-| Flash | **12–16 KB** | ~83 KB free |
-| External flash | 4 KB + 16 KB | ~7.3 MB free |
+**MEASURED, not estimated** — from the object files, 2026-08-26. The earlier
+figures in this table were estimates and were low by about half; the estimate
+of `sPackCfgEntry` in particular (64 B) was out by a factor of two (it is
+132 B, and `sPackCfg` is 1 060 B, not ~550).
+
+| Object | `.text` | `.rodata` | `.bss` |
+|---|---|---|---|
+| `pack.c` | 8 296 | 93 | **6 957** |
+| `pack_cfg.c` | 6 162 | 1 207 | 0 |
+| `pack_jkbms.c` | 4 986 | 398 | **1 664** |
+| `pack_fsm.c` | 1 840 | 0 | 0 |
+| `func.c` | 780 | 145 | **2 676** |
+| `pack_pylontech.c` | 582 | 98 | 32 |
+| **Total** | **22 646** | **1 941** | **11 329** |
+
+- **Flash when wired in: 24 587 B**, against ~93 KB free. 
+- **Main SRAM: 11 329 B** of `.bss`, against ~38 KB free.
+- **CCM: 0 B.** The `func` task stack (2 048 B) and queue storage are
+  `StaticTask_t`/`StaticQueue_t` in `.bss` rather than `pvPortMalloc`'d from
+  the 48 KB `.ccmheap` like every other task here, precisely because CCM is
+  the constrained region at 91.4 %. That decision is the reason this table
+  has a zero in it, and it has a second benefit: a stack local on the `func`
+  task is DMA-reachable, where on any other task it would not be.
+- One shared `sPackCfgRecord` scratch (1 060 B) serves `Pack_Init`,
+  `Pack_ConfigVerify` and `Pack_ConfigApply`; they had one each until the
+  2026-08-26 review, which cost ~3.2 KB of `.bss` for buffers never live at
+  the same time.
+- External flash: 4 KB + 16 KB, ~7.3 MB free.
+
+**NOTHING OF THIS IS IN THE IMAGE TODAY.** `App_DefaultTaskEntry` does not
+call `Func_Init`/`Func_Start`, so `--gc-sections` strips the whole module and
+`arm-none-eabi-nm build/application.elf` finds no `Pack_*` or `Func_*` symbol
+at all. The numbers above are what it will cost the first time it is wired
+in, not what it costs now.
 
 **CPU.** Per JK pack: one 8-point txn per 5 s → 8 subscriber callbacks (~1 µs
 each) plus one commit. Per Pylontech pack: 6 frames/s in ISR (~2 µs each) plus
@@ -1593,3 +1656,363 @@ placeholder.
   **Done 2026-08-25** — its §7 now carries the verified finding (txn is a
   leading marker, a transaction is a read block, no end-of-sequence event) and
   its §10 item 8 is closed.
+
+---
+
+## 19. Review, 2026-08-26 — findings and API changes
+
+The implementation was reviewed twice independently, once from an embedded
+firmware angle and once from a system-architecture angle. They converged on
+the same command-lifecycle and bind-contract defects, which is the main
+reason to trust the list. Everything below is **fixed and in the tree**;
+`ctest` is 17/17 and the ARM build is clean.
+
+### 19.1 The one that was memory corruption
+
+`parse_commands` incremented `boundCount` once per `commands` key carrying a
+domain and never checked it against `sPackCmdBound[packCmd_last]`. JSON
+permits a key to repeat, so the operator's document decided how far past a
+6-element array to write. Reproduced under ASan: 200 repeats of
+`"chargeLimit"` gives `global-buffer-overflow ... WRITE of size 4`, and ~87
+repeats escapes `sPackCfg` entirely. On the device the target is a static in
+`.bss` reachable from `POST /api/pack/config`.
+
+Two guards now stand in front of it: a **duplicate command key is rejected**
+(two domains for one command give the operator no way to know which is
+enforced), and the bound check itself remains as unreachable defence. The
+crashing input is a regression test.
+
+`pack_jkbms.c`'s equivalent loop had always carried the bound check. The
+config parser did not — the two were written from the same shape and only one
+kept the guard.
+
+### 19.2 The command lifecycle — one root cause, four symptoms
+
+A completion was decided in one context (modbus task, CAN ISR, or the tick)
+and **delivered later on the func task**, reading `done` / `doneCtx` /
+`pending` at dispatch time. By then the slot was free, so another task could
+legally claim it and overwrite all three. The consequences:
+
+- the **old** result fired the **new** command's callback, before that
+  command ever reached the wire;
+- `done` was then NULLed, so the new command's real outcome was lost for
+  good;
+- `packInt_commandSubmit` never re-checked `inFlight`, so a write could land
+  on a live battery **after** the core had already told the consumer the
+  outcome — the one thing §6 forbids;
+- and the timeout was reconstructed from the *current* slot, i.e. from a
+  different command's deadline.
+
+Fixed by snapshotting the whole completion record **inside the critical
+section that frees the slot** (`sPackInst.doneRec`), and dispatching only
+from the snapshot. One mailbox slot is provably enough: a second command
+cannot complete before the first is delivered, because completing requires
+submitting and submission happens on the func task — the same task that
+drains the mailbox, from a FIFO queue in which the completion was posted
+first.
+
+Separately, `Pack_ConfigApply`/`Pack_ConfigErase` called `UnbindAll()` first,
+and `UnbindAll` memsets the instance — erasing `done`, `doneCtx` and
+`inFlight` before anything could expire them. Rules 6 and 8 of §10.9 (`done`
+**always** fires; a configuration change completes it
+`packErr_unknownOutcome`) were therefore both unimplemented on the ordinary
+path, because a queued event always drains before the queue-timeout tick that
+would have caught it. Commands are now expired **before** the teardown.
+
+### 19.3 Two that would have stranded a board
+
+**A Modbus config swap darkened every JK pack until reboot.** The type set
+`used = 0` on `mbEvt_config` and nothing re-bound: `packInt_rebind` existed
+in the enum and had a handler, and **no producer anywhere**. Only the core
+holds the configuration and the post function, so a type standing itself down
+could never come back. `PackType_RequestRebind()` is the missing half of
+§12's "the type re-resolves on every `mbEvt_config`".
+
+**The tick was an idle detector, not a clock.** `Pack_Tick` ran only on the
+queue-timeout branch, so any event arriving more often than `FUNC_TICK_MS`
+suppressed it indefinitely — and §11.2 budgets a push type at 6 CAN frames a
+second, which alone guarantees the timeout never fires. Staleness detection,
+command expiry and each type's own tick all live there. It is now a wall
+clock, checked after every wake.
+
+### 19.4 API changes
+
+| Change | Why |
+|---|---|
+| `sPackState.chargeVoltLimit_mV`, `dischargeVoltLimit_mV` + `packCap_voltageLimits` | A cluster's first output frame is Pylontech `0x351`, which carries charge voltage, charge current, discharge current **and discharge voltage**. Only the two currents existed, so the cluster could not have been written without a breaking change here. `sizeof(sPackState)` 132 → **140**. |
+| `sPackBindResult.why` | The core chose a refusal reason by testing `ty->id == packType_pylontech` — a layering violation that was also wrong: a malformed `"can:"` token got relabelled "the firmware is the limitation", the exact distinction `packWhy_typeUnavailable` exists to preserve. A type now states its own reason, including on a *successful* bind. |
+| `sPackType.tick` is now `(uint8_t idx, uint32_t now_ms)` | It was never called at all. As a type-level hook it also forced every type to keep and walk its own instance table, and gave it no way to know which pack it was closing. |
+| `PackType_RequestRebind(void)` | §19.3. |
+| `PACK_CELL_NONE` | `balanceSrcIdx`/`balanceSinkIdx` were documented `0xFF = none` and the sentinel was never written anywhere; staging is zeroed at bind, so both read `0` — "cell 0 is the balance source". |
+
+### 19.5 Capabilities that were advertised with nothing behind them
+
+§16 item 10 says a capability that answers with a confident lie is how a
+consumer learns to distrust the whole API. Three were doing exactly that:
+
+- **`packCap_balancer`** was set whenever `balance_current` resolved, and
+  `ModbusEvent` had no branch for that point or for `balance_pwm_dsg`. Every
+  balance field was permanently zero. Both are now decoded, and the
+  source/sink indices are the extreme cells **only while the balancer is
+  running** — idle, there is no source and no sink.
+- **`packFlag_capacityLearnt`** was never set, while `BuildState` silently
+  substituted the nameplate when the learned capacity was zero — so a
+  consumer could not tell a learned capacity from a plate number, the
+  distinction the amp-hour API exists to carry.
+- **`packWhy_notPolled`** was produced by nothing. `sModbusDeviceInfo.polled`
+  was fetched at bind and discarded, so a device no live plan reads reported
+  `packWhy_noReply` — sending an operator to look at the battery when the
+  fault is in the Modbus plan. §8 names this exact case.
+
+### 19.6 Corrections to claims this document made
+
+- **"A limited pack reports a limit of zero, which composes correctly for
+  whoever is summing"** was only true for *pack-detected* limiting: a pack
+  that went silent kept offering its last 200 A of headroom, and a summing
+  cluster got phantom capacity from a dead battery. The first fix zeroed the
+  limits when `packGrp_limits` was stale — **and that fix was itself wrong and
+  has been reverted; see §21.** The real answer is that the consumer filters
+  on `cond`.
+- **The operator's numeric command bounds were inert.** `commands: {
+  "chargeLimit": { "max_a": 200 } }` was parsed, ceiling-checked, persisted
+  and exported — and then validation ran against the JK register's own
+  `writeMin`/`writeMax`, so 500 A passed. `sPackBindInfo` had no field to
+  carry them and the type could not have honoured them either. The core now
+  computes the **intersection** into instance-owned storage, where a type can
+  neither widen it nor forget it. §12 calls this block "where the answer to
+  *who may disconnect this battery* belongs"; only its boolean half worked.
+- **Derived extremes were lifetime extremes.** `cellMax_mV`/`cellMin_mV` and
+  the temperature pair were folded into *persistent* staging with no reset
+  point, so max only ever rose and min only ever fell — and `cellMax -
+  cellMin`, the imbalance signal a consumer would actually use, grew without
+  bound. This is a contract gap as much as a bug: `PackType_Publish` is a
+  frame *close* with no counterpart that *opens* one. The rule is now stated
+  and followed: **a type derives aggregates from the whole array at frame
+  close, never by folding into staging.**
+- **The cell clock could never expire.** `cell_minmax_nbr` lives in the JK's
+  5 s live block, and its handler stamped `packGrp_cells` — which the 15 s
+  cell voltages also stamp. `cellStaleAfter_ms` (60 s) was therefore
+  unreachable, and a BMS that stopped sending cell voltages while still
+  answering the live block reported hours-old cells as fresh. Only
+  `PublishCells` may stamp that group.
+- **`packEvt_state` always reported `groups = 0`.** The queue entry is one
+  word and it is spent on `idx`, so the commit's groups were dropped and
+  rebuilt as zero — the "partial delivery is visible instead of silent"
+  property of §11.1 did not exist. A bare liveness report also raised
+  `packEvt_state`, making "the pack answered" indistinguishable from "values
+  refreshed". Both fixed with a per-instance pending mask drained under the
+  lock.
+- **`packEvt_alarm` was never raised at all.** It was declared, it was in
+  `packEvt_all`, the JK alarm set was decoded faithfully — and nothing ever
+  diffed the alarms. A subscriber watching for a protection to open, which is
+  §4's middle case and **the only kind of disconnection a pack can detect
+  about itself**, heard nothing. Diffed at the commit now, the one moment
+  both the old and new sets are in hand.
+
+### 19.7 Still open after the review
+
+1. **Nothing is wired in.** `App_DefaultTaskEntry` calls neither `Func_Init`
+   nor `Func_Start`, and no type is registered, so the linker strips the
+   module entirely — see §15. Every fix above is latent until that call site
+   exists. This is the next thing to do.
+2. **The push half of the seam has never executed.** Both defects found on
+   the Pylontech side (the uncalled tick, the un-reset aggregates) were found
+   by reading, not running. `PackType_Publish`'s ISR path — the choice
+   between the task- and ISR-context critical section — has no coverage at
+   all. §17's `packType_sim` should come forward, or a host test should drive
+   `PackType_Publish` through a faked `__get_IPSR()`, rather than discovering
+   this when the CAN dispatcher lands.
+3. **A third vendor type is not one file.** It needs a value in
+   `ePackTypeId`, three tables in `pack_cfg.c`, the explicitly-listed
+   filenames in the CMake lock-ban glob, and a registration call site with no
+   declaring header — five edits outside the type. `s_typeNames` duplicates
+   `sPackType.name`, which already exists and is never read. Compare
+   `modbus_port.h`, where a driver genuinely is one file plus one
+   registration.
+4. **`pack.h` still exports three func-only functions** (`Pack_Init`,
+   `Pack_HandleEvent`, `Pack_Tick`) and includes `App/Func/func.h`, dragging
+   `fFuncPost` and `FUNC_TICK_MS` into every consumer. They belong in a
+   `pack_task.h`; CMake rule 6 already has the machinery to enforce it.
+5. **Adding a sixth command erases every board's pack configuration.**
+   `sPackCfgEntry` embeds `sPackCmdBound bounds[packCmd_last]`, so raising
+   `packCmd_last` changes `sizeof(sPackCfgRecord)` and `NvRecord_Load`
+   rejects it. The failure is *safe* — unprovisioned, per §14, not a misread
+   binding — but §10.3 anticipates a sixth command as routine and the
+   consequence is not recorded anywhere. A `_Static_assert` next to
+   `PACK_CFG_VERSION` would at least force the decision to be conscious.
+6. **`sPackStats` counters are still torn** in `func.c` (`s_stats.posted++`
+   from ISR and task context) and `Pack_Stats`/`Func_Stats` copy the struct
+   unlocked. They are diagnostics, so the cost is a wrong number in sysmon —
+   but §7 calls out drop counting as the thing that must be trustworthy.
+7. **No coherent multi-pack snapshot.** Sensing §4's third case is
+   differential by definition, and `Pack_GetState` reads the clock itself, so
+   three sequential calls give three reference instants. A
+   `Pack_GetStateAll()` under one lock, or an absolute per-group stamp, is
+   cheap now and a change to every consumer's comparison logic later.
+
+---
+
+## 20. First hardware run — board #1 "zaliakalnis", 2026-08-26
+
+`Pd1.1.24`, installed over the WireGuard tunnel (`10.77.0.64`), no J-Link, no
+site visit. Upload 429 184 B in **9 s**, round-trip verified byte-identical
+before installing; install + reboot **~42 s**; confirmed, golden promoted to
+`Pd1.1.24`.
+
+### What ran
+
+| | |
+|---|---|
+| `func` task | up at priority 23, checking in every ~60 ms, never stale |
+| Bind | **succeeded first time** on `rs485:1`, `bindFailures = 0` |
+| Condition | `online`, `why = packWhy_none` |
+| Cost | load **7‰** (idle 993‰), IWDG gap max **552 ms** of 16 400 |
+| `func` stack | peak **305 of 512 words** (1 220 B of 2 048) — 40 % headroom, but **higher than the 736 B estimate in §15** |
+| Heap | unchanged by the task itself — the static `.bss` allocation held; `free_min` moved 12 184 → 10 152 only from the transient HTTP JSON buffers |
+| Crash log | empty |
+
+Live data at 09:0x: **53.514 V, +32.8 A charging, SOC 59.0 %, 153.2 Ah
+remaining** of a 261 Ah nameplate; 16 cells spanning **3317–3326 mV** (9 mV);
+temperatures 18.1–21.5 °C; both MOS closed.
+
+### What the run actually proved
+
+- **The cell array decode is right** — `sum(16 cells) = 52 510 mV` against
+  `pack_voltage = 52 509 mV`, **1 mV apart on 52.5 V (0.002 %)**, sustained
+  across repeated reads. Two unrelated registers, two scaling paths, one
+  answer. That is the structural check.
+
+  **A weaker claim made here first has been withdrawn.** The original note
+  said `cell_minmax_nbr` and `argmin`/`argmax` over the cell array "agreed
+  exactly — two separate decode paths, same answer". They did agree that
+  once, but re-measured over six samples they agree **1 time in 6**, and that
+  is expected rather than a defect: the min/max register and the cell block
+  are separate transactions, the JK recomputes on its own ~4–5 s internal
+  scan, and at a 3–5 mV spread with 1 mV resolution **several cells tie** for
+  min and max, so "the" index is not even well defined. `docs/modbus.md` §8
+  already says whole-device coherence is neither achievable nor needed; this
+  is that, observed. Agreement is a coincidence of a wide spread and a lucky
+  read, not evidence of correctness.
+- **`PACK_CELL_NONE` works.** The balancer was idle, and `srcIdx`/`sinkIdx`
+  came back `-1`. Before the review fix both were `0`, which reads as "cell 0
+  is the balance source".
+- **The confidence ceiling works.** The JK reported `soh = 1000‰` (100 %) and
+  the module published it with `sohConf_pm = 200` — 20 %. Exactly the stuck-SOH
+  case §3.5 of the estimation design predicts.
+- **`packFlag_capacityLearnt` is produced.** `capacity_mAh = 261 000` came
+  from the JK's *learned* `full_capacity`, and the flag says so rather than
+  leaving it indistinguishable from the nameplate it happens to equal.
+- **The 422 path points at the right key on-device.** A config asking for a
+  9999 A charge limit was refused `{"pack":0,"field":"chargeLimit","reason":
+  "bound is wider than the type"}` — the type ceiling, before anything was
+  stored.
+- **The per-group staleness model was wrong, and this board proved it.**
+  Its Modbus config does not poll `charge_current_max` /
+  `discharge_current_max` in any live plan, so `packGrp_limits` aged past the
+  budget and the module reported `chargeLimit_mA = 0`. That looked like the
+  feature working. It was not: a current limit is a **setting**, it had been
+  read correctly, and the pack was answering the whole time. **See §21** —
+  this observation is what retired the per-group verdict.
+
+### A defect the run found — introduced by the review itself
+
+**`packCap_voltageLimits` was defined as `1u << 10`, the bit
+`packCap_cellEstimator` already held.** Added in §19.4 and missed by every
+build, because C is happy to give two enumerators the same value and nothing
+produced either bit yet. It surfaced only when the live `caps` word was
+decoded by hand against the header.
+
+Moved to `1u << 11`, and `tests/test_pack_fsm.c` now walks every `packCap_*`
+value asserting no two share a bit — verified non-vacuous by reintroducing the
+collision and watching the test fail. **This is fixed in the tree and is NOT in
+`Pd1.1.24`**; it is latent there, since neither capability is produced by any
+type on this board.
+
+### Deployed configuration
+
+`configs/pack_config_zaliakalnis.json` — one JK pack, `rs485:1`, 261 Ah,
+16 cells, LFP, and **`commands: {chargeEnable:false, dischargeEnable:false,
+balanceEnable:false}`**. Every command is explicitly forbidden: the first
+live run against a real battery has no write path at all, and `cmds = 0x0` in
+the published state confirms the core honoured it.
+
+### Still not exercised
+
+`balance_pwm_dsg` is absent from this board's 87-point Modbus config, so
+`balanceDuty_pm` stays 0 while `balance_current` is decoded — the capability
+is backed, the duty field is not. The board also has no `cell_wire_res*`
+points, so `packCap_leadResistance` is correctly **not** advertised. And the
+whole push/CAN half remains untested: `pack_pylontech` is registered here and
+refuses to bind, as designed.
+
+---
+
+## 21. Staleness belongs to the pack, not to its attributes — 2026-08-26
+
+**The model was wrong, and the first hardware run is what showed it.**
+
+§20 recorded board #1 reporting `chargeLimit_mA = 0` because
+`packGrp_limits` had aged past `staleAfter_ms`, and read that as the design
+working. It was not working. The board had read `charge_current_max`
+correctly, the value had not changed, the pack was answering every five
+seconds throughout — and the module published a zero.
+
+### What was actually wrong
+
+**A current limit is a setting, not a measurement.** It changes when somebody
+writes it, not with the passage of time. Fifteen seconds after a correct read
+it is exactly as true as it was on arrival.
+
+More generally: **a group's natural refresh period is a property of whichever
+transport plan reads it, and this module cannot know it.** On a JK that period
+comes from the operator's Modbus configuration — a plan the pack module never
+sees. `staleAfter_ms` was therefore being applied as a deadline to attributes
+whose expected interval the module had no basis to guess, and
+`cellStaleAfter_ms` was a second guess layered on the first.
+
+**And if the pack is talking at all, every register is being refreshed on its
+own schedule.** Silence is a property of the *pack*. Once the pack is
+answering, a group with a large age has not failed — it is simply read
+rarely, which is a configuration choice, not a fault.
+
+### The model now
+
+| | |
+|---|---|
+| `cond` | the **only** verdict: `online` / `stale` / `absent`, from one budget, measured against **any answer at all** from the pack |
+| `age_ms[group]` | **facts, not verdicts.** How long since each group was last refreshed, `PACK_AGE_NEVER` if never |
+| values | reported **as read**, whatever their age. Nothing is blanked |
+| aggregation | **the consumer filters on `cond` first.** Summing anything from a pack that is not `packCond_online` is what gives a cluster phantom capacity |
+
+This is what the condition FSM already did — `PackFsm_Evaluate` only ever
+judged the liveness group. Everything removed here was layered on top of a
+model that was already right.
+
+### Removed
+
+- `sPackState.groupsStale` — the per-group verdict.
+- `PackFsm_GroupsStale()`.
+- `cellStaleAfter_ms` everywhere: `sPackFsm`, `sPackBindInfo`,
+  `sPackType.defaultCellStaleAfter_ms`, `sPackCfgEntry`, and the
+  `cellStaleAfter_ms` **config key**, which is now rejected as unknown.
+- The §19.6 blanking of limits when `packGrp_limits` was stale.
+
+`sizeof(sPackState)` 140 → **136**; `sPackCfgEntry` 132 → **128**;
+`sPackCfg` 1060 → **1028**.
+
+### Migration
+
+`sizeof(sPackCfgRecord)` changed, so `NvRecord_Load` rejects the stored
+record and **a board carrying the old configuration comes up unprovisioned**
+— the documented safe failure of §14, not a misread binding. It needs one
+re-upload of its (now shorter) configuration. `configs/pack_config_*.json`
+have had the dead key removed.
+
+### What is genuinely lost
+
+The module can no longer say "the cells plan stopped while the live plan kept
+running." That case now shows only as `age_ms[packGrp_cells]` growing while
+`cond` stays `online` — visible to anyone who looks, but no longer a flag.
+That is the right trade: it is a fact about the operator's Modbus plan, and
+the module's job is to report the age and let a consumer judge it, not to
+invent a deadline and call the result staleness.

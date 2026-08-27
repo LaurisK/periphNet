@@ -18,8 +18,9 @@
  * taskDISABLE_INTERRUPTS and __disable_irq are banned in pack_jkbms.c and
  * pack_pylontech.c.
  *
- * STATUS: SCAFFOLDING.  The contract is complete; no implementation is behind
- * it.
+ * STATUS: IMPLEMENTED.  Two types are behind it: pack_jkbms (pull, Modbus)
+ * and pack_pylontech (push, CAN), the latter refusing to bind until App/Can
+ * grows an RX dispatcher.
  */
 
 #ifndef PACK_TYPE_H_
@@ -58,7 +59,6 @@ typedef struct {
     const char *bindKey;            /* borrowed for the call only, §12       */
     uint32_t    nameplate_mAh;
     uint32_t    staleAfter_ms;      /* the electrical group's budget         */
-    uint32_t    cellStaleAfter_ms;  /* the cell group's, which differs       */
     uint32_t    cmdAllow;           /* PACK_CMD_BIT set the OPERATOR permits;
                                        the type may NARROW, NEVER WIDEN      */
     uint8_t     idx;
@@ -76,6 +76,13 @@ typedef struct {
     const sPackCmdBound *bounds;    /* one per bit in cmds; STORAGE IS THE
                                        TYPE'S and must outlive the bind      */
     uint8_t              boundCount;
+    /* WHY A BIND FAILED, in the type's own words (ePackAbsentReason).  The
+     * core must not infer it: guessing from the type id told an operator
+     * with a malformed "can:" token that the FIRMWARE was the limitation,
+     * which is the exact distinction packWhy_typeUnavailable exists to
+     * preserve.  packWhy_none means "no opinion" and the core falls back to
+     * packWhy_noBinding. */
+    uint8_t              why;
 } sPackBindResult;
 
 /** The blueprint one type registers exactly once. */
@@ -85,7 +92,6 @@ typedef struct {
     uint32_t    capsMax;            /* the most any instance could offer     */
     uint32_t    cmdsMax;
     uint32_t    defaultStaleAfter_ms;
-    uint32_t    defaultCellStaleAfter_ms;
     const sPackCmdBound *ceiling;   /* the widest bounds ANY instance of this
                                        type could accept.  The config parser
                                        rejects a `commands` bound wider than
@@ -136,9 +142,15 @@ typedef struct {
      * Where a PUSH type closes a partial frame set that stopped arriving, and
      * where a PULL type notices its transport went quiet.
      *
+     * PER INSTANCE, like bind/unbind/submit: as a type-level hook it forced
+     * every type to keep and walk its own instance table, which both types
+     * already do, and gave a type no way to know which pack it was closing.
+     *
+     * @param idx    - instance index
+     * @param now_ms - the tick's clock, so a type never samples its own
      * @note  SHARED FUNC TASK.  MUST NOT BLOCK.
      */
-    void (*tick)  (uint32_t now_ms);
+    void (*tick)  (uint8_t idx, uint32_t now_ms);
 } sPackType;
 
 /* Exported functions -------------------------------------------------------*/
@@ -167,6 +179,8 @@ typedef struct {
     int32_t  current_mA;
     uint32_t remaining_mAh;
     uint32_t capacity_mAh;
+    uint32_t chargeVoltLimit_mV;    /* packCap_voltageLimits                 */
+    uint32_t dischargeVoltLimit_mV;
     uint32_t chargeLimit_mA;
     uint32_t dischargeLimit_mA;
     uint32_t alarms;                /* ePackAlarm                            */
@@ -259,6 +273,23 @@ void PackType_CommandDone(uint8_t idx, ePackErr result);
  * @note   Any context.  MUST NOT BLOCK.
  */
 void PackType_NoteLiveness(uint8_t idx, int answered);
+
+/**
+ * @brief  Tell the core this type's bindings are no longer valid.
+ *
+ * THE MISSING HALF OF §12's "the type re-resolves on every mbEvt_config".
+ * A type learns that its transport was reconfigured -- a Modbus config swap
+ * renumbers every devOrd -- but only the core holds the post function and
+ * the configuration, so only the core can re-run bind().  Without this a
+ * type could do nothing but mark itself unusable, and every pack of that
+ * type stayed dark until the next reboot.
+ *
+ * Coalesces: several calls before the func task drains cost one rebind.
+ *
+ * @note   Any context.  MUST NOT BLOCK.  The rebind itself runs later, on
+ *         the func task, where blocking is legal.
+ */
+void PackType_RequestRebind(void);
 
 #ifdef __cplusplus
 }

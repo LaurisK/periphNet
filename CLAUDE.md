@@ -368,6 +368,21 @@ PeriphNet/
                                   #   build flag
     Mqtt/mqtt_bridge.c/h          # MQTT bridge + HA discovery (generated
                                   #   from the active Modbus config)
+    Func/func.c/h                 # the shared functionality task (ZhagaFW
+                                  #   pattern): one task, one static queue, a
+                                  #   packed event-ID space, one range per
+                                  #   client. A client never sees the queue
+    Pack/                         # THE BATTERY PACK MODULE: pack.h (the only
+                                  #   consumer header), pack.c (core: state,
+                                  #   condition, commands, persistence),
+                                  #   pack_fsm (pure, host-tested condition/
+                                  #   staleness/confidence), pack_cfg (JSON),
+                                  #   pack_type.h (the vendor blueprint seam),
+                                  #   pack_types.h (the registration roster),
+                                  #   pack_jkbms (pull/Modbus),
+                                  #   pack_pylontech (push/CAN — registers but
+                                  #   REFUSES TO BIND until App/Can has an RX
+                                  #   dispatcher, which is honest, not a stub)
   Shared/                         # First-party code compiled into BOTH targets
                                   #   (depends only on HAL + libc, no RTOS/lwIP)
     Crypto/                       # sha256, hmac_sha256, aes128, aes_gcm
@@ -635,6 +650,7 @@ Shared code compiled into both bootloader and application.
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
+| func | 512 words | osPriorityNormal-1 (23) | The shared functionality task — one task, many clients, a packed event-ID space. Today its only client is the **pack** module: binds at start-up, drains pack events, and runs a 250 ms wall-clock tick (staleness, command expiry, each type's `tick`). Queue and stack are **static in `.bss`, not `.ccmheap`** — CCM is the tight region |
 | nvdb | 256 words | osPriorityLow | The nvDb collector: erases deleted space in the background so erases stay off the write path. One erasable unit per lock acquisition, so a waiting writer gets in between units. Sleeps on a notify (1 s backstop); never reboots anything |
 | mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`), and **auto-started at boot when a broker has been saved** (`mqtt save`) — a board that was never configured still waits for the command |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
@@ -720,6 +736,12 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/plans` | POST | Create a plan (201 + `{"id":N}`); body is one element of the config's `plans[]`, so one schema, one validator |
 | `/api/modbus/plans/N` | PUT | Modify a plan — **409 if a subscription named it** (`MB_PLAN_ALL` subscribers do not lock a plan) |
 | `/api/modbus/plans/N` | DELETE | Free a slot; 409 likewise. Deleting moves no other plan — that is what makes a slot a slot |
+| `/api/pack/status` | GET | Every battery pack: condition + `why`, caps/cmds/flags, V/A, SOC/SOH with **confidence**, amp-hours (remaining / capacity / nameplate), per-direction switch state, current **and voltage** limits, alarms, and a **per-group age array** — a pack is not one clock (on a JK the cell group runs 4–5 s behind) |
+| `/api/pack/cells` | GET | `?idx=N` — per-cell mV and balance-lead mΩ, plus balancer state. **404 when the type reports no cell detail** (a Pylontech-speaking pack never will) — an absent capability, not an error |
+| `/api/pack/config` | GET | The active configuration, re-serialised (data-faithful, not byte-identical) |
+| `/api/pack/config` | POST | Upload + apply a pack configuration. 422 names the offending **pack index and key**; 409 while another parse holds the shared scratch |
+| `/api/pack/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
+| `/api/pack/config` | DELETE | Erase it; the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
 | `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base |
 | `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
 | `/api/wg/config` | DELETE | Erase the stored config **including the private key** — the board becomes unprovisioned and the tunnel stops |

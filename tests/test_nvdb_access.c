@@ -48,7 +48,10 @@ static void test_fresh_board_comes_up_on_the_built_in_layout(void)
     TEST_ASSERT(nvdbRes_ok == nvdbt_freshBoot());
     TEST_ASSERT(nvdbRes_ok == NvDb_GetStatus(&status));
     TEST_ASSERT(0 == strcmp(status.layoutName, "periphnet"));
-    TEST_ASSERT(1 == status.layoutVer);
+    /* Tracks the constant rather than pinning a literal, so a
+     * legitimate layout bump does not read as a regression. */
+    TEST_ASSERT(NVDB_TARGET_VER == status.layoutVer);
+    TEST_ASSERT(0 == strcmp(status.layoutName, NVDB_TARGET_NAME));
     TEST_ASSERT(nvdbRes_ok == status.lastApplyResult);
 
     TEST_ASSERT(nvdbRes_ok == NvDb_GetSize(nvdbUser_crashLog, &size));

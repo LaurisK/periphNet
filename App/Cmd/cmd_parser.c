@@ -19,6 +19,8 @@
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
+#include "App/Pack/pack.h"
+#include "App/Func/func.h"
 #include "nvdb.h"
 #include "nvdb_config.h"
 #include "nvdb_layout.h"
@@ -74,6 +76,7 @@ static void cmd_modbus(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
 static void cmd_nvdb(const char *args);
+static void cmd_pack(const char *args);
 static void cmd_sysmon(const char *args);
 
 static const sCmdEntry s_commands[] = {
@@ -83,6 +86,7 @@ static const sCmdEntry s_commands[] = {
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|save|forget|monitor|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
+    { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|cmd|config|erase)" },
     { "sysmon",      cmd_sysmon,      "System monitor (tasks|heap|reset)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
@@ -676,6 +680,251 @@ static void cmd_wg(const char *args)
  * console — a layout is supplied over HTTP (POST /api/nvdb/layout), where a
  * parse error can point at the offending field.
  */
+
+/* --- battery packs ------------------------------------------------------- */
+
+/** Stream the exported config out as Trice lines.  Chunked deliberately: the
+ *  document is ~1 KB and a Trice payload is not. */
+static int pack_cli_sink(void *ctx, const char *data, uint32_t len)
+{
+    static char line[80];
+    uint32_t    off = 0u;
+
+    (void)ctx;
+    while (off < len) {
+        uint32_t n = len - off;
+
+        if (n > (sizeof(line) - 1u)) {
+            n = sizeof(line) - 1u;
+        }
+        (void)memcpy(line, &data[off], n);
+        line[n] = '\0';
+        TRiceS("%s", line);
+        off += n;
+    }
+    return (int)len;
+}
+
+static const char *pack_cond_name(uint8_t c)
+{
+    switch ((ePackCondition)c) {
+    case packCond_absent: return "absent";
+    case packCond_stale:  return "stale";
+    case packCond_online: return "online";
+    default:              return "?";
+    }
+}
+
+static const char *pack_why_name(uint8_t w)
+{
+    switch ((ePackAbsentReason)w) {
+    case packWhy_none:            return "-";
+    case packWhy_noType:          return "no such type in this firmware";
+    case packWhy_typeUnavailable: return "type present, transport missing";
+    case packWhy_noBinding:       return "bind token did not resolve";
+    case packWhy_notPolled:       return "resolved, but no live plan reads it";
+    case packWhy_noReply:         return "never answered";
+    default:                      return "?";
+    }
+}
+
+static const char *pack_sw_name(uint8_t sw)
+{
+    switch ((ePackSwitch)sw) {
+    case packSwitch_unknown: return "?";
+    case packSwitch_open:    return "open";
+    case packSwitch_closed:  return "closed";
+    default:                 return "?";
+    }
+}
+
+/** One line per pack: what an operator wants first. */
+static void pack_print_line(uint8_t i)
+{
+    sPackState st;
+
+    if (Pack_GetState(i, &st) != packErr_ok) {
+        return;
+    }
+    TRiceS("  %s", st.name);
+    TRice(" [%u] %u.%03u V %d mA soc=%u.%u%% cond=",
+          (unsigned)i,
+          (unsigned)(st.voltage_mV / 1000u), (unsigned)(st.voltage_mV % 1000u),
+          (int)st.current_mA,
+          (unsigned)(st.soc_pm / 10u), (unsigned)(st.soc_pm % 10u));
+    TRiceS("%s\n", pack_cond_name(st.cond));
+}
+
+static void cmd_pack(const char *args)
+{
+    uint8_t idx = 0u;
+
+    if ((*args == '\0') || (strncmp(args, "status", 6) == 0)) {
+        sPackStats stats;
+        sFuncStats fs;
+
+        if (Pack_Stats(&stats) != packErr_ok) {
+            TRice("pack: not initialised\n");
+            return;
+        }
+        TRice("packs=%d provisioned=%u\n", Pack_Count(),
+              (unsigned)stats.provisioned);
+        TRice("  updates=%u stale=%u bindFail=%u\n",
+              (unsigned)stats.updates, (unsigned)stats.staleEvents,
+              (unsigned)stats.bindFailures);
+        TRice("  cmd acc=%u ok=%u fail=%u unknown=%u refused=%u late=%u\n",
+              (unsigned)stats.cmdAccepted, (unsigned)stats.cmdOk,
+              (unsigned)stats.cmdFailed, (unsigned)stats.cmdUnknown,
+              (unsigned)stats.cmdRefused, (unsigned)stats.lateCompletes);
+        if (Func_Stats(&fs) == 0) {
+            /* A DROPPED EVENT IS A MISSED STATE CHANGE, which is why func.c
+             * counts them per client rather than only logging. */
+            TRice("  func: posted=%u handled=%u ticks=%u dropped=%u/%u\n",
+                  (unsigned)fs.posted, (unsigned)fs.handled,
+                  (unsigned)fs.ticks, (unsigned)fs.dropped[0],
+                  (unsigned)fs.droppedUnknown);
+        }
+        return;
+    }
+
+    if (strncmp(args, "list", 4) == 0) {
+        uint8_t i;
+
+        if (Pack_Count() == 0) {
+            TRice("pack: unprovisioned - upload a config first\n");
+            return;
+        }
+        for (i = 0u; i < PACK_MAX; i++) {
+            pack_print_line(i);
+        }
+        return;
+    }
+
+    if (strncmp(args, "show", 4) == 0) {
+        sPackState st;
+        uint32_t   g;
+
+        idx = (uint8_t)atoi(args + 4);
+        if (Pack_GetState(idx, &st) != packErr_ok) {
+            TRice("pack %u: no such pack\n", (unsigned)idx);
+            return;
+        }
+        TRiceS("pack '%s'", st.name);
+        TRiceS(" type=%s", Pack_TypeName(st.typeId));
+        TRiceS(" cond=%s", pack_cond_name(st.cond));
+        TRiceS(" why=%s\n", pack_why_name(st.why));
+        TRice("  caps=%08x cmds=%02x flags=%02x conf soc=%u soh=%u (per-mille)\n",
+              (unsigned)st.caps, (unsigned)st.cmds, (unsigned)st.flags,
+              (unsigned)st.socConf_pm, (unsigned)st.sohConf_pm);
+        TRice("  %u.%03u V  %d mA   soc=%u.%u%% soh=%u.%u%%\n",
+              (unsigned)(st.voltage_mV / 1000u), (unsigned)(st.voltage_mV % 1000u),
+              (int)st.current_mA,
+              (unsigned)(st.soc_pm / 10u), (unsigned)(st.soc_pm % 10u),
+              (unsigned)(st.soh_pm / 10u), (unsigned)(st.soh_pm % 10u));
+        TRice("  remaining=%u mAh capacity=%u mAh nameplate=%u mAh\n",
+              (unsigned)st.remaining_mAh, (unsigned)st.capacity_mAh,
+              (unsigned)st.nameplate_mAh);
+        TRice("  limits: chg=%u mA dsg=%u mA chgV=%u mV dsgV=%u mV\n",
+              (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,
+              (unsigned)st.chargeVoltLimit_mV,
+              (unsigned)st.dischargeVoltLimit_mV);
+        TRiceS("  charge switch=%s", pack_sw_name(st.chargeSwitch));
+        TRiceS(" discharge switch=%s\n", pack_sw_name(st.dischargeSwitch));
+        TRice("  temp %d..%d dC  cells %u..%u mV (idx %u/%u)\n",
+              (int)st.tempMin_dC, (int)st.tempMax_dC,
+              (unsigned)st.cellMin_mV, (unsigned)st.cellMax_mV,
+              (unsigned)st.cellMinIdx, (unsigned)st.cellMaxIdx);
+        TRice("  alarms=%08x vendor=%08x/%08x\n",
+              (unsigned)st.alarms, (unsigned)st.vendorAlarms[0],
+              (unsigned)st.vendorAlarms[1]);
+        /* PER-GROUP AGES, because a pack is not one clock: on a JK the cell
+         * group runs 4-5 s behind the electrical one by construction. */
+        for (g = 0u; g < (uint32_t)packGrp_last; g++) {
+            if (st.age_ms[g] != PACK_AGE_NEVER) {
+                TRice("  age[%u]=%u ms\n", (unsigned)g,
+                      (unsigned)st.age_ms[g]);
+            } else {
+                TRice("  age[%u]=never\n", (unsigned)g);
+            }
+        }
+        return;
+    }
+
+    if (strncmp(args, "cells", 5) == 0) {
+        sPackCells cl;
+        uint8_t    c;
+        int        r;
+
+        idx = (uint8_t)atoi(args + 5);
+        r   = Pack_GetCells(idx, &cl);
+        if (r == packErr_notSupported) {
+            TRice("pack %u: no cell detail from this type\n", (unsigned)idx);
+            return;
+        }
+        if (r != packErr_ok) {
+            TRice("pack %u: no such pack\n", (unsigned)idx);
+            return;
+        }
+        TRice("pack %u: %u cells, age=%u ms\n", (unsigned)idx,
+              (unsigned)cl.cellCount, (unsigned)cl.age_ms);
+        for (c = 0u; c < cl.cellCount; c++) {
+            TRice("  cell%02u %u mV  lead=%u mOhm\n", (unsigned)c,
+                  (unsigned)cl.cell_mV[c], (unsigned)cl.leadRes_mOhm[c]);
+        }
+        TRice("  balance: active=%u %d mA duty=%u src=%u sink=%u\n",
+              (unsigned)cl.balanceActive, (int)cl.balanceCurrent_mA,
+              (unsigned)cl.balanceDuty_pm, (unsigned)cl.balanceSrcIdx,
+              (unsigned)cl.balanceSinkIdx);
+        return;
+    }
+
+    if (strncmp(args, "cmd", 3) == 0) {
+        /* `pack cmd <idx> <name> <value>` -- values are SCALED INTEGERS in
+         * the writeMin/writeMax domain, never floats, exactly as
+         * /api/modbus/write takes them. */
+        char        name[24];
+        int         v = 0;
+        ePackCmdId  id;
+        sPackCommand c;
+        int          n = 0;
+
+        if (sscanf(args + 3, "%hhu %23s %d%n", &idx, name, &v, &n) < 3) {
+            TRice("usage: pack cmd <idx> <chargeEnable|dischargeEnable|"
+                  "balanceEnable|chargeLimit|dischargeLimit> <value>\n");
+            return;
+        }
+        if (Pack_CmdIdFromName(name, &id) != 0) {
+            TRiceS("pack: unknown command '%s'\n", name);
+            return;
+        }
+        (void)memset(&c, 0, sizeof(c));
+        c.cmd    = id;
+        c.value  = v;
+        c.origin = "cli";
+        /* Fire and forget from the CLI: the outcome arrives as a Trice line
+         * from FinishCommand, on the func task. */
+        TRice("pack %u: cmd -> %d\n", (unsigned)idx,
+              Pack_Command(idx, &c, 3000u, NULL, NULL));
+        return;
+    }
+
+    if (strncmp(args, "config", 6) == 0) {
+        if (Pack_ConfigExport(pack_cli_sink, NULL) != packErr_ok) {
+            TRice("pack: export failed\n");
+        }
+        TRice("\n");
+        return;
+    }
+
+    if (strncmp(args, "erase", 5) == 0) {
+        TRice("pack: erase -> %d (board is now unprovisioned)\n",
+              Pack_ConfigErase());
+        return;
+    }
+
+    TRice("pack: status|list|show <n>|cells <n>|cmd <n> <name> <v>|config|erase\n");
+}
+
 static void cmd_nvdb(const char *args)
 {
     if (strncmp(args, "status", 6) == 0) {

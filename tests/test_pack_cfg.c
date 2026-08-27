@@ -14,6 +14,7 @@
  */
 
 #include "test_util.h"
+#include <stdio.h>
 
 #include "App/Pack/pack.h"
 #include "App/Pack/pack_cfg.h"
@@ -88,7 +89,7 @@ static const char WORKED_EXAMPLE[] =
     "  \"packs\": [\n"
     "    { \"name\": \"sodas_a\", \"type\": \"jkbms\", \"bind\": \"rs485:2\",\n"
     "      \"nameplate_ah\": 660, \"cells\": 16, \"chemistry\": \"lfp\",\n"
-    "      \"staleAfter_ms\": 15000, \"cellStaleAfter_ms\": 60000,\n"
+    "      \"staleAfter_ms\": 15000,\n"
     "      \"commands\": {\n"
     "        \"chargeEnable\": true,\n"
     "        \"dischargeEnable\": false,\n"
@@ -123,7 +124,6 @@ static void test_accepts_the_worked_example(void)
     TEST_ASSERT(cfg.pack[0].chemistry == (uint8_t)packChem_lfp);
     TEST_ASSERT(cfg.pack[0].cellCount == 16u);
     TEST_ASSERT(cfg.pack[0].staleAfter_ms == 15000u);
-    TEST_ASSERT(cfg.pack[0].cellStaleAfter_ms == 60000u);
 
     /* §2 point 3: "A pack API that reports only percentages is unusable" —
      * 660 Ah beside 300 Ah on one bus, so nameplate must survive as mAh. */
@@ -179,6 +179,48 @@ static void test_commands_narrow_and_absent_means_everything(void)
 }
 
 /* Defaults per type (§12): jkbms 15000/60000, pylontech 5000/60000. */
+/* An EMPTY commands block is not the same as an ABSENT one: absent allows
+ * every command the type confirms, present-but-empty allows none.  That
+ * distinction is the one §12's table exists to make, and it is the difference
+ * between "I did not think about commands" and "I forbid all of them". */
+static void test_empty_commands_block_forbids_everything(void)
+{
+    static const char JSON[] =
+        "{\"version\":1,\"packs\":[{"
+        "\"name\":\"p\",\"type\":\"jkbms\",\"bind\":\"rs485:2\","
+        "\"nameplate_ah\":100,\"cells\":16,\"chemistry\":\"lfp\","
+        "\"commands\":{}}]}";
+    sPackCfg       cfg;
+    sPackCfgResult res;
+
+    TEST_ASSERT(parse_str(JSON, 0u, &cfg, &res) == packErr_ok);
+    TEST_ASSERT(cfg.count == 1u);
+    TEST_ASSERT(cfg.pack[0].cmdAllow == 0u);
+    TEST_ASSERT(cfg.pack[0].boundCount == 0u);
+}
+
+/* A command listed but not enabled is forbidden, and so is one never
+ * mentioned while the block is present.  Both must land on the same answer. */
+static void test_unlisted_command_in_a_present_block_is_forbidden(void)
+{
+    static const char JSON[] =
+        "{\"version\":1,\"packs\":[{"
+        "\"name\":\"p\",\"type\":\"jkbms\",\"bind\":\"rs485:2\","
+        "\"nameplate_ah\":100,\"cells\":16,\"chemistry\":\"lfp\","
+        "\"commands\":{\"chargeEnable\":true}}]}";
+    sPackCfg       cfg;
+    sPackCfgResult res;
+
+    TEST_ASSERT(parse_str(JSON, 0u, &cfg, &res) == packErr_ok);
+    TEST_ASSERT((cfg.pack[0].cmdAllow &
+                 PACK_CMD_BIT(packCmd_chargeEnable)) != 0u);
+    /* never mentioned -> forbidden, same as an explicit false */
+    TEST_ASSERT((cfg.pack[0].cmdAllow &
+                 PACK_CMD_BIT(packCmd_dischargeEnable)) == 0u);
+    TEST_ASSERT((cfg.pack[0].cmdAllow &
+                 PACK_CMD_BIT(packCmd_balanceEnable)) == 0u);
+}
+
 static void test_per_type_defaults_are_applied(void)
 {
     sPackCfg       cfg;
@@ -187,9 +229,7 @@ static void test_per_type_defaults_are_applied(void)
     TEST_ASSERT(parse_str(WORKED_EXAMPLE, 0u, &cfg, &res) == packErr_ok);
 
     TEST_ASSERT(cfg.pack[1].staleAfter_ms == PACK_CFG_JK_STALE_MS);
-    TEST_ASSERT(cfg.pack[1].cellStaleAfter_ms == PACK_CFG_JK_CELL_STALE_MS);
     TEST_ASSERT(cfg.pack[2].staleAfter_ms == PACK_CFG_PYLON_STALE_MS);
-    TEST_ASSERT(cfg.pack[2].cellStaleAfter_ms == PACK_CFG_PYLON_CELL_STALE_MS);
 }
 
 /* The HTTP body cursor decides the chunking, not the parser. */
@@ -487,12 +527,113 @@ static void test_name_tables_round_trip(void)
     TEST_ASSERT(PackCfg_CmdName(packCmd_last) == NULL);
 }
 
+/* ==========================================================================
+ * Regression tests for the review findings (2026-08-26).
+ *
+ * Each of these was ACCEPTED by the parser before the fix, and the first two
+ * corrupted memory rather than merely misbehaving.
+ * ========================================================================== */
+
+/** THE ORIGINAL CRASHING INPUT, kept as a regression test.
+ *
+ *  200 repeats of one `commands` key walked boundCount past
+ *  sPackCmdBound[6]; ASan showed a global-buffer-overflow escaping sPackCfg
+ *  entirely, and on the device the target is a static in .bss reachable from
+ *  an unauthenticated POST /api/pack/config.
+ *
+ *  What now rejects it is the DUPLICATE-KEY check -- with only five distinct
+ *  commands and each accepted once, boundCount can no longer reach the array
+ *  end by any input, so the bound check in parse_commands is unreachable
+ *  defence rather than the active guard.  It stays because pack_jkbms.c's
+ *  equivalent loop has always carried one, and because "unreachable" is a
+ *  property of today's enum, not of the loop. */
+static void test_rejects_the_original_overflow_input(void)
+{
+    static char json[16384];
+    uint32_t    i;
+    int         n;
+
+    n = snprintf(json, sizeof(json),
+                 "{ \"version\": 1, \"packs\": [ { \"name\": \"a\","
+                 " \"type\": \"jkbms\", \"bind\": \"rs485:2\","
+                 " \"nameplate_ah\": 100, \"commands\": { ");
+    for (i = 0u; i < 200u; i++) {
+        n += snprintf(&json[n], sizeof(json) - (size_t)n,
+                      "%s\"chargeLimit\": { \"min_a\": 0, \"max_a\": 200 }",
+                      (i == 0u) ? "" : ", ");
+    }
+    (void)snprintf(&json[n], sizeof(json) - (size_t)n, " } } ] }");
+
+    expect_reject(json, "repeated command key", "chargeLimit");
+}
+
+/** Even TWO of the same key is a malformed document: two domains for one
+ *  command give the operator no way to know which is enforced. */
+static void test_rejects_a_command_key_seen_twice(void)
+{
+    expect_reject(
+        "{ \"version\": 1, \"packs\": [ { \"name\": \"a\","
+        " \"type\": \"jkbms\", \"bind\": \"rs485:2\", \"nameplate_ah\": 100,"
+        " \"commands\": { \"chargeLimit\": { \"min_a\": 0, \"max_a\": 200 },"
+        " \"chargeLimit\": { \"min_a\": 0, \"max_a\": 100 } } } ] }",
+        "command key twice", "chargeLimit");
+}
+
+/** rd_number rejected an overflowing literal, but amps -> milliamps then
+ *  multiplied by 1000 and overflowed again -- and the ceiling check ran on
+ *  the WRAPPED value, so this was accepted as a 0.704 A .. 299.7 A domain. */
+static void test_rejects_an_amps_value_that_would_overflow(void)
+{
+    expect_reject(
+        "{ \"version\": 1, \"packs\": [ { \"name\": \"a\","
+        " \"type\": \"jkbms\", \"bind\": \"rs485:2\", \"nameplate_ah\": 100,"
+        " \"commands\": { \"chargeLimit\":"
+        " { \"min_a\": 4294968, \"max_a\": 4295267 } } } ] }",
+        "amps overflow", "min_a");
+}
+
+/** Two entries naming one physical battery both match every sample it sends,
+ *  so the board reports two healthy packs where one exists and a summing
+ *  consumer doubles the site's capacity.  maxInstances cannot catch this --
+ *  the collision is per-token, not per-type. */
+static void test_rejects_a_duplicate_bind_token(void)
+{
+    expect_reject(
+        "{ \"version\": 1, \"packs\": ["
+        " { \"name\": \"a\", \"type\": \"jkbms\", \"bind\": \"rs485:2\","
+        "   \"nameplate_ah\": 100 },"
+        " { \"name\": \"b\", \"type\": \"jkbms\", \"bind\": \"rs485:2\","
+        "   \"nameplate_ah\": 100 } ] }",
+        "duplicate bind", "bind");
+}
+
+/** ...while two DIFFERENT tokens of the same type stay legal: board #2 runs
+ *  exactly this today (slave 2 and slave 15 on one bus). */
+static void test_accepts_two_packs_on_distinct_addresses(void)
+{
+    sPackCfg       cfg;
+    sPackCfgResult res;
+
+    TEST_ASSERT(0 == parse_str(
+        "{ \"version\": 1, \"packs\": ["
+        " { \"name\": \"sodas_a\", \"type\": \"jkbms\", \"bind\": \"rs485:2\","
+        "   \"nameplate_ah\": 660 },"
+        " { \"name\": \"sodas_b\", \"type\": \"jkbms\", \"bind\": \"rs485:15\","
+        "   \"nameplate_ah\": 300 } ] }", 0u, &cfg, &res));
+    TEST_ASSERT(res.ok != 0u);
+    TEST_ASSERT(2u == cfg.count);
+    TEST_ASSERT(660000u == cfg.pack[0].nameplate_mAh);
+    TEST_ASSERT(300000u == cfg.pack[1].nameplate_mAh);
+}
+
 int main(void)
 {
     printf("=== pack_cfg tests ===\n");
 
     RUN_TEST(test_accepts_the_worked_example);
     RUN_TEST(test_commands_narrow_and_absent_means_everything);
+    RUN_TEST(test_empty_commands_block_forbids_everything);
+    RUN_TEST(test_unlisted_command_in_a_present_block_is_forbidden);
     RUN_TEST(test_per_type_defaults_are_applied);
     RUN_TEST(test_chunked_feed_matches);
     RUN_TEST(test_export_round_trip);
@@ -506,6 +647,13 @@ int main(void)
     RUN_TEST(test_empty_pack_list_is_valid);
 
     RUN_TEST(test_name_tables_round_trip);
+
+    /* review regressions */
+    RUN_TEST(test_rejects_the_original_overflow_input);
+    RUN_TEST(test_rejects_a_command_key_seen_twice);
+    RUN_TEST(test_rejects_an_amps_value_that_would_overflow);
+    RUN_TEST(test_rejects_a_duplicate_bind_token);
+    RUN_TEST(test_accepts_two_packs_on_distinct_addresses);
 
     printf("%s (%d failures)\n", test_failures ? "FAILED" : "PASSED",
            test_failures);

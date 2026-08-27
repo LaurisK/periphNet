@@ -391,6 +391,75 @@ foreach(_f ${_mb_consumer_srcs})
     endif()
 endforeach()
 
+# --- Pack module boundaries (docs/design_battery_pack.md §9) ------------------
+# Seven greppable rules.  The fourth is the load-bearing one: a lock is a
+# CONTEXT decision, and a pack type does not know its context statically -- the
+# same pack_pylontech.c code is reachable from an ISR and from a task.  So a
+# type is not allowed to hold one, and PackType_Publish is the single place
+# that chooses.  Making that mechanical is what stops the class of error
+# recurring rather than merely fixing this instance of it.
+
+# 1/2. The core, the FSM and the parser may not reach a protocol or a consumer.
+foreach(_f App/Pack/pack.c App/Pack/pack_fsm.c App/Pack/pack_cfg.c)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}" _hits
+             REGEX "^[ 	]*#[ 	]*include[ 	]*[\"<](App/(Mqtt|Http|Can|Data|Modbus)/|lwip/|modbus|pylontech)")
+        if(_hits)
+            message(FATAL_ERROR
+                    "Pack boundary: ${_f} must not know a protocol or a consumer: ${_hits}")
+        endif()
+    endif()
+endforeach()
+
+# 3. pack_fsm.c is libc-only: it is what tests/ links, and an RTOS or HAL call
+#    would take it out of reach of the host build.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_fsm.c")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_fsm.c" _hits
+         REGEX "HAL_|osThread|osTimer|osMessage|xQueue|xTask|vTask|taskENTER_CRITICAL|TRice")
+    if(_hits)
+        message(FATAL_ERROR
+                "pack_fsm.c must stay libc-only (host-tested): ${_hits}")
+    endif()
+endif()
+
+# 4. A TYPE may not take a lock.  PackType_Publish chooses the context.
+file(GLOB _pack_types "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_jkbms.c"
+                      "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_pylontech.c")
+foreach(_f ${_pack_types})
+    file(STRINGS "${_f}" _hits
+         REGEX "taskENTER_CRITICAL|taskDISABLE_INTERRUPTS|__disable_irq|portENTER_CRITICAL")
+    if(_hits)
+        message(FATAL_ERROR
+                "Pack type ${_f} must not lock -- PackType_Publish owns that: ${_hits}")
+    endif()
+endforeach()
+
+# 5. No floating point crosses the API.
+foreach(_f App/Pack/pack.h App/Pack/pack_type.h)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_f}" _hits
+             REGEX "^[ 	]*(float|double)[ 	]+[A-Za-z_]")
+        if(_hits)
+            message(FATAL_ERROR "No float may cross the pack API: ${_f}: ${_hits}")
+        endif()
+    endif()
+endforeach()
+
+# 6. Consumers see pack.h and nothing else from the module.
+file(GLOB_RECURSE _pack_consumers "${CMAKE_CURRENT_SOURCE_DIR}/App/*.c"
+                                  "${CMAKE_CURRENT_SOURCE_DIR}/App/*.h")
+foreach(_f ${_pack_consumers})
+    if(_f MATCHES "App/Pack/")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hits
+         REGEX "^[ 	]*#[ 	]*include[ 	]*[\"<](App/Pack/)?pack_(type|fsm|cfg)\.h")
+    if(_hits)
+        message(FATAL_ERROR
+                "Pack module boundary: ${_f} reaches past pack.h: ${_hits}")
+    endif()
+endforeach()
+
 # --- Backtrace library ---
 
 set(BACKTRACE_SOURCES
