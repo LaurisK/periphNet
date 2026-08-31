@@ -11,6 +11,10 @@
 		"Type": "TRice",
 		"Strg": "Modbus port: uart2\\n"
 	},
+	"1054": {
+		"Type": "TRice",
+		"Strg": "err:SysMon: %u tasks exceed SYSMON_MAX_TASKS (%u) — "
+	},
 	"1058": {
 		"Type": "TRice",
 		"Strg": "R0  = 0x%08X\\n"
@@ -18,6 +22,10 @@
 	"1059": {
 		"Type": "TRice",
 		"Strg": "FWU: erasing %u x 64KB blocks at 0x%X\\n"
+	},
+	"1069": {
+		"Type": "TRiceS",
+		"Strg": " plan: %s\\n"
 	},
 	"1070": {
 		"Type": "TRice",
@@ -39,6 +47,18 @@
 		"Type": "TRICE",
 		"Strg": "R12 = 0x%08X\\n"
 	},
+	"1106": {
+		"Type": "TRice",
+		"Strg": "nvDb: not initialised\\n"
+	},
+	"1107": {
+		"Type": "TRice",
+		"Strg": "Modbus config: apply armed\\n"
+	},
+	"1109": {
+		"Type": "TRice",
+		"Strg": "medium %u B, allocated %u B, free %u B\\n"
+	},
 	"1115": {
 		"Type": "TRice",
 		"Strg": "R3  = 0x%08X\\n"
@@ -50,6 +70,14 @@
 	"1142": {
 		"Type": "TRice",
 		"Strg": "  t=%us flags=0x%02X link=%u ip=0x%08X\\n"
+	},
+	"1150": {
+		"Type": "TRice",
+		"Strg": "[Pack] state restored from flash\\n"
+	},
+	"1154": {
+		"Type": "TRice",
+		"Strg": "MQTT: catalogue done, %u points %u writable\\n"
 	},
 	"1177": {
 		"Type": "TRice",
@@ -83,6 +111,22 @@
 		"Type": "TRice",
 		"Strg": "FWU: done %u bytes\\n"
 	},
+	"1317": {
+		"Type": "TRiceS",
+		"Strg": "SysMon: %s\\n"
+	},
+	"1325": {
+		"Type": "TRice",
+		"Strg": "Usage: jk probe [slave 1-247] [baud]\\n"
+	},
+	"1366": {
+		"Type": "TRiceS",
+		"Strg": "err:[%s]\\n"
+	},
+	"1369": {
+		"Type": "TRice",
+		"Strg": "JK: CRC mismatch - baud mismatch or a noisy/unterminated bus\\n"
+	},
 	"1370": {
 		"Type": "TRiceS",
 		"Strg": "MQTT set: no writable point: %s\\n"
@@ -91,17 +135,41 @@
 		"Type": "TRice",
 		"Strg": "CFSR = 0x%08X\\n"
 	},
+	"1404": {
+		"Type": "TRice",
+		"Strg": "WG started\\n"
+	},
 	"1405": {
 		"Type": "TRice",
 		"Strg": "\\n========================================\\n"
+	},
+	"1418": {
+		"Type": "TRice",
+		"Strg": "JK: bus busy - stop the walker first ('modbus stop')\\n"
+	},
+	"1445": {
+		"Type": "TRice",
+		"Strg": "Trice UDP subscriber %d.%d.%d.%d removed\\n"
+	},
+	"1448": {
+		"Type": "TRice",
+		"Strg": "  remaining=%u mAh capacity=%u mAh nameplate=%u mAh\\n"
 	},
 	"1457": {
 		"Type": "TRice",
 		"Strg": "  Return to: Handler mode (MSP)\\n"
 	},
+	"1472": {
+		"Type": "TRice",
+		"Strg": "Modbus TX[%u]: "
+	},
 	"1475": {
 		"Type": "TRice",
 		"Strg": "  4. Backtrace: bt\\n"
+	},
+	"1500": {
+		"Type": "TRice",
+		"Strg": "  balance: active=%u %d mA duty=%u src=%u sink=%u\\n"
 	},
 	"1504": {
 		"Type": "TRice",
@@ -115,9 +183,21 @@
 		"Type": "TRICE",
 		"Strg": "ERR: Bind FAILED, err=%d\\n"
 	},
+	"1564": {
+		"Type": "TRice",
+		"Strg": "pack: export failed\\n"
+	},
 	"1574": {
 		"Type": "TRice",
 		"Strg": "DHCP timeout – no IP (flags=0x%02X)\\n"
+	},
+	"1582": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: silence staged\\n"
+	},
+	"1589": {
+		"Type": "TRice",
+		"Strg": "pack %u: %d statistics\\n"
 	},
 	"1595": {
 		"Type": "TRice",
@@ -126,6 +206,10 @@
 	"1608": {
 		"Type": "TRiceS",
 		"Strg": "Modbus %s\\n"
+	},
+	"1630": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
 	},
 	"1634": {
 		"Type": "TRice",
@@ -143,21 +227,65 @@
 		"Type": "TRice",
 		"Strg": "\\n--- MemManage Fault ---\\n"
 	},
+	"1677": {
+		"Type": "TRice",
+		"Strg": "Modbus dump: dev %u slave %u addr %u regs %u failed (%d)\\n"
+	},
 	"1686": {
 		"Type": "trice",
 		"Strg": "err:=========================================\\n"
+	},
+	"1700": {
+		"Type": "TRice",
+		"Strg": "Modbus req: busy\\n"
+	},
+	"1701": {
+		"Type": "TRiceS",
+		"Strg": "Modbus monitor: %s\\n"
 	},
 	"1721": {
 		"Type": "TRICE0",
 		"Strg": "  - Forced HardFault (escalated from other fault)\\n"
 	},
+	"1729": {
+		"Type": "TRice",
+		"Strg": "WG: up, %d.%d.%d.%d -\u003e %d.%d.%d.%d:%d, %u range(s)\\n"
+	},
 	"1739": {
 		"Type": "TRICE",
 		"Strg": "LR  = 0x%08X (return address)\\n"
 	},
+	"1744": {
+		"Type": "TRiceS",
+		"Strg": "JK: %s\\n"
+	},
+	"1757": {
+		"Type": "TRice",
+		"Strg": "MQTT: catalogue requested\\n"
+	},
+	"1767": {
+		"Type": "TRice",
+		"Strg": "SysMon: peaks cleared\\n"
+	},
+	"1780": {
+		"Type": "TRiceS",
+		"Strg": "Modbus plan: %s\\n"
+	},
+	"1785": {
+		"Type": "TRice",
+		"Strg": "err:[Func] queue creation failed\\n"
+	},
+	"1809": {
+		"Type": "TRice",
+		"Strg": "JK: slave answered, rejected request (exception %u)\\n"
+	},
 	"1820": {
 		"Type": "TRICE0",
 		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
+	},
+	"1842": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|set|write|port|monitor|dump|inject|status\\n"
 	},
 	"1855": {
 		"Type": "TRice",
@@ -166,6 +294,14 @@
 	"1860": {
 		"Type": "TRice",
 		"Strg": "Modbus inject: ERR_SHORT\\n"
+	},
+	"1888": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: device offline: %s\\n"
+	},
+	"1893": {
+		"Type": "TRiceS",
+		"Strg": "SysMon: task recovered — %s\\n"
 	},
 	"1894": {
 		"Type": "TRICE0",
@@ -183,9 +319,29 @@
 		"Type": "TRice",
 		"Strg": "Modbus port: stop poller first\\n"
 	},
+	"1913": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus dump on|off\\n"
+	},
+	"1922": {
+		"Type": "TRice",
+		"Strg": "Modbus plans: none\\n"
+	},
+	"1931": {
+		"Type": "TRice",
+		"Strg": "Modbus: missed dev %u plan %u table %u (%us)\\n"
+	},
 	"1932": {
 		"Type": "TRice",
 		"Strg": "FWU: heap=%u hwm=%u\\n"
+	},
+	"1951": {
+		"Type": "TRice",
+		"Strg": "Modbus dump: subscribe failed (%d)\\n"
+	},
+	"1952": {
+		"Type": "TRiceS",
+		"Strg": " cond=%s"
 	},
 	"1977": {
 		"Type": "TRice",
@@ -195,21 +351,53 @@
 		"Type": "TRICE",
 		"Strg": "FWU: Download handler called\\n"
 	},
+	"2020": {
+		"Type": "TRice",
+		"Strg": "WG time base: %u s (flash-backed)\\n"
+	},
+	"2029": {
+		"Type": "TRice",
+		"Strg": "Usage: wg start|stop|status|endpoint|ip|genkey|save|reset\\n"
+	},
 	"2041": {
 		"Type": "TRiceS",
 		"Strg": "err:========== %s ==========\\n"
+	},
+	"2045": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: slot %u edit failed (%d)\\n"
+	},
+	"2051": {
+		"Type": "TRice",
+		"Strg": "pack %u: this type has no balancer\\n"
 	},
 	"2053": {
 		"Type": "TRice",
 		"Strg": "BTN2: triggering UsageFault (div-by-zero)\\n"
 	},
+	"2057": {
+		"Type": "TRice",
+		"Strg": "[Pack] %u pack(s), prov=%u, upd=%u cmd=%u/%u unk=%u stale=%u late=%u\\n"
+	},
+	"2069": {
+		"Type": "TRice",
+		"Strg": "WG: start failed (%d)\\n"
+	},
 	"2070": {
 		"Type": "trice",
 		"Strg": " [%c%c%c] freeStack=%u words\\n"
 	},
+	"2124": {
+		"Type": "TRice",
+		"Strg": "usage: pack cmd \u003cidx\u003e \u003cchargeEnable|dischargeEnable|"
+	},
 	"2153": {
 		"Type": "triceS",
 		"Strg": "\\t%s"
+	},
+	"2160": {
+		"Type": "TRice",
+		"Strg": "  %s %u B\\n"
 	},
 	"2170": {
 		"Type": "TRice",
@@ -219,6 +407,10 @@
 		"Type": "TRice",
 		"Strg": "Usage: mqtt start|stop|status|set|monitor|inject|publish\\n"
 	},
+	"2195": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: silence staged\n"
+	},
 	"2205": {
 		"Type": "TRice",
 		"Strg": "Modbus write queued: reg %u = %u\\n"
@@ -227,9 +419,21 @@
 		"Type": "trice",
 		"Strg": "\\t R12 = 0x%08X\\n\\t LR  = 0x%08X\\n"
 	},
+	"2222": {
+		"Type": "TRiceS",
+		"Strg": "err:SysMon: task stalled — %s\\n"
+	},
 	"2246": {
 		"Type": "TRice",
 		"Strg": "Modbus config: apply armed (walker swaps at lap boundary)\\n"
+	},
+	"2248": {
+		"Type": "TRice",
+		"Strg": "pack: not initialised\\n"
+	},
+	"2252": {
+		"Type": "TRice",
+		"Strg": "nvDb: layout '%s' v%u, last apply %u\\n"
 	},
 	"2266": {
 		"Type": "trice",
@@ -243,9 +447,29 @@
 		"Type": "TRICE0",
 		"Strg": "  - Invalid PC load\\n"
 	},
+	"2293": {
+		"Type": "TRiceS",
+		"Strg": "Modbus dump: %s\\n"
+	},
+	"2303": {
+		"Type": "TRice",
+		"Strg": "MQTT config forgotten\\n"
+	},
+	"2305": {
+		"Type": "TRice",
+		"Strg": "WG: stored config erased\\n"
+	},
+	"2308": {
+		"Type": "TRiceS",
+		"Strg": "SysMon: %s\\n"
+	},
 	"2335": {
 		"Type": "TRiceS",
 		"Strg": " mfg=\\\"%s\\\""
+	},
+	"2344": {
+		"Type": "TRiceS",
+		"Strg": "Modbus plan: %s\\n"
 	},
 	"2352": {
 		"Type": "TRice",
@@ -255,9 +479,17 @@
 		"Type": "TRice",
 		"Strg": "Modbus write: reg %u rejected\\n"
 	},
+	"2366": {
+		"Type": "TRice",
+		"Strg": "  %s %u/%u B used, erases max %u\\n"
+	},
 	"2382": {
 		"Type": "TRice",
 		"Strg": "Modbus inject: %u bytes\\n"
+	},
+	"2390": {
+		"Type": "TRice",
+		"Strg": "\\n"
 	},
 	"2396": {
 		"Type": "TRice",
@@ -274,6 +506,10 @@
 	"2427": {
 		"Type": "TRice",
 		"Strg": "n/a\\n"
+	},
+	"2429": {
+		"Type": "TRice",
+		"Strg": "\\n"
 	},
 	"2450": {
 		"Type": "TRice",
@@ -295,6 +531,10 @@
 		"Type": "TRice",
 		"Strg": "MQTT monitor: off\\n"
 	},
+	"2486": {
+		"Type": "TRice",
+		"Strg": "err:Pack: shared task init failed\\n"
+	},
 	"2496": {
 		"Type": "TRice8",
 		"Strg": "%02x %02x %02x %02x %02x %02x %02x %02x "
@@ -307,9 +547,25 @@
 		"Type": "TRice",
 		"Strg": "  - Divide by zero\\n"
 	},
+	"2507": {
+		"Type": "TRice",
+		"Strg": "WG config reset to defaults\\n"
+	},
 	"2531": {
 		"Type": "TRice",
 		"Strg": "Flash INIT FAILED\\n"
+	},
+	"2534": {
+		"Type": "TRice",
+		"Strg": "err:[Func] task creation failed\\n"
+	},
+	"2544": {
+		"Type": "TRice",
+		"Strg": "Modbus: unprovisioned (no valid config)\\n"
+	},
+	"2556": {
+		"Type": "TRiceS",
+		"Strg": "[Pack]   %s\\n"
 	},
 	"2564": {
 		"Type": "TRICE0",
@@ -318,6 +574,10 @@
 	"2565": {
 		"Type": "TRiceS",
 		"Strg": "Modbus: default config rejected: %s\\n"
+	},
+	"2566": {
+		"Type": "TRice",
+		"Strg": "nvDb: not initialised\\n"
 	},
 	"2572": {
 		"Type": "TRice",
@@ -331,6 +591,14 @@
 		"Type": "TRice",
 		"Strg": "Modbus: USART2 init failed\\n"
 	},
+	"2600": {
+		"Type": "TRice",
+		"Strg": "  age[%u]=%u ms\\n"
+	},
+	"2611": {
+		"Type": "TRice",
+		"Strg": "  caps=%08x cmds=%02x flags=%02x conf soc=%u soh=%u (per-mille)\\n"
+	},
 	"2636": {
 		"Type": "TRICE",
 		"Strg": "ERR: Invalid content length: %u (max %u)\\n"
@@ -339,9 +607,45 @@
 		"Type": "TRice",
 		"Strg": "Unknown command: %s\\n"
 	},
+	"2666": {
+		"Type": "TRice",
+		"Strg": "[Pack] jkbms bound dev=%u caps=%08x cmds=%02x\\n"
+	},
+	"2670": {
+		"Type": "TRiceS",
+		"Strg": "pack: unknown command '%s'\\n"
+	},
+	"2682": {
+		"Type": "TRice",
+		"Strg": "Modbus catalogue: empty\\n"
+	},
+	"2685": {
+		"Type": "TRice",
+		"Strg": "nvDb v%u, layout '%s' v%u\\n"
+	},
+	"2689": {
+		"Type": "TRice",
+		"Strg": "WG: netif_add failed\\n"
+	},
 	"2702": {
 		"Type": "TRice",
 		"Strg": "Boot UNCONFIRMED: awaiting /api/fwu/confirm\\n"
+	},
+	"2709": {
+		"Type": "TRice",
+		"Strg": "WG: config updated over HTTP (saved=%u)\\n"
+	},
+	"2718": {
+		"Type": "TRiceS",
+		"Strg": "pack '%s'"
+	},
+	"2728": {
+		"Type": "TRice",
+		"Strg": "pack %u: no such pack\\n"
+	},
+	"2731": {
+		"Type": "TRice",
+		"Strg": "Modbus dump: config live, region %u, %u devices %u points\\n"
 	},
 	"2733": {
 		"Type": "TRice",
@@ -375,6 +679,10 @@
 		"Type": "TRice",
 		"Strg": "BmsReader: started on CAN2 (500 kbps, IRQ)\\n"
 	},
+	"2859": {
+		"Type": "TRice",
+		"Strg": "[Pack] init: %u pack(s), %s\\n"
+	},
 	"2862": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Bus Fault ---\\n"
@@ -383,6 +691,18 @@
 		"Type": "TRICE",
 		"Strg": "PC  = 0x%08X (fault address)\\n"
 	},
+	"2873": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: %u delete failed (%d)\\n"
+	},
+	"2877": {
+		"Type": "trice",
+		"Strg": "err:=== end LR scan ===\\n"
+	},
+	"2885": {
+		"Type": "TRice",
+		"Strg": "WG: allowed %d.%d.%d.%d/%d.%d.%d.%d\\n"
+	},
 	"2895": {
 		"Type": "TRice",
 		"Strg": "Modbus monitor: off\\n"
@@ -390,6 +710,18 @@
 	"2905": {
 		"Type": "trice",
 		"Strg": "========== Tasks (%u) ==============\\n"
+	},
+	"2919": {
+		"Type": "TRice",
+		"Strg": "Usage: jk probe [slave 1-247] [baud]\\n"
+	},
+	"2922": {
+		"Type": "TRice",
+		"Strg": "[Pack] pylontech: bad bind token\\n"
+	},
+	"2930": {
+		"Type": "TRice",
+		"Strg": "Usage: wg endpoint \u003ca.b.c.d\u003e [port]\\n"
 	},
 	"2939": {
 		"Type": "TRice",
@@ -407,6 +739,10 @@
 		"Type": "TRice",
 		"Strg": "Usage: modbus set slave \u003c1-247\u003e\\n"
 	},
+	"3025": {
+		"Type": "TRice",
+		"Strg": "MQTT config save FAILED\\n"
+	},
 	"3027": {
 		"Type": "TRice",
 		"Strg": "  Stack: Main Stack (MSP)\\n"
@@ -422,6 +758,10 @@
 	"3056": {
 		"Type": "TRice",
 		"Strg": "Modbus TX[%u]: "
+	},
+	"3059": {
+		"Type": "TRiceS",
+		"Strg": "%s\\n"
 	},
 	"3060": {
 		"Type": "TRICE",
@@ -443,6 +783,10 @@
 		"Type": "TRice",
 		"Strg": "MQTT: task create failed\\n"
 	},
+	"3130": {
+		"Type": "TRice",
+		"Strg": "packs=%d provisioned=%u\\n"
+	},
 	"3149": {
 		"Type": "TRice",
 		"Strg": "\\n"
@@ -459,13 +803,25 @@
 		"Type": "TRICE0",
 		"Strg": "\\n--- Exception Return ---\\n"
 	},
+	"3191": {
+		"Type": "TRice",
+		"Strg": " [%u] %u.%03u V %d mA soc=%u.%u%% cond="
+	},
 	"3222": {
 		"Type": "TRice",
 		"Strg": "Usage: mqtt monitor on|off\\n"
 	},
+	"3229": {
+		"Type": "TRice",
+		"Strg": "  per-cell estimate: %u of %u measured, weakest=%d\\n"
+	},
 	"3231": {
 		"Type": "TRiceS",
 		"Strg": "Modbus: device online: %s\\n"
+	},
+	"3237": {
+		"Type": "TRice",
+		"Strg": "Modbus req: dev %u pt %u = %d (%d)\\n"
 	},
 	"3249": {
 		"Type": "TRice",
@@ -487,13 +843,29 @@
 		"Type": "TRice",
 		"Strg": "IMG: CRC verified OK\\n"
 	},
+	"3285": {
+		"Type": "TRice",
+		"Strg": "WG config saved\\n"
+	},
 	"3287": {
 		"Type": "TRiceS",
 		"Strg": "MQTT pub: %s\\n"
 	},
+	"3295": {
+		"Type": "TRice",
+		"Strg": "[Pack] %u pack(s), %s, upd=%u cmd=%u/%u unk=%u stale=%u late=%u\\n"
+	},
 	"3298": {
 		"Type": "TRICE0",
 		"Strg": "========================================\\n\\n"
+	},
+	"3322": {
+		"Type": "TRice",
+		"Strg": "Trice UDP subscriber %d.%d.%d.%d added\\n"
+	},
+	"3330": {
+		"Type": "TRiceS",
+		"Strg": "nline ? \"MQTT: device online: %s\\n"
 	},
 	"3355": {
 		"Type": "TRice",
@@ -503,6 +875,10 @@
 		"Type": "TRICE0",
 		"Strg": "  - No coprocessor\\n"
 	},
+	"3388": {
+		"Type": "TRice",
+		"Strg": "  %-16s %u B\\n"
+	},
 	"3402": {
 		"Type": "TRice",
 		"Strg": " chg=%u dsg=%u"
@@ -510,6 +886,10 @@
 	"3408": {
 		"Type": "TRice",
 		"Strg": "Modbus config: factory default staged + apply armed\\n"
+	},
+	"3409": {
+		"Type": "TRice",
+		"Strg": "  last apply: mode %s, result %u\\n"
 	},
 	"3414": {
 		"Type": "TRice",
@@ -543,6 +923,10 @@
 		"Type": "TRice",
 		"Strg": "Modbus: wrote reg %u = %u\\n"
 	},
+	"3508": {
+		"Type": "TRice",
+		"Strg": "Trice UDP retargeted to %d.%d.%d.%d\\n"
+	},
 	"3512": {
 		"Type": "TRice",
 		"Strg": "Modbus monitor: on\\n"
@@ -550,6 +934,10 @@
 	"3525": {
 		"Type": "TRice",
 		"Strg": "Usage: modbus port uart2|uart6|disabled\\n"
+	},
+	"3545": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
 	},
 	"3569": {
 		"Type": "TRICE0",
@@ -559,9 +947,29 @@
 		"Type": "TRICE",
 		"Strg": "CFSR = 0x%08X\\n"
 	},
+	"3587": {
+		"Type": "TRice",
+		"Strg": "Walker inject: no matching device (slave %u addr %u)\\n"
+	},
 	"3589": {
 		"Type": "TRice",
 		"Strg": "FWU: erase FAIL 0x%X\\n"
+	},
+	"3593": {
+		"Type": "TRice",
+		"Strg": "WG: not provisioned (upload a .conf) — tunnel not started\\n"
+	},
+	"3601": {
+		"Type": "TRice",
+		"Strg": "nvDb: not initialised\\n"
+	},
+	"3607": {
+		"Type": "TRice",
+		"Strg": "  func: posted=%u handled=%u ticks=%u dropped=%u/%u\\n"
+	},
+	"3617": {
+		"Type": "TRice",
+		"Strg": "wrn:[Func] unhandled event %u\\n"
 	},
 	"3619": {
 		"Type": "TRice",
@@ -570,6 +978,14 @@
 	"3640": {
 		"Type": "TRice",
 		"Strg": "FWU: erase_FAIL 0x%X\\n"
+	},
+	"3647": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: %d bytes staged\n"
+	},
+	"3649": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|set|write|port|monitor|dump|plan|inject|status\\n"
 	},
 	"3660": {
 		"Type": "TRICE0",
@@ -587,9 +1003,21 @@
 		"Type": "TRice",
 		"Strg": "Modbus write: reg %u rejected\\n"
 	},
+	"3715": {
+		"Type": "TRice",
+		"Strg": "  cmd acc=%u ok=%u fail=%u unknown=%u refused=%u late=%u\\n"
+	},
+	"3735": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus read|get|set|monitor|dump|plan|inject|silence|lastreq|status\\n"
+	},
 	"3737": {
 		"Type": "TRice",
 		"Strg": "Walker inject: no valid config\\n"
+	},
+	"3739": {
+		"Type": "TRice",
+		"Strg": " = %d e%d unit=%u flags=%02x\\n"
 	},
 	"3753": {
 		"Type": "TRICE",
@@ -603,6 +1031,10 @@
 		"Type": "TRice",
 		"Strg": "  - Unaligned access\\n"
 	},
+	"3803": {
+		"Type": "TRice",
+		"Strg": "  soc drift=%d per-mille  estimated=%u\\n"
+	},
 	"3808": {
 		"Type": "TRice",
 		"Strg": "Modbus config: staged %u devices %u txns %u points\\n"
@@ -610,6 +1042,10 @@
 	"3811": {
 		"Type": "TRice",
 		"Strg": "\\n--- Fault Status Registers ---\\n"
+	},
+	"3821": {
+		"Type": "TRiceS",
+		"Strg": " why=%s\\n"
 	},
 	"3828": {
 		"Type": "TRice",
@@ -623,6 +1059,18 @@
 		"Type": "TRICE",
 		"Strg": "DBG: Processing /trigger_update request\\n"
 	},
+	"3864": {
+		"Type": "TRice",
+		"Strg": "  waiting: '%s' v%u (%s)\\n"
+	},
+	"3870": {
+		"Type": "TRice",
+		"Strg": "WG config save failed\\n"
+	},
+	"3879": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
+	},
 	"3882": {
 		"Type": "TRICE0",
 		"Strg": "  4. Backtrace: bt\\n"
@@ -631,13 +1079,25 @@
 		"Type": "TRice",
 		"Strg": "tcpip HWM=%u words\\n"
 	},
+	"3899": {
+		"Type": "TRice",
+		"Strg": "err:Pack: pylontech register failed\\n"
+	},
 	"3900": {
 		"Type": "trice",
 		"Strg": "\\t CFSR = 0x%08X\\n\\t HFSR = 0x%08X\\n"
 	},
+	"3907": {
+		"Type": "TRice",
+		"Strg": "[Func] task up, %u event ids, queue %u\\n"
+	},
 	"3923": {
 		"Type": "TRice",
 		"Strg": "Usage: modbus inject \u003chexbytes\u003e\\n"
+	},
+	"3926": {
+		"Type": "TRiceS",
+		"Strg": "  %s"
 	},
 	"3929": {
 		"Type": "TRICE",
@@ -647,6 +1107,10 @@
 		"Type": "TRice",
 		"Strg": "HTTP: write stalled\\n"
 	},
+	"3941": {
+		"Type": "TRice",
+		"Strg": "pack %u: balance reset -\u003e %d\\n"
+	},
 	"3948": {
 		"Type": "TRICE",
 		"Strg": "DBG: Unknown path, sending 404\\n"
@@ -655,17 +1119,33 @@
 		"Type": "TRice",
 		"Strg": "MQTT monitor: on\\n"
 	},
+	"3956": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
+	},
 	"3966": {
 		"Type": "TRice",
 		"Strg": "\\n--- Usage Fault ---\\n"
+	},
+	"3992": {
+		"Type": "TRiceS",
+		"Strg": "%s"
 	},
 	"4008": {
 		"Type": "TRice",
 		"Strg": "Usage: mqtt inject \u003ctopic\u003e \u003cpayload\u003e\\n"
 	},
+	"4044": {
+		"Type": "TRice",
+		"Strg": "nvDb: staged layout dropped\\n"
+	},
 	"4048": {
 		"Type": "TRICE",
 		"Strg": "R3  = 0x%08X\\n"
+	},
+	"4078": {
+		"Type": "TRice",
+		"Strg": "Trice UDP destinations reset to broadcast\\n"
 	},
 	"4090": {
 		"Type": "TRICE0",
@@ -675,9 +1155,29 @@
 		"Type": "TRICE0",
 		"Strg": "  - Debug event\\n"
 	},
+	"4106": {
+		"Type": "TRice",
+		"Strg": "Modbus: stale config swap discarded\\n"
+	},
+	"4116": {
+		"Type": "TRice",
+		"Strg": "WG endpoint update failed\\n"
+	},
+	"4128": {
+		"Type": "TRice",
+		"Strg": "WG: add_peer failed\\n"
+	},
+	"4133": {
+		"Type": "TRice",
+		"Strg": "WG: running=%u session=%u cfg=%s\\n"
+	},
 	"4134": {
 		"Type": "TRice",
 		"Strg": "MQTT not running\\n"
+	},
+	"4137": {
+		"Type": "TRice",
+		"Strg": "MQTT: Modbus subscribe failed (%d)\\n"
 	},
 	"4144": {
 		"Type": "TRice",
@@ -690,6 +1190,18 @@
 	"4178": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Usage Fault ---\\n"
+	},
+	"4182": {
+		"Type": "TRice",
+		"Strg": "JK: probing slave %u at %u baud..\\n"
+	},
+	"4226": {
+		"Type": "TRice",
+		"Strg": "Usage: wg ip \u003ca.b.c.d\u003e [mask]\\n"
+	},
+	"4228": {
+		"Type": "TRice",
+		"Strg": "WG endpoint set to %u.%u.%u.%u:%u\\n"
 	},
 	"4230": {
 		"Type": "TRICE0",
@@ -719,6 +1231,10 @@
 		"Type": "TRice",
 		"Strg": "  %-16s %s\\n"
 	},
+	"4359": {
+		"Type": "TRice",
+		"Strg": "  cell%02u in=%d mAs out=%d mAs  dCap=%d mAh\\n"
+	},
 	"4361": {
 		"Type": "TRICE",
 		"Strg": "HFSR = 0x%08X\\n"
@@ -726,6 +1242,14 @@
 	"4371": {
 		"Type": "TRice",
 		"Strg": "Flash OK: mfr=0x%02X type=0x%02X cap=0x%02X\\n"
+	},
+	"4377": {
+		"Type": "TRice",
+		"Strg": "pack: erase -\u003e %d (board is now unprovisioned)\\n"
+	},
+	"4385": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
 	},
 	"4388": {
 		"Type": "TRICE0",
@@ -739,17 +1263,57 @@
 		"Type": "TRice",
 		"Strg": "upload HWM=%u words heap=%u\\n"
 	},
+	"4407": {
+		"Type": "TRiceS",
+		"Strg": "Modbus catalogue: %s\\n"
+	},
+	"4416": {
+		"Type": "TRice",
+		"Strg": "WG config reset failed\\n"
+	},
+	"4431": {
+		"Type": "TRice",
+		"Strg": "  %u.%03u V  %d mA   soc=%u.%u%% soh=%u.%u%%\\n"
+	},
 	"4432": {
 		"Type": "TRice",
 		"Strg": "LR  = 0x%08X (return address)\\n"
+	},
+	"4433": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus get \u003cdevOrd\u003e \u003cptOrd\u003e\\n"
+	},
+	"4450": {
+		"Type": "TRiceS",
+		"Strg": "nvDb: layout '%s' taken aboard, applies at next boot\\n"
+	},
+	"4464": {
+		"Type": "TRice",
+		"Strg": "JK: no reply - check A/B polarity, baud, slave addr, RS485 mode\\n"
 	},
 	"4468": {
 		"Type": "TRice",
 		"Strg": "     HARDFAULT EXCEPTION OCCURRED      \\n"
 	},
+	"4477": {
+		"Type": "TRice",
+		"Strg": "MQTT: catalogue done, %u writable points\\n"
+	},
+	"4487": {
+		"Type": "TRiceS",
+		"Strg": "SysMon: %s\\n"
+	},
+	"4506": {
+		"Type": "TRice",
+		"Strg": "Modbus: too many timers, some tables are not scheduled\\n"
+	},
 	"4538": {
 		"Type": "trice",
 		"Strg": "err:Stacked Registers:\\n"
+	},
+	"4550": {
+		"Type": "TRice",
+		"Strg": "[Pack] balance totals reset on %u\\n"
 	},
 	"4552": {
 		"Type": "TRice",
@@ -759,21 +1323,57 @@
 		"Type": "TRice",
 		"Strg": "Stack frame at: 0x%08X\\n"
 	},
+	"4569": {
+		"Type": "TRice",
+		"Strg": "WG cfg: erase failed\\n"
+	},
 	"4590": {
 		"Type": "TRICE0",
 		"Strg": "  - Instruction bus error\\n"
+	},
+	"4596": {
+		"Type": "TRice",
+		"Strg": "  age[%u]=never\\n"
 	},
 	"4600": {
 		"Type": "TRice",
 		"Strg": "Modbus: stopped (polls=%u errors=%u)\\n"
 	},
+	"4609": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: slot %u %s, swap armed\\n"
+	},
+	"4618": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: %u is free\\n"
+	},
+	"4645": {
+		"Type": "TRiceS",
+		"Strg": "  charge switch=%s"
+	},
+	"4663": {
+		"Type": "TRiceS",
+		"Strg": "[Pack] cmd origin %s\\n"
+	},
 	"4664": {
 		"Type": "TRice",
 		"Strg": "DHCP poll: flags=0x%02X link=%u ip=0x%08X\\n"
 	},
+	"4665": {
+		"Type": "TRice",
+		"Strg": "WG: device re-init failed\\n"
+	},
+	"4669": {
+		"Type": "TRice",
+		"Strg": "  cell%02u %u mV  lead=%u mOhm\\n"
+	},
 	"4687": {
 		"Type": "trice",
 		"Strg": "\\t  #%d 0x%08X\\n"
+	},
+	"4714": {
+		"Type": "TRice",
+		"Strg": "WG: tunnel DOWN (handshaking)\\n"
 	},
 	"4724": {
 		"Type": "TRice",
@@ -807,6 +1407,18 @@
 		"Type": "TRICE",
 		"Strg": "DBG: Connection accepted\\n"
 	},
+	"4803": {
+		"Type": "TRiceS",
+		"Strg": "err:SysMon: stack low — %s\\n"
+	},
+	"4836": {
+		"Type": "TRice",
+		"Strg": "pack: status|list|show \u003cn\u003e|cells \u003cn\u003e|cmd \u003cn\u003e \u003cname\u003e \u003cv\u003e|config|erase\\n"
+	},
+	"4846": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_SHORT\n"
+	},
 	"4849": {
 		"Type": "TRice",
 		"Strg": "Modbus inject: ERR_SHORT\\n"
@@ -823,6 +1435,10 @@
 		"Type": "TRice",
 		"Strg": "PC  = 0x%08X (fault address)\\n"
 	},
+	"4862": {
+		"Type": "TRice8",
+		"Strg": "%02x "
+	},
 	"4863": {
 		"Type": "trice",
 		"Strg": " LPWR"
@@ -830,6 +1446,10 @@
 	"4880": {
 		"Type": "TRice",
 		"Strg": "Modbus: task create failed\\n"
+	},
+	"4885": {
+		"Type": "TRice",
+		"Strg": "JK: exception 1 = Illegal Function - not a JK Modbus slave?\\n"
 	},
 	"4891": {
 		"Type": "TRice",
@@ -843,6 +1463,10 @@
 		"Type": "TRice",
 		"Strg": "FWU: write_ok 0x%X %uB\\n"
 	},
+	"4907": {
+		"Type": "TRice",
+		"Strg": "WG: stored config v%u, %d.%d.%d.%d key=%u\\n"
+	},
 	"4916": {
 		"Type": "TRice",
 		"Strg": "  - Invalid state (e.g., trying to switch to ARM mode)\\n"
@@ -850,6 +1474,10 @@
 	"4923": {
 		"Type": "TRice",
 		"Strg": "DFSR = 0x%08X\\n"
+	},
+	"4931": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus read|get|set|write|monitor|dump|plan|inject|silence|status\\n"
 	},
 	"4948": {
 		"Type": "TRice",
@@ -863,9 +1491,17 @@
 		"Type": "TRICE0",
 		"Strg": "  - MemManage fault on stacking\\n"
 	},
+	"4976": {
+		"Type": "TRice",
+		"Strg": "WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\\n"
+	},
 	"4994": {
 		"Type": "TRice",
 		"Strg": " polls=%u errors=%u\\n"
+	},
+	"4995": {
+		"Type": "TRice",
+		"Strg": "WG: config erased — board is unprovisioned\\n"
 	},
 	"4999": {
 		"Type": "TRICE0",
@@ -875,25 +1511,73 @@
 		"Type": "TRICE",
 		"Strg": "  2. Set PC: set $pc = 0x%08X\\n"
 	},
+	"5019": {
+		"Type": "TRice",
+		"Strg": "WG tunnel ip update failed\\n"
+	},
+	"5022": {
+		"Type": "TRice",
+		"Strg": "[Pack] pylontech node %u: no CAN RX dispatcher, cannot bind\\n"
+	},
+	"5049": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus plan list|show \u003cid\u003e|del \u003cid\u003e  (add/set: HTTP)\\n"
+	},
+	"5070": {
+		"Type": "TRice",
+		"Strg": "  alarms=%08x vendor=%08x/%08x staleGroups=%02x\\n"
+	},
 	"5092": {
 		"Type": "TRice",
 		"Strg": "MQTT: publishing HA discovery\\n"
+	},
+	"5147": {
+		"Type": "TRiceS",
+		"Strg": " discharge switch=%s\\n"
+	},
+	"5152": {
+		"Type": "TRice",
+		"Strg": "  %s %u B, erases max %u total %u\\n"
+	},
+	"5153": {
+		"Type": "TRice",
+		"Strg": "WG: no AllowedIPs configured\\n"
 	},
 	"5158": {
 		"Type": "TRice",
 		"Strg": "  - Undefined instruction\\n"
 	},
+	"5175": {
+		"Type": "TRice",
+		"Strg": "WG: time now=%us persisted=%us flash=%u\\n"
+	},
 	"5181": {
 		"Type": "TRiceS",
 		"Strg": " %s\\n"
+	},
+	"5188": {
+		"Type": "TRice",
+		"Strg": "layout '%s' v%u, free %u B\\n"
 	},
 	"5189": {
 		"Type": "TRiceS",
 		"Strg": "Modbus: device offline: %s\\n"
 	},
+	"5209": {
+		"Type": "TRice",
+		"Strg": "  limits: chg=%u mA dsg=%u mA chgV=%u mV dsgV=%u mV\\n"
+	},
 	"5229": {
 		"Type": "trice",
 		"Strg": "\\t PC  = 0x%08X\\n\\t PSR = 0x%08X\\n"
+	},
+	"5261": {
+		"Type": "TRice",
+		"Strg": "Usage: jk probe [slave] [baud]\\n"
+	},
+	"5270": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus dump on|off\\n"
 	},
 	"5284": {
 		"Type": "TRice",
@@ -911,9 +1595,37 @@
 		"Type": "TRice",
 		"Strg": "\\nTo find function at fault address:\\n"
 	},
+	"5299": {
+		"Type": "trice",
+		"Strg": "err:=== LR scan (candidates, filter host-side) ===\\n"
+	},
+	"5305": {
+		"Type": "TRice",
+		"Strg": "Modbus: unprovisioned (no valid config)\n"
+	},
+	"5341": {
+		"Type": "TRice",
+		"Strg": "WG: endpoint %d.%d.%d.%d:%d keepalive=%us\\n"
+	},
 	"5347": {
 		"Type": "TRice",
 		"Strg": "MQTT: stopped (published %u times, reconnects %u)\\n"
+	},
+	"5353": {
+		"Type": "TRice",
+		"Strg": "MQTT: publish queue create failed\\n"
+	},
+	"5355": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus plan del \u003cid\u003e\\n"
+	},
+	"5371": {
+		"Type": "TRiceS",
+		"Strg": "  %s\\n"
+	},
+	"5381": {
+		"Type": "TRice",
+		"Strg": "Modbus RX[%u]: "
 	},
 	"5393": {
 		"Type": "TRICE",
@@ -927,9 +1639,25 @@
 		"Type": "TRice",
 		"Strg": "FWU: tcp_recved malloc FAIL\\n"
 	},
+	"5422": {
+		"Type": "TRice",
+		"Strg": "SysMon: peaks cleared over HTTP\\n"
+	},
+	"5424": {
+		"Type": "TRice",
+		"Strg": "  erases: max %u, total %u, %u not yet saved\\n"
+	},
 	"5432": {
 		"Type": "TRice",
 		"Strg": "  - MemManage fault on stacking\\n"
+	},
+	"5436": {
+		"Type": "TRice",
+		"Strg": "Usage: nvdb status|layout|usage|wear|drop\\n"
+	},
+	"5441": {
+		"Type": "TRice",
+		"Strg": "pack %u: no such pack\\n"
 	},
 	"5444": {
 		"Type": "TRICE0",
@@ -951,9 +1679,17 @@
 		"Type": "TRICE",
 		"Strg": "  3. Set SP: set $sp = 0x%08X\\n"
 	},
+	"5486": {
+		"Type": "trice",
+		"Strg": "err:  LR 0x%08X\\n"
+	},
 	"5496": {
 		"Type": "TRICE",
 		"Strg": "EXC_RETURN = 0x%08X\\n"
+	},
+	"5513": {
+		"Type": "TRice",
+		"Strg": "pack %u: no such pack\\n"
 	},
 	"5514": {
 		"Type": "trice",
@@ -962,6 +1698,10 @@
 	"5527": {
 		"Type": "TRice",
 		"Strg": "  arm-none-eabi-addr2line -e build/application.elf 0x%08X\\n"
+	},
+	"5528": {
+		"Type": "TRice",
+		"Strg": "WG: no tunnel address configured\\n"
 	},
 	"5533": {
 		"Type": "TRICE0",
@@ -983,6 +1723,10 @@
 		"Type": "TRICE",
 		"Strg": "R2  = 0x%08X\\n"
 	},
+	"5581": {
+		"Type": "TRice",
+		"Strg": "Modbus config: staged %u capability %u plan %u device %u points\\n"
+	},
 	"5584": {
 		"Type": "TRice",
 		"Strg": "Modbus: no data yet\\n"
@@ -998,6 +1742,10 @@
 	"5588": {
 		"Type": "TRice",
 		"Strg": "FWU: write FAIL 0x%X\\n"
+	},
+	"5598": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus plan show \u003cid\u003e\\n"
 	},
 	"5621": {
 		"Type": "TRice",
@@ -1027,6 +1775,10 @@
 		"Type": "TRiceS",
 		"Strg": "err:Watchdog in task: %s\\n"
 	},
+	"5748": {
+		"Type": "TRice",
+		"Strg": "MQTT config saved\\n"
+	},
 	"5769": {
 		"Type": "TRice",
 		"Strg": "Modbus config: none valid\\n"
@@ -1035,25 +1787,69 @@
 		"Type": "TRice",
 		"Strg": "FWU: resp cb FAIL err=%d heap=%u\\n"
 	},
+	"5783": {
+		"Type": "TRice",
+		"Strg": "WG cfg: write failed\\n"
+	},
+	"5810": {
+		"Type": "TRice",
+		"Strg": "pack: unprovisioned - upload a config first\\n"
+	},
+	"5816": {
+		"Type": "TRice",
+		"Strg": "pack %u: cmd -\u003e %d\\n"
+	},
+	"5828": {
+		"Type": "TRiceS",
+		"Strg": "WG new public key: %s\\n"
+	},
 	"5841": {
 		"Type": "TRICE",
 		"Strg": "ERR: HTTP error callback, err=%d\\n"
+	},
+	"5844": {
+		"Type": "TRice",
+		"Strg": "WG: tunnel UP (session established)\\n"
+	},
+	"5873": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus set \u003cdevOrd\u003e \u003cptOrd\u003e \u003cvalue\u003e\\n"
 	},
 	"5897": {
 		"Type": "TRiceS",
 		"Strg": " device: %s\\n"
 	},
+	"5900": {
+		"Type": "TRice",
+		"Strg": "Modbus: config swapped, active region %u\\n"
+	},
 	"5922": {
 		"Type": "TRice",
 		"Strg": "Usage: modbus inject \u003cstartAddr\u003e \u003chexbytes\u003e\\n"
+	},
+	"5928": {
+		"Type": "TRice",
+		"Strg": "err:Pack: jkbms register failed\\n"
 	},
 	"5932": {
 		"Type": "TRICE0",
 		"Strg": "  - Bus fault on unstacking\\n"
 	},
+	"5935": {
+		"Type": "TRice",
+		"Strg": "Modbus: init failed\\n"
+	},
+	"5942": {
+		"Type": "TRice",
+		"Strg": "WG time base: %u s, NO FLASH BACKING (tunnel may need the "
+	},
 	"5944": {
 		"Type": "TRICE",
 		"Strg": "R0  = 0x%08X\\n"
+	},
+	"5954": {
+		"Type": "TRice",
+		"Strg": "JK: no reply - Modbus port is DISABLED ('modbus port uart2')\\n"
 	},
 	"5974": {
 		"Type": "TRice",
@@ -1075,6 +1871,10 @@
 		"Type": "TRICE",
 		"Strg": "DBG: HTTP accept, pcb=%p, err=%d\\n"
 	},
+	"6063": {
+		"Type": "TRice",
+		"Strg": "Modbus config: staged %u caps %u devices %u plans %u points\\n"
+	},
 	"6081": {
 		"Type": "TRice",
 		"Strg": "  - Bus fault on stacking\\n"
@@ -1082,6 +1882,10 @@
 	"6087": {
 		"Type": "trice",
 		"Strg": " BOR"
+	},
+	"6096": {
+		"Type": "TRice",
+		"Strg": "MQTT: using saved broker\\n"
 	},
 	"6102": {
 		"Type": "TRiceS",
@@ -1099,13 +1903,25 @@
 		"Type": "TRice",
 		"Strg": "MQTT: bridge starting, broker %u.%u.%u.%u:%u prefix=\\\"%s\\\"\\n"
 	},
+	"6111": {
+		"Type": "TRice",
+		"Strg": "Trice UDP: %u destination(s) restored\\n"
+	},
 	"6113": {
 		"Type": "TRice",
 		"Strg": "FWU: staged %u B\\n"
 	},
+	"6116": {
+		"Type": "TRice",
+		"Strg": "WG: WARNING entropy not fully from hardware RNG\\n"
+	},
 	"6121": {
 		"Type": "TRice",
 		"Strg": "  Return to: Thread mode (PSP)\\n"
+	},
+	"6127": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: %u delete armed\\n"
 	},
 	"6128": {
 		"Type": "TRice",
@@ -1122,6 +1938,10 @@
 	"6175": {
 		"Type": "TRice",
 		"Strg": "Rebooting...\\n"
+	},
+	"6199": {
+		"Type": "TRice",
+		"Strg": "SysMon: task           pri st   cpu%%  peak  stack(free/size)  checkins\\n"
 	},
 	"6209": {
 		"Type": "trice",
@@ -1151,6 +1971,10 @@
 		"Type": "TRice",
 		"Strg": "upload_progress=0x%X\\n"
 	},
+	"6260": {
+		"Type": "TRiceS",
+		"Strg": "Modbus engine: %s\\n"
+	},
 	"6284": {
 		"Type": "TRICE",
 		"Strg": "INFO: Bind OK, listening...\\n"
@@ -1162,6 +1986,14 @@
 	"6296": {
 		"Type": "TRice",
 		"Strg": "\\n--- Stack Frame (auto-saved by CPU) ---\\n"
+	},
+	"6303": {
+		"Type": "TRice",
+		"Strg": "nvDb: staged layout dropped\\n"
+	},
+	"6336": {
+		"Type": "TRiceS",
+		"Strg": "WG: public key %s\\n"
 	},
 	"6351": {
 		"Type": "TRiceS",
@@ -1175,13 +2007,45 @@
 		"Type": "TRice",
 		"Strg": "Modbus: stopped (polls=%u errors=%u)\\n"
 	},
+	"6393": {
+		"Type": "TRice",
+		"Strg": "[Pack] cmd %u=%d on %u -\u003e %d\\n"
+	},
+	"6398": {
+		"Type": "TRice",
+		"Strg": "WG tunnel ip set to %u.%u.%u.%u (use 'wg save' to keep)\\n"
+	},
+	"6401": {
+		"Type": "TRiceS",
+		"Strg": "WG conf: rejected — %s\\n"
+	},
 	"6402": {
 		"Type": "TRICE",
 		"Strg": "FWU: Upload complete - flushing buffer\\n"
 	},
+	"6409": {
+		"Type": "TRice",
+		"Strg": "Modbus: unprovisioned (no valid config)\\n"
+	},
+	"6420": {
+		"Type": "TRiceS",
+		"Strg": "Modbus %s\n"
+	},
+	"6422": {
+		"Type": "TRice",
+		"Strg": "Modbus config: region %u, %u caps %u devices %u plans %u points\\n"
+	},
 	"6426": {
 		"Type": "TRice",
 		"Strg": "Modbus not running\\n"
+	},
+	"6430": {
+		"Type": "TRice",
+		"Strg": "pack %u: no such pack\\n"
+	},
+	"6436": {
+		"Type": "TRice",
+		"Strg": "MQTT config forget FAILED\\n"
 	},
 	"6438": {
 		"Type": "TRice",
@@ -1195,6 +2059,10 @@
 		"Type": "TRICE0",
 		"Strg": "\\n--- Fault Status Registers ---\\n"
 	},
+	"6472": {
+		"Type": "TRice",
+		"Strg": "Modbus dump: on\\n"
+	},
 	"6484": {
 		"Type": "TRICE",
 		"Strg": "ERR: tcp_new FAILED - no PCBs!\\n"
@@ -1203,17 +2071,41 @@
 		"Type": "TRice",
 		"Strg": "  - Invalid PC load\\n"
 	},
+	"6492": {
+		"Type": "TRice",
+		"Strg": "HTTP: deliberate fault armed (erase=%u)\\n"
+	},
+	"6493": {
+		"Type": "TRice",
+		"Strg": "Trice UDP dest added %d.%d.%d.%d\\n"
+	},
 	"6497": {
 		"Type": "TRice",
 		"Strg": "Usage: modbus start|stop|read|set|write|port|monitor|inject|status\\n"
+	},
+	"6508": {
+		"Type": "TRice",
+		"Strg": "WG: rng hw_seeded=%u failures=%u\\n"
 	},
 	"6525": {
 		"Type": "TRICE",
 		"Strg": "DBG: Client closed connection\\n"
 	},
+	"6531": {
+		"Type": "TRice",
+		"Strg": "err:SysMon: run-time clock never advanced, CPU figures are 0\\n"
+	},
 	"6535": {
 		"Type": "TRice",
 		"Strg": "Modbus: polling slave %u at %u baud\\n"
+	},
+	"6547": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: %d bytes staged\\n"
+	},
+	"6557": {
+		"Type": "TRice",
+		"Strg": "Modbus: walker started\\n"
 	},
 	"6571": {
 		"Type": "TRiceS",
@@ -1223,6 +2115,10 @@
 		"Type": "TRice",
 		"Strg": "HFSR = 0x%08X\\n"
 	},
+	"6613": {
+		"Type": "TRice",
+		"Strg": "pack %u: %u cells, age=%u ms\\n"
+	},
 	"6619": {
 		"Type": "TRice",
 		"Strg": "\\n--- Bus Fault ---\\n"
@@ -1230,6 +2126,10 @@
 	"6622": {
 		"Type": "TRice",
 		"Strg": "Golden promotion done\\n"
+	},
+	"6636": {
+		"Type": "TRice",
+		"Strg": "   cell%02u soc=%d per-mille cap=%d mAh conf=%u\\n"
 	},
 	"6666": {
 		"Type": "TRICE0",
@@ -1255,6 +2155,22 @@
 		"Type": "TRice",
 		"Strg": "BmsReader: CAN2 init failed\\n"
 	},
+	"6715": {
+		"Type": "TRice8",
+		"Strg": "%02x %02x %02x %02x %02x %02x %02x %02x "
+	},
+	"6739": {
+		"Type": "TRice",
+		"Strg": "WG: new identity key generated on-device\\n"
+	},
+	"6756": {
+		"Type": "TRice",
+		"Strg": "  temp %d..%d dC  cells %u..%u mV (idx %u/%u)\\n"
+	},
+	"6764": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus inject \u003chexbytes\u003e\n"
+	},
 	"6773": {
 		"Type": "TRice",
 		"Strg": "Available commands:\\n"
@@ -1262,6 +2178,10 @@
 	"6781": {
 		"Type": "TRice",
 		"Strg": "BMS sim not running\\n"
+	},
+	"6787": {
+		"Type": "TRiceS",
+		"Strg": "  %s"
 	},
 	"6794": {
 		"Type": "TRice",
@@ -1283,9 +2203,25 @@
 		"Type": "TRice",
 		"Strg": "\\n--- HardFault Status ---\\n"
 	},
+	"6819": {
+		"Type": "TRice",
+		"Strg": "  alarms=%08x vendor=%08x/%08x\\n"
+	},
+	"6821": {
+		"Type": "TRice",
+		"Strg": "Trice UDP dest removed %d.%d.%d.%d\\n"
+	},
+	"6836": {
+		"Type": "TRice",
+		"Strg": "Modbus: started\\n"
+	},
 	"6862": {
 		"Type": "TRice",
 		"Strg": "Counter is - %d\\n"
+	},
+	"6870": {
+		"Type": "TRice",
+		"Strg": "Modbus inject: ERR_SHORT\\n"
 	},
 	"6905": {
 		"Type": "TRICE0",
@@ -1295,6 +2231,22 @@
 		"Type": "TRICE",
 		"Strg": "FWU: SUCCESS - %u bytes uploaded to flash\\n"
 	},
+	"6920": {
+		"Type": "TRice",
+		"Strg": "MQTT: auto-started from saved config (%u.%u.%u.%u:%u)\\n"
+	},
+	"6925": {
+		"Type": "TRice",
+		"Strg": "Modbus dump: off\\n"
+	},
+	"6928": {
+		"Type": "TRice",
+		"Strg": "Modbus config: region %u, %u caps %u devices %u plans %u points\\n"
+	},
+	"6947": {
+		"Type": "TRice",
+		"Strg": "[Pack] init: %u pack(s), provisioned=%u\\n"
+	},
 	"6951": {
 		"Type": "TRICE0",
 		"Strg": "========================================\\n"
@@ -1302,6 +2254,10 @@
 	"6961": {
 		"Type": "trice",
 		"Strg": "\u003e\u003e\u003e Backtrace:\\n"
+	},
+	"6966": {
+		"Type": "TRice",
+		"Strg": "WG conf: applied and stored\\n"
 	},
 	"6979": {
 		"Type": "TRice",
@@ -1339,6 +2295,10 @@
 		"Type": "TRice",
 		"Strg": "MQTT inject failed (not running or busy)\\n"
 	},
+	"7061": {
+		"Type": "TRiceS",
+		"Strg": "Modbus lastreq: %s\\n"
+	},
 	"7073": {
 		"Type": "TRice",
 		"Strg": "FWU: upload_done %u bytes -\u003e HTTP 200\\n"
@@ -1355,17 +2315,41 @@
 		"Type": "TRice",
 		"Strg": "HTTP server started on port 80\\n"
 	},
+	"7125": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: set %s\\n"
+	},
+	"7135": {
+		"Type": "TRice",
+		"Strg": "WG already running\\n"
+	},
 	"7148": {
 		"Type": "TRice",
 		"Strg": "Waiting for DHCP...\\n"
+	},
+	"7163": {
+		"Type": "TRice",
+		"Strg": "Usage: nvdb status|layout\\n"
 	},
 	"7173": {
 		"Type": "TRice",
 		"Strg": "AFSR = 0x%08X\\n"
 	},
+	"7177": {
+		"Type": "TRice",
+		"Strg": "nvDb: init returned %u\\n"
+	},
+	"7183": {
+		"Type": "TRice",
+		"Strg": "  updates=%u stale=%u bindFail=%u\\n"
+	},
 	"7187": {
 		"Type": "TRice",
 		"Strg": "Modbus inject: unmapped %u regs\\n"
+	},
+	"7189": {
+		"Type": "TRiceS",
+		"Strg": " device: %s\\n"
 	},
 	"7205": {
 		"Type": "TRICE",
@@ -1378,6 +2362,10 @@
 	"7223": {
 		"Type": "TRICE",
 		"Strg": "DBG: Processing GET / request\\n"
+	},
+	"7231": {
+		"Type": "TRice",
+		"Strg": "Modbus monitor: %s\\n"
 	},
 	"7239": {
 		"Type": "TRICE0",
@@ -1399,6 +2387,10 @@
 		"Type": "trice",
 		"Strg": " SW"
 	},
+	"7303": {
+		"Type": "TRice",
+		"Strg": "nvDb: nothing to drop, or the medium refused\\n"
+	},
 	"7304": {
 		"Type": "TRICE",
 		"Strg": "FWU: First packet - creating session\\n"
@@ -1419,13 +2411,33 @@
 		"Type": "trice",
 		"Strg": "\\t MMFAR= 0x%08X\\n\\t BFAR = 0x%08X\\n"
 	},
+	"7320": {
+		"Type": "TRice",
+		"Strg": "Modbus config: erased, board is unprovisioned\\n"
+	},
+	"7338": {
+		"Type": "TRiceS",
+		"Strg": " type=%s"
+	},
 	"7342": {
 		"Type": "TRICE0",
 		"Strg": "\\n--- Stack Unwinding Information ---\\n"
 	},
+	"7345": {
+		"Type": "TRice",
+		"Strg": "pack %u: window %u s, %u active samples, %u cells\\n"
+	},
 	"7357": {
 		"Type": "TRice",
 		"Strg": "\\n"
+	},
+	"7359": {
+		"Type": "TRice",
+		"Strg": "Modbus plan: %u refused, it has a subscriber\\n"
+	},
+	"7360": {
+		"Type": "TRice",
+		"Strg": "Walker inject: no points at addr %u\\n"
 	},
 	"7368": {
 		"Type": "TRICE",
@@ -1467,6 +2479,10 @@
 		"Type": "trice",
 		"Strg": "\\n"
 	},
+	"7484": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus read|get|set|monitor|dump|plan|inject|silence|status\\n"
+	},
 	"7499": {
 		"Type": "TRice",
 		"Strg": "  - Data access violation\\n"
@@ -1474,6 +2490,10 @@
 	"7501": {
 		"Type": "TRice",
 		"Strg": "Waiting for DHCP... flags=0x%02X\\n"
+	},
+	"7506": {
+		"Type": "TRice",
+		"Strg": "WG genkey failed\\n"
 	},
 	"7509": {
 		"Type": "TRICE",
@@ -1483,17 +2503,49 @@
 		"Type": "TRice",
 		"Strg": "HTTP: write failed, err=%d\\n"
 	},
+	"7518": {
+		"Type": "TRice",
+		"Strg": "Usage: mqtt start|stop|save|forget|status|set|monitor|inject|publish\\n"
+	},
 	"7539": {
 		"Type": "TRice",
 		"Strg": "Entering DFU mode...\\n"
+	},
+	"7547": {
+		"Type": "TRice",
+		"Strg": "Modbus req: rejected (%d)\\n"
+	},
+	"7558": {
+		"Type": "TRice",
+		"Strg": "Modbus lastreq: none\\n"
+	},
+	"7559": {
+		"Type": "TRiceS",
+		"Strg": "  table: %s\\n"
+	},
+	"7561": {
+		"Type": "TRice",
+		"Strg": "WG: tunnel stopped\\n"
 	},
 	"7593": {
 		"Type": "TRice",
 		"Strg": " PV: %u.%uV %u.%uA %uW\\n"
 	},
+	"7595": {
+		"Type": "TRiceS",
+		"Strg": " plan: %s\\n"
+	},
+	"7598": {
+		"Type": "TRice",
+		"Strg": "JK: probe FAILED (%d)\\n"
+	},
 	"7610": {
 		"Type": "TRice",
 		"Strg": "BMS rx=0x%02X (%u frames)"
+	},
+	"7630": {
+		"Type": "TRice",
+		"Strg": "WG: no stored config — tunnel stays down until provisioned\\n"
 	},
 	"7652": {
 		"Type": "TRICE",
@@ -1507,6 +2559,14 @@
 		"Type": "TRice",
 		"Strg": "Modbus: write reg %u failed (%d)\\n"
 	},
+	"7676": {
+		"Type": "TRiceS",
+		"Strg": "JK: FOUND %s\\n"
+	},
+	"7678": {
+		"Type": "TRice",
+		"Strg": "WG: NO IDENTITY — upload a .conf to provision\\n"
+	},
 	"7687": {
 		"Type": "trice",
 		"Strg": " WWDG"
@@ -1519,9 +2579,25 @@
 		"Type": "trice",
 		"Strg": "\\t R2  = 0x%08X\\n\\t R3  = 0x%08X\\n"
 	},
+	"7709": {
+		"Type": "TRice",
+		"Strg": "JK: truncated reply - RX overrun or a foreign device answered\\n"
+	},
+	"7714": {
+		"Type": "TRiceS",
+		"Strg": "MQTT: device online: %s\\n"
+	},
 	"7718": {
 		"Type": "TRice",
 		"Strg": " ChgLim=%d.%01dV DsgLim=%d.%01dV"
+	},
+	"7722": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus plan list|del \u003cid\u003e  (add/set: HTTP /api/modbus/plans)\\n"
+	},
+	"7730": {
+		"Type": "TRiceS",
+		"Strg": "Modbus: missed %s\\n"
 	},
 	"7734": {
 		"Type": "TRiceS",
@@ -1559,13 +2635,37 @@
 		"Type": "TRICE0",
 		"Strg": "\\n\\n"
 	},
+	"7778": {
+		"Type": "TRice",
+		"Strg": "WG start failed (%d)\\n"
+	},
+	"7781": {
+		"Type": "TRice",
+		"Strg": "pack: status|list|show \u003cn\u003e|cells \u003cn\u003e|stats \u003cn\u003e|balance \u003cn\u003e [reset]|"
+	},
+	"7793": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|get|set|write|monitor|dump|plan|inject|silence|status\\n"
+	},
 	"7804": {
 		"Type": "TRICE",
 		"Strg": "FWU: Content-Length parsed: %u bytes\\n"
 	},
+	"7815": {
+		"Type": "TRice",
+		"Strg": "JK: exception 2 = Illegal Data Address - wrong block base?\\n"
+	},
+	"7816": {
+		"Type": "TRice",
+		"Strg": "pack %u: no cell detail from this type\\n"
+	},
 	"7824": {
 		"Type": "TRice",
 		"Strg": "Modbus: write reg %u failed (%d)\\n"
+	},
+	"7836": {
+		"Type": "TRice",
+		"Strg": "Usage: modbus start|stop|read|write|monitor|dump|plan|inject|silence|status\\n"
 	},
 	"7857": {
 		"Type": "TRice",
@@ -1594,5 +2694,9 @@
 	"7981": {
 		"Type": "TRice",
 		"Strg": "Usage: modbus start|stop|read|set|write|status\\n"
+	},
+	"7992": {
+		"Type": "TRice",
+		"Strg": "[Pack] cmd %u=%d on %u by %s -\u003e %d\\n"
 	}
 }
