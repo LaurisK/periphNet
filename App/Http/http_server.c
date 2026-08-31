@@ -83,6 +83,11 @@ static const char index_html[] =
     ".ok{background:#dfd;color:#060}.err{background:#fdd;color:#600}"
     ".info{color:#555;font-size:.9em;margin:6px 0}"
     "pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}"
+    "table.cells{width:100%;border-collapse:collapse;font-size:.8em}"
+    "table.cells td{padding:1px 4px;white-space:nowrap}"
+    ".cb{display:inline-block;height:10px;background:#4a8;border-radius:2px;vertical-align:middle}"
+    ".cmin{background:#e63}.cmax{background:#37c}"
+    ".warn{color:#a60}.dim{color:#999}"
     "</style></head><body>"
     "<h1>PeriphNet</h1><div id=ver></div><div id=uptime class=info></div>"
     "<div class=card><h3>Image Management</h3>"
@@ -104,6 +109,11 @@ static const char index_html[] =
     "<div class=card><h3>System</h3>"
     "<div id=sysinfo class=info>Loading...</div><div id=systasks></div>"
     "<button class=btn-dl onclick=resetPeaks()>Reset peaks</button></div>"
+    "<div class=card><h3>Battery Pack</h3>"
+    "<div id=pkhdr class=info>Loading...</div>"
+    "<div id=pkcells></div>"
+    "<div id=pkstats class=info></div>"
+    "<button class=btn-dl onclick=balReset()>Reset balance totals</button></div>"
     "<div class=card><h3>Last Crash</h3>"
     "<div id=crash>Loading...</div></div>"
     "<script>"
@@ -162,7 +172,65 @@ static const char index_html[] =
     "}).catch(()=>{})}"
     "function resetPeaks(){fetch(B+'/api/system/reset-peaks',{method:'POST'})"
     ".then(()=>pollSys()).catch(()=>{})}"
-    "function poll(){pollImg();pollFwu();pollSys()}"
+    "function pollPack(){fetch(B+'/api/pack/status').then(r=>r.json()).then(j=>{"
+    "var h=document.getElementById('pkhdr');"
+    "if(!j.provisioned||!j.packs.length){h.innerHTML="
+    "'<span class=dim>Unprovisioned - upload a pack config to /api/pack/config</span>';"
+    "document.getElementById('pkcells').innerHTML='';return}"
+    "var p=j.packs[0];"
+    /* SOC is flagged as estimated or the vendor's, because a consumer that
+     * cannot tell them apart will trust the wrong one. */
+    "var est=(p.flags&1)?' <span class=dim>(estimated)</span>':' <span class=dim>(BMS)</span>';"
+    "var cls=p.cond=='online'?'':' class=warn';"
+    "h.innerHTML='<b'+cls+'>'+p.cond+'</b> &middot; '+p.name+' &middot; '+"
+    "(p.voltage_mV/1000).toFixed(3)+' V &middot; '+(p.current_mA/1000).toFixed(2)+' A &middot; '+"
+    "((p.voltage_mV*p.current_mA)/1e6).toFixed(0)+' W<br>'+"
+    "'SOC '+(p.soc_pm/10).toFixed(1)+'%'+est+' conf '+(p.socConf_pm/10).toFixed(0)+'%'+"
+    "(p.socDrift_pm?' drift '+(p.socDrift_pm/10).toFixed(1)+'%':'')+'<br>'+"
+    "(p.remaining_mAh/1000).toFixed(1)+' Ah of '+(p.capacity_mAh/1000).toFixed(1)+' Ah'+"
+    "' &middot; SOH '+(p.soh_pm/10).toFixed(0)+'% conf '+(p.sohConf_pm/10).toFixed(0)+'%<br>'+"
+    "'limits '+(p.chargeLimit_mA/1000).toFixed(0)+' A chg / '+"
+    "(p.dischargeLimit_mA/1000).toFixed(0)+' A dsg &middot; '+"
+    "'temp '+(p.tempMin_dC/10).toFixed(1)+'-'+(p.tempMax_dC/10).toFixed(1)+' C'+"
+    "(p.alarms?' &middot; <span class=warn>ALARM 0x'+p.alarms.toString(16)+'</span>':'');"
+    "}).catch(e=>{document.getElementById('pkhdr').textContent='pack: '+e})}"
+
+    "function pollCells(){fetch(B+'/api/pack/cells?idx=0').then(r=>r.json()).then(j=>{"
+    "var d=document.getElementById('pkcells');"
+    "if(!j.cells||!j.cells.length){d.innerHTML='';return}"
+    "var mv=j.cells.map(c=>c.mV),lo=Math.min.apply(null,mv),hi=Math.max.apply(null,mv);"
+    "var t='<div class=info>'+j.cellCount+' cells &middot; '+lo+'-'+hi+' mV &middot; spread <b>'+"
+    "(hi-lo)+' mV</b>'+(j.weakestIdx>=0?' &middot; weakest cell '+j.weakestIdx:'')+"
+    "' &middot; measured '+(j.measuredCells||0)+'/'+j.cellCount+'</div>';"
+    "t+='<table class=cells>';"
+    "for(var i=0;i<j.cells.length;i++){var c=j.cells[i];"
+    /* bar width is the position INSIDE the spread, so a 3 mV spread is still
+     * legible -- an absolute scale would render every cell identical. */
+    "var w=(hi>lo)?Math.round((c.mV-lo)*100/(hi-lo)):0;"
+    "var k=(c.mV==lo)?' cmin':((c.mV==hi)?' cmax':'');"
+    "t+='<tr><td>'+i+'</td><td>'+c.mV+' mV</td>'+"
+    "'<td style=width:55%><span class=cb'+k+' style=width:'+w+'%></span></td>'+"
+    "'<td>'+(c.soc_pm>=0?(c.soc_pm/10).toFixed(1)+'%':'<span class=dim>-</span>')+'</td>'+"
+    "'<td>'+(c.capacity_mAh>0&&c.capConf_pm>0?(c.capacity_mAh/1000).toFixed(1)+' Ah':"
+    "'<span class=dim>-</span>')+'</td></tr>'}"
+    "t+='</table>';"
+    "if(j.balance)t+='<div class=info>balancer '+(j.balance.active?'ON':'idle')+"
+    "' '+(j.balance.current_mA/1000).toFixed(2)+' A'+"
+    "(j.balance.srcIdx>=0?' cell '+j.balance.srcIdx+'&rarr;'+j.balance.sinkIdx:'')+'</div>';"
+    "d.innerHTML=t}).catch(e=>{})}"
+
+    "function pollPStats(){fetch(B+'/api/pack/stats?idx=0').then(r=>r.json()).then(j=>{"
+    "var d=document.getElementById('pkstats');if(!j.stats){d.innerHTML='';return}"
+    "var U={57:'Ah',9:'C',33:'A',35:'V',255:''};var t='';"
+    "for(var i=0;i<j.stats.length;i++){var s=j.stats[i];"
+    "t+=(i?' &middot; ':'')+s.name+' <b>'+(s.value*Math.pow(10,s.scale)).toFixed(2)+"
+    "'</b> '+(U[s.unit]||'')}"
+    "d.innerHTML=t}).catch(e=>{})}"
+
+    "function balReset(){if(!confirm('Reset accumulated balance totals?'))return;"
+    "fetch(B+'/api/pack/balance/reset?idx=0',{method:'POST'}).then(()=>pollCells())}"
+
+    "function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats()}"
     "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
     ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
     ".catch(e=>show('fmsg',e,0))}"
@@ -2087,7 +2155,7 @@ static void handle_pack_status(struct netconn *conn)
             "\"caps\":%u,\"cmds\":%u,\"flags\":%u,"
             "\"voltage_mV\":%u,\"current_mA\":%d,"
             "\"soc_pm\":%u,\"soh_pm\":%u,"
-            "\"socConf_pm\":%u,\"sohConf_pm\":%u,"
+            "\"socConf_pm\":%u,\"sohConf_pm\":%u,\"socDrift_pm\":%d,"
             "\"remaining_mAh\":%u,\"capacity_mAh\":%u,\"nameplate_mAh\":%u,"
             "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
             "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
@@ -2106,6 +2174,7 @@ static void handle_pack_status(struct netconn *conn)
             (unsigned)st.voltage_mV, (int)st.current_mA,
             (unsigned)st.soc_pm, (unsigned)st.soh_pm,
             (unsigned)st.socConf_pm, (unsigned)st.sohConf_pm,
+            (int)st.socDrift_pm,
             (unsigned)st.remaining_mAh, (unsigned)st.capacity_mAh,
             (unsigned)st.nameplate_mAh,
             (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,
@@ -2178,12 +2247,120 @@ static void handle_pack_cells(struct netconn *conn, uint8_t idx)
         (cl.balanceSrcIdx  == PACK_CELL_NONE) ? -1 : (int)cl.balanceSrcIdx,
         (cl.balanceSinkIdx == PACK_CELL_NONE) ? -1 : (int)cl.balanceSinkIdx);
 
-    for (c = 0u; (c < cl.cellCount) && (n < (PACK_CELLS_JSON_CAP - 64u)); c++) {
+    {
+        sPackCellEstimate est;
+        const int haveEst = (Pack_GetCellEstimate(idx, &est) == packErr_ok);
+
+        for (c = 0u; (c < cl.cellCount) && (n < (PACK_CELLS_JSON_CAP - 128u));
+             c++) {
+            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+                                    "%s{\"mV\":%u,\"leadRes_mOhm\":%u",
+                                    (c == 0u) ? "" : ",",
+                                    (unsigned)cl.cell_mV[c],
+                                    (unsigned)cl.leadRes_mOhm[c]);
+            if (haveEst != 0) {
+                /* soc_pm -1 = not anchored; capacity 0 = not yet measured.
+                 * Both are reported as-is rather than hidden, so a consumer
+                 * can tell "unknown" from "zero". */
+                n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+                                        ",\"soc_pm\":%d,\"capacity_mAh\":%d"
+                                        ",\"capConf_pm\":%u",
+                                        (int)est.soc_pm[c],
+                                        (int)est.capacity_mAh[c],
+                                        (unsigned)est.capConf_pm[c]);
+            }
+            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "}");
+        }
+        /* Close the cells array, then the pack-level estimator summary
+         * alongside it -- not inside it, where it would be a property of
+         * cell 0. */
+        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]");
+        if (haveEst != 0) {
+            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+                                    ",\"weakestIdx\":%d,\"measuredCells\":%u",
+                                    (int)est.weakestIdx,
+                                    (unsigned)est.measuredCount);
+        }
+    }
+    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "}");
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
+/** GET /api/pack/stats?idx=N -- what this pack knows about itself (§23.1).
+ *  A GENERIC LIST: the renderer needs no per-vendor code, which is what lets
+ *  a JK and a Dyness expose different sets through one endpoint. */
+static void handle_pack_stats(struct netconn *conn, uint8_t idx)
+{
+    char    *js;
+    uint32_t n = 0u;
+    int      cnt = Pack_StatCount(idx);
+    int      i;
+
+    if (cnt < 0) {
+        send_json(conn, "404 Not Found", "{\"error\":\"no such pack\"}");
+        return;
+    }
+    js = (char *)pvPortMalloc(PACK_CELLS_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+                            "{\"idx\":%u,\"count\":%d,\"stats\":[",
+                            (unsigned)idx, cnt);
+    for (i = 0; (i < cnt) && (n < (PACK_CELLS_JSON_CAP - 128u)); i++) {
+        sPackStat st;
+
+        if (Pack_StatGet(idx, (uint8_t)i, &st) != packErr_ok) {
+            continue;
+        }
         n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
-                                "%s{\"mV\":%u,\"leadRes_mOhm\":%u}",
-                                (c == 0u) ? "" : ",",
-                                (unsigned)cl.cell_mV[c],
-                                (unsigned)cl.leadRes_mOhm[c]);
+            "%s{\"name\":\"%s\",\"value\":%d,\"unit\":%u,"
+            "\"scale\":%d,\"flags\":%u}",
+            (i == 0) ? "" : ",", st.name, (int)st.value,
+            (unsigned)st.unit, (int)st.scale_pow10, (unsigned)st.flags);
+    }
+    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]}");
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
+/** GET /api/pack/balance?idx=N -- integrated balance transfer per cell. */
+static void handle_pack_balance(struct netconn *conn, uint8_t idx)
+{
+    sPackBalanceStats b;
+    char             *js;
+    uint32_t          n = 0u;
+    uint8_t           c;
+    int               r = Pack_BalanceStats(idx, &b);
+
+    if (r == packErr_notSupported) {
+        send_json(conn, "404 Not Found",
+                  "{\"error\":\"this pack type has no balancer\"}");
+        return;
+    }
+    if (r != packErr_ok) {
+        send_json(conn, "404 Not Found", "{\"error\":\"no such pack\"}");
+        return;
+    }
+    js = (char *)pvPortMalloc(PACK_CELLS_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+        "{\"idx\":%u,\"window_sec\":%u,\"activeSamples\":%u,"
+        "\"cellCount\":%u,\"cells\":[",
+        (unsigned)idx, (unsigned)b.window_sec,
+        (unsigned)b.activeSamples, (unsigned)b.cellCount);
+    for (c = 0u; (c < b.cellCount) && (n < (PACK_CELLS_JSON_CAP - 96u)); c++) {
+        /* capacityDelta_mAh is RELATIVE TO THE PACK MEDIAN; negative means
+         * the balancer keeps charging this cell, i.e. it holds less. */
+        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+            "%s{\"in_mAs\":%d,\"out_mAs\":%d,\"capacityDelta_mAh\":%d}",
+            (c == 0u) ? "" : ",", (int)b.in_mAs[c], (int)b.out_mAs[c],
+            (int)b.capacityDelta_mAh[c]);
     }
     (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]}");
     send_json(conn, "200 OK", js);
@@ -2765,6 +2942,14 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_cfg_erase(conn);
     } else if (route_is("GET /api/pack/status")) {
         handle_pack_status(conn);
+    } else if (route_is("GET /api/pack/stats")) {
+        handle_pack_stats(conn, (uint8_t)query_int("idx", 0));
+    } else if (route_is("GET /api/pack/balance")) {
+        handle_pack_balance(conn, (uint8_t)query_int("idx", 0));
+    } else if (route_is("POST /api/pack/balance/reset")) {
+        send_json(conn, "200 OK",
+                  (Pack_BalanceReset((uint8_t)query_int("idx", 0)) == packErr_ok)
+                  ? "{\"ok\":true}" : "{\"ok\":false}");
     } else if (route_is("GET /api/pack/cells")) {
         handle_pack_cells(conn, (uint8_t)query_int("idx", 0));
     } else if (route_is("POST /api/pack/config/verify")) {

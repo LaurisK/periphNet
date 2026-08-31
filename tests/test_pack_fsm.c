@@ -67,6 +67,10 @@ static void test_layout_is_as_budgeted(void)
      * VOLTAGE limits), -4 for groupsStale, removed when staleness became a
      * property of the PACK rather than of each of its attributes. */
     TEST_ASSERT(sizeof(sPackState) == 136u);
+    /* Unchanged: the per-cell estimator output lives in its own
+     * sPackCellEstimate, NOT here.  sPackCells is the type's staging buffer
+     * and is held twice per instance, so core-derived values in it would be
+     * paid for twice over. */
     TEST_ASSERT(sizeof(sPackCells) == 80u);
 
     /* Persisted in the pack configuration: never renumbered, append only. */
@@ -905,6 +909,172 @@ static void test_a_stale_generation_cannot_complete_the_next_command(void)
     TEST_ASSERT(deliver == packErr_ok);
 }
 
+/* ==========================================================================
+ * Balance transfer accounting (§23.3) -- the arithmetic that decides which
+ * cell an operator would actually replace, so it is tested rather than
+ * merely exercised on a board.
+ * ========================================================================== */
+
+static void bal_init(sPackBalanceStats *b, uint8_t cells)
+{
+    memset(b, 0, sizeof(*b));
+    b->cellCount = cells;
+}
+
+/** Charge is credited to the sink and debited from the source, in mAs. */
+static void test_balance_attributes_to_src_and_sink(void)
+{
+    sPackBalanceStats b;
+
+    bal_init(&b, 16u);
+    /* 2000 mA for 1000 ms = 2000 mAs, cell 3 -> cell 7. */
+    TEST_ASSERT(1 == PackFsm_BalanceAccumulate(&b, 1, 2000, 1000u,
+                                               PACK_BAL_MAX_GAP_MS, 3u, 7u));
+    TEST_ASSERT(b.in_mAs[7]  == 2000);
+    TEST_ASSERT(b.out_mAs[3] == 2000);
+    TEST_ASSERT(b.activeSamples == 1u);
+    /* Nothing else moved. */
+    TEST_ASSERT(b.in_mAs[3]  == 0);
+    TEST_ASSERT(b.out_mAs[7] == 0);
+}
+
+/** Sign of the reported current is irrelevant -- src/sink carry direction. */
+static void test_balance_ignores_current_sign(void)
+{
+    sPackBalanceStats a;
+    sPackBalanceStats c;
+
+    bal_init(&a, 8u);
+    bal_init(&c, 8u);
+    (void)PackFsm_BalanceAccumulate(&a, 1,  1500, 2000u, PACK_BAL_MAX_GAP_MS, 0u, 1u);
+    (void)PackFsm_BalanceAccumulate(&c, 1, -1500, 2000u, PACK_BAL_MAX_GAP_MS, 0u, 1u);
+    TEST_ASSERT(a.in_mAs[1] == c.in_mAs[1]);
+    TEST_ASSERT(a.in_mAs[1] == 3000);
+}
+
+/** An interval we did not observe is DROPPED, never scaled: charge that
+ *  flowed while the transport was stalled is not ours to attribute. */
+static void test_balance_drops_an_unobserved_gap(void)
+{
+    sPackBalanceStats b;
+
+    bal_init(&b, 16u);
+    TEST_ASSERT(0 == PackFsm_BalanceAccumulate(&b, 1, 2000,
+                                               PACK_BAL_MAX_GAP_MS + 1u,
+                                               PACK_BAL_MAX_GAP_MS, 3u, 7u));
+    TEST_ASSERT(b.in_mAs[7] == 0);
+    TEST_ASSERT(b.activeSamples == 0u);
+
+    /* Exactly at the limit is still observed -- the bound is inclusive. */
+    TEST_ASSERT(1 == PackFsm_BalanceAccumulate(&b, 1, 2000,
+                                               PACK_BAL_MAX_GAP_MS,
+                                               PACK_BAL_MAX_GAP_MS, 3u, 7u));
+}
+
+/** An idle balancer contributes nothing, however long the interval. */
+static void test_balance_ignores_an_idle_balancer(void)
+{
+    sPackBalanceStats b;
+
+    bal_init(&b, 16u);
+    TEST_ASSERT(0 == PackFsm_BalanceAccumulate(&b, 0, 2000, 5000u,
+                                               PACK_BAL_MAX_GAP_MS, 3u, 7u));
+    TEST_ASSERT(b.activeSamples == 0u);
+}
+
+/** PACK_CELL_NONE names no cell, so a one-ended transfer credits only the
+ *  end that exists and corrupts nothing. */
+static void test_balance_handles_a_missing_endpoint(void)
+{
+    sPackBalanceStats b;
+    uint8_t           c;
+    int32_t           total = 0;
+
+    bal_init(&b, 16u);
+    (void)PackFsm_BalanceAccumulate(&b, 1, 1000, 1000u, PACK_BAL_MAX_GAP_MS,
+                                    PACK_CELL_NONE, 5u);
+    TEST_ASSERT(b.in_mAs[5] == 1000);
+    for (c = 0u; c < 16u; c++) {
+        total += b.out_mAs[c];
+    }
+    TEST_ASSERT(total == 0);        /* nothing was debited anywhere */
+}
+
+/** THE POINT OF THE WHOLE EXERCISE: a cell the balancer keeps charging is
+ *  reported as holding LESS than the pack, and the reference is the pack's
+ *  own median so a uniform bias does not condemn every cell. */
+static void test_balance_derives_capacity_below_the_median(void)
+{
+    sPackBalanceStats b;
+    int32_t           d[PACK_CELLS_MAX];
+    uint8_t           c;
+
+    bal_init(&b, 8u);
+    /* Cells 0..6 are neutral; cell 3 has had 7 200 000 mAs (2 Ah) put in. */
+    b.in_mAs[3] = 7200000;
+
+    PackFsm_BalanceDerive(&b, d);
+
+    /* Median net is 0 (seven cells at zero), so cell 3 reads -2000 mAh. */
+    TEST_ASSERT(d[3] == -2000);
+    for (c = 0u; c < 8u; c++) {
+        if (c != 3u) {
+            TEST_ASSERT(d[c] == 0);
+        }
+    }
+}
+
+/** A cell the balancer keeps DRAINING holds more than the pack. */
+static void test_balance_derives_capacity_above_the_median(void)
+{
+    sPackBalanceStats b;
+    int32_t           d[PACK_CELLS_MAX];
+
+    bal_init(&b, 8u);
+    b.out_mAs[2] = 3600000;         /* 1 Ah taken out of cell 2 */
+
+    PackFsm_BalanceDerive(&b, d);
+    TEST_ASSERT(d[2] == +1000);     /* above the pack median by 1 Ah */
+}
+
+/** A UNIFORM bias is removed by the median: if the balancer moved the same
+ *  charge into every cell, no cell is deviant. */
+static void test_balance_median_cancels_a_uniform_bias(void)
+{
+    sPackBalanceStats b;
+    int32_t           d[PACK_CELLS_MAX];
+    uint8_t           c;
+
+    bal_init(&b, 8u);
+    for (c = 0u; c < 8u; c++) {
+        b.in_mAs[c] = 3600000;      /* 1 Ah into every cell */
+    }
+    PackFsm_BalanceDerive(&b, d);
+    for (c = 0u; c < 8u; c++) {
+        TEST_ASSERT(d[c] == 0);
+    }
+}
+
+/** Accumulation over many small intervals equals one long one -- the mAs
+ *  representation must not lose charge to repeated truncation. */
+static void test_balance_accumulates_without_drift(void)
+{
+    sPackBalanceStats many;
+    sPackBalanceStats once;
+    int               i;
+
+    bal_init(&many, 4u);
+    bal_init(&once, 4u);
+    for (i = 0; i < 60; i++) {
+        (void)PackFsm_BalanceAccumulate(&many, 1, 1000, 1000u,
+                                        PACK_BAL_MAX_GAP_MS, 0u, 1u);
+    }
+    (void)PackFsm_BalanceAccumulate(&once, 1, 1000, 60000u,
+                                    PACK_BAL_MAX_GAP_MS, 0u, 1u);
+    TEST_ASSERT(many.in_mAs[1] == once.in_mAs[1]);
+    TEST_ASSERT(many.in_mAs[1] == 60000);
+}
+
 int main(void)
 {
     printf("=== pack_fsm tests ===\n");
@@ -920,6 +1090,17 @@ int main(void)
     RUN_TEST(test_age_zero_is_not_never);
     RUN_TEST(test_partial_publish_leaves_unnamed_groups_untouched);
     RUN_TEST(test_never_delivered_reads_age_never);
+
+    /* balance transfer accounting */
+    RUN_TEST(test_balance_attributes_to_src_and_sink);
+    RUN_TEST(test_balance_ignores_current_sign);
+    RUN_TEST(test_balance_drops_an_unobserved_gap);
+    RUN_TEST(test_balance_ignores_an_idle_balancer);
+    RUN_TEST(test_balance_handles_a_missing_endpoint);
+    RUN_TEST(test_balance_derives_capacity_below_the_median);
+    RUN_TEST(test_balance_derives_capacity_above_the_median);
+    RUN_TEST(test_balance_median_cancels_a_uniform_bias);
+    RUN_TEST(test_balance_accumulates_without_drift);
 
     RUN_TEST(test_confidence_cap_decays_before_stale);
 

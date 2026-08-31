@@ -411,14 +411,35 @@ foreach(_f App/Pack/pack.c App/Pack/pack_fsm.c App/Pack/pack_cfg.c)
     endif()
 endforeach()
 
-# 3. pack_fsm.c is libc-only: it is what tests/ links, and an RTOS or HAL call
-#    would take it out of reach of the host build.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_fsm.c")
-    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_fsm.c" _hits
-         REGEX "HAL_|osThread|osTimer|osMessage|xQueue|xTask|vTask|taskENTER_CRITICAL|TRice")
+# 3. pack_fsm.c and pack_soc.c are libc-only: they are what tests/ links, and
+#    an RTOS or HAL call would take them out of reach of the host build.
+#    pack_soc.c especially -- it is the SOC estimator, and its arithmetic
+#    should be provable on a laptop rather than only observable on a roof.
+foreach(_pure App/Pack/pack_fsm.c App/Pack/pack_soc.c)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}" _hits
+             REGEX "HAL_|osThread|osTimer|osMessage|osKernel|xQueue|xTask|vTask|taskENTER_CRITICAL|TRice|NvDb_|W25Q128_")
+        if(_hits)
+            message(FATAL_ERROR
+                    "${_pure} must stay libc-only (host-tested): ${_hits}")
+        endif()
+    endif()
+endforeach()
+
+# 3c. The embedded web UI must contain no C-escaped quote inside its string
+#     literal.  `\'` in a C double-quoted string is just `'`, so a JS string
+#     written as class=\'x\' arrives at the browser as class='x' -- string,
+#     bare identifier, string -- which is a SyntaxError that kills the WHOLE
+#     script, blanking every card on the page including the firmware ones.
+#     Observed on 2026-08-27.  Single-token unquoted attributes avoid it
+#     entirely; this makes the alternative fail loudly.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/App/Http/http_server.c")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/App/Http/http_server.c" _hits
+         REGEX "^[ \t]*\"[^\"]*\\\\'")
     if(_hits)
         message(FATAL_ERROR
-                "pack_fsm.c must stay libc-only (host-tested): ${_hits}")
+                "Web UI: C-escaped quote in the HTML literal reaches the "
+                "browser unescaped and breaks the whole script: ${_hits}")
     endif()
 endif()
 

@@ -227,6 +227,55 @@ uint32_t PackFsm_AgeMs(const sPackFsm *fsm, ePackGroup grp, uint32_t now_ms);
  */
 uint16_t PackFsm_ConfidenceCap_pm(const sPackFsm *fsm, uint32_t now_ms);
 
+/* --- balance transfer accounting (§23.3) -------------------------------- */
+
+/**
+ * @brief  Fold one observation interval into the per-cell accumulation.
+ *
+ * PURE ARITHMETIC, so it is host-tested rather than only exercised on a
+ * board.  The caller owns the lock and the clock; this owns the rules:
+ *   - nothing is integrated unless the balancer was ACTIVE over the interval;
+ *   - an interval longer than @p maxGap_ms is DROPPED, not scaled -- a gap
+ *     that long means we stopped observing (rebind, config swap, stalled
+ *     transport) and charge that flowed unobserved is not ours to attribute;
+ *   - charge is credited to @p sinkIdx and debited from @p srcIdx, each only
+ *     when it names a real cell;
+ *   - accumulation is in MILLIAMP-SECONDS so the sample path never divides.
+ *
+ * @param  bal - the accumulation, mutated in place
+ * @param  active - non-zero if the balancer was transferring
+ * @param  current_mA - transfer magnitude (sign ignored)
+ * @param  dt_ms - length of the interval
+ * @param  maxGap_ms - longest interval still considered observed
+ * @param  srcIdx - cell drained, or PACK_CELL_NONE
+ * @param  sinkIdx - cell charged, or PACK_CELL_NONE
+ * @retval 1 if charge was attributed, 0 if the interval was skipped
+ * @note   Pure.  Any context.
+ */
+int PackFsm_BalanceAccumulate(sPackBalanceStats *bal, int active,
+                              int32_t current_mA, uint32_t dt_ms,
+                              uint32_t maxGap_ms,
+                              uint8_t srcIdx, uint8_t sinkIdx);
+
+/**
+ * @brief  Derive per-cell capacity deviation from the accumulation.
+ *
+ * net[c] = in[c] - out[c].  The reference is the pack's own MEDIAN net
+ * transfer, so a balancer that favours one end uniformly does not read as
+ * every cell being bad.  The result is NEGATED: a cell the balancer keeps
+ * having to CHARGE holds less than the pack.
+ *
+ * RELATIVE, NOT ABSOLUTE.  This says "cell 6 is 400 mAh below the pack
+ * median", never "cell 6 is 258 Ah" -- an absolute per-cell capacity needs
+ * the two-knee measurement of §22.
+ *
+ * @param  bal - the accumulation
+ * @param  delta_mAh_out - array of at least bal->cellCount entries
+ * @note   Pure.  Any context.
+ */
+void PackFsm_BalanceDerive(const sPackBalanceStats *bal,
+                           int32_t *delta_mAh_out);
+
 /* --- capability gating -------------------------------------------------- */
 
 /**

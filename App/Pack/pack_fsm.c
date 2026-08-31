@@ -196,6 +196,75 @@ uint16_t PackFsm_ConfidenceCap_pm(const sPackFsm *fsm, uint32_t now_ms)
     return (uint16_t)(num / (uint64_t)(fsm->staleAfter_ms - knee));
 }
 
+int PackFsm_BalanceAccumulate(sPackBalanceStats *bal, int active,
+                              int32_t current_mA, uint32_t dt_ms,
+                              uint32_t maxGap_ms,
+                              uint8_t srcIdx, uint8_t sinkIdx)
+{
+    int32_t q_mAs;
+
+    if ((bal == NULL) || (active == 0) || (dt_ms == 0u) ||
+        (dt_ms > maxGap_ms) || (bal->cellCount == 0u)) {
+        return 0;
+    }
+    if (current_mA < 0) {
+        current_mA = -current_mA;       /* magnitude; src/sink carry direction */
+    }
+
+    /* mA x ms / 1000 = mAs.  Done in 64-bit because the product overflows
+     * int32 for a long interval at a high balance current, and the whole
+     * point of accumulating in mAs is that the sample path never divides by
+     * 3600. */
+    q_mAs = (int32_t)(((int64_t)current_mA * (int64_t)dt_ms) / 1000);
+    if (q_mAs == 0) {
+        return 0;
+    }
+
+    if (sinkIdx < bal->cellCount) {
+        bal->in_mAs[sinkIdx] += q_mAs;
+    }
+    if (srcIdx < bal->cellCount) {
+        bal->out_mAs[srcIdx] += q_mAs;
+    }
+    bal->activeSamples++;
+    return 1;
+}
+
+void PackFsm_BalanceDerive(const sPackBalanceStats *bal, int32_t *delta_mAh_out)
+{
+    int32_t net[PACK_CELLS_MAX];
+    int32_t tmp[PACK_CELLS_MAX];
+    int32_t median;
+    uint8_t i;
+    uint8_t j;
+
+    if ((bal == NULL) || (delta_mAh_out == NULL) || (bal->cellCount == 0u)) {
+        return;
+    }
+
+    for (i = 0u; i < bal->cellCount; i++) {
+        net[i] = bal->in_mAs[i] - bal->out_mAs[i];
+        tmp[i] = net[i];
+    }
+
+    /* Insertion sort: cellCount is at most PACK_CELLS_MAX, so this is
+     * cheaper than being clever and has no worst case worth worrying about. */
+    for (i = 1u; i < bal->cellCount; i++) {
+        const int32_t v = tmp[i];
+
+        for (j = i; (j > 0u) && (tmp[j - 1u] > v); j--) {
+            tmp[j] = tmp[j - 1u];
+        }
+        tmp[j] = v;
+    }
+    median = tmp[bal->cellCount / 2u];
+
+    for (i = 0u; i < bal->cellCount; i++) {
+        /* mAs -> mAh, and NEGATED: transfer IN means capacity BELOW. */
+        delta_mAh_out[i] = -((net[i] - median) / 3600);
+    }
+}
+
 uint32_t PackFsm_GroupCapMask(ePackGroup grp)
 {
     switch (grp) {

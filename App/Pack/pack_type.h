@@ -291,6 +291,44 @@ void PackType_NoteLiveness(uint8_t idx, int answered);
  */
 void PackType_RequestRebind(void);
 
+/**
+ * @brief  Publish this instance's statistics list (§23.1).
+ *
+ * REPLACES the whole list atomically -- a type rebuilds and publishes rather
+ * than mutating entries, so a reader never sees a half-updated set.
+ *
+ * @param  idx - instance index
+ * @param  stats - borrowed for the call only; copied under the lock
+ * @param  count - 0..PACK_STATS_MAX; more is truncated, not refused
+ * @note   Any context.  MUST NOT BLOCK.
+ */
+void PackType_PublishStats(uint8_t idx, const sPackStat *stats, uint8_t count);
+
+/**
+ * @brief  Report what the balancer is doing RIGHT NOW, for the core to
+ *         integrate (§23.3).
+ *
+ * The core owns the integration -- the interval, the mAs accumulation, the
+ * per-cell attribution and the reset window -- because every type that has a
+ * balancer needs exactly the same arithmetic and none of them should own a
+ * copy of it.  A type supplies only what it can see on its wire.
+ *
+ * SOURCE AND SINK COME FROM THE BMS, NOT FROM A RECOMPUTED argmin/argmax.
+ * On a JK, MaxVolCellNbr/MinVolCellNbr ARE the balancer's operands by
+ * construction; a recomputed extreme answers a different question and (§20)
+ * agrees with the register only about one time in six.
+ *
+ * @param  idx - instance index
+ * @param  active - non-zero while the balancer is actually transferring
+ * @param  current_mA - magnitude of the transfer; sign is ignored
+ * @param  srcIdx - cell being DRAINED, or PACK_CELL_NONE
+ * @param  sinkIdx - cell being CHARGED, or PACK_CELL_NONE
+ * @param  now_ms - the caller's monotonic clock
+ * @note   Any context.  MUST NOT BLOCK.
+ */
+void PackType_NoteBalance(uint8_t idx, int active, int32_t current_mA,
+                          uint8_t srcIdx, uint8_t sinkIdx, uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

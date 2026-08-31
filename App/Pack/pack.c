@@ -21,6 +21,7 @@
 #include "App/Pack/pack.h"
 #include "App/Pack/pack_type.h"
 #include "App/Pack/pack_fsm.h"
+#include "App/Pack/pack_soc.h"
 #include "App/Pack/pack_cfg.h"
 #include "App/nv_record.h"
 
@@ -120,6 +121,28 @@ typedef struct {
      * nothing, which is precisely the "partial delivery is visible instead of
      * silent" property §11.1 exists for.  Accumulated under the lock so two
      * commits before one dispatch coalesce instead of racing. */
+    /* Statistics (§23.1) and balance-transfer accounting (§23.3). */
+    sPackStat            stats[PACK_STATS_MAX];
+    uint8_t              statCount;
+
+    /* The SOC estimator (§24).  It lives in the CORE, not in a type: it
+     * consumes only published, vendor-neutral values -- current, the mAh
+     * counter, cell voltages -- so every type that supplies those gets it
+     * without knowing it exists, which is the "estimator lands without a
+     * consumer noticing" promise of §2. */
+    sPackSoc             soc;                        /* pack unit + counter */
+    sPackSocUnit         socCell[PACK_CELLS_MAX];    /* SAME type, per cell */
+    int32_t              socBalSnap_mAs[PACK_CELLS_MAX]; /* last step's net */
+    uint8_t              haveBalSnap;
+    uint32_t             socRestSamples;
+    uint32_t             socDisturbed_ms;   /* last |I| > C/20              */
+    uint8_t              socHaveDisturb;
+
+    sPackBalanceStats    bal;
+    uint32_t             balLast_ms;    /* last NoteBalance, for the interval */
+    uint32_t             balStart_ms;   /* window start, for window_sec       */
+    uint8_t              balSeen;       /* an interval has been established   */
+
     uint32_t             pendingGroups;
     uint32_t             alarmAdded;
     uint32_t             alarmCleared;
@@ -140,6 +163,60 @@ typedef struct {
     uint8_t         inUse;
     uint8_t         releasing;
 } sPackSub;
+
+/** What survives a reboot, per instance (§23.4).
+ *
+ * BALANCE TOTALS ARE THE POINT.  They accumulate over weeks and are the one
+ * measurement that separates a low-capacity cell from a merely discharged one
+ * (§23.3) -- and this site power-cycles, so holding them only in RAM threw
+ * the measurement away roughly daily.
+ *
+ * The SOC anchor rides along because re-anchoring costs 120 near-rest samples
+ * (~2 h of favourable conditions) and losing it means publishing the vendor's
+ * number again until it rebuilds.
+ *
+ * A STATISTIC MAY BE LOSSY.  This is written on a slow cadence, not per
+ * sample, exactly as nvDb's C13 allows -- a crash costs minutes of
+ * accumulation, never correctness. */
+typedef struct {
+    int32_t  in_mAs[PACK_CELLS_MAX];
+    int32_t  out_mAs[PACK_CELLS_MAX];
+    uint32_t window_sec;
+    uint32_t activeSamples;
+    int32_t  soc_pm;            /* -1 when never anchored                    */
+    int32_t  driftResidual_pm;
+    uint16_t socConf_pm;
+    uint8_t  cellCount;
+    uint8_t  socSeeded;
+
+    /* THE LEARNED PER-CELL CAPACITIES.  These take days of favourable
+     * conditions to measure -- two anchors at least 15 %% SOC apart -- so
+     * losing them to a power cut would mean starting the measurement over
+     * roughly as often as the site blinks. */
+    int32_t  cellCap_mAh[PACK_CELLS_MAX];
+    uint16_t cellCapConf_pm[PACK_CELLS_MAX];
+    int32_t  packCap_mAh;
+    uint16_t packCapConf_pm;
+    uint8_t  packCapLearned;
+    uint8_t  pad;
+} sPackStateEntry;
+
+typedef struct {
+    sNvRecordHdr    hdr;
+    sPackStateEntry pack[PACK_MAX];
+} sPackStateRecord;
+
+#define PACK_STATE_MAGIC    0x50414B53u  /* "PAKS" */
+/* 2: version 1 records persisted an UNMEASURED capacity (the nameplate a
+ * unit is born holding) and restored it as if measured, so a board that had
+ * saved once came back claiming 16 measurements it had never made.  Bumping
+ * the version makes NvRecord_Load discard those records rather than have
+ * every deployed board carry the fabrication forward. */
+#define PACK_STATE_VERSION  2u
+
+/* How often the accumulation is written back.  Slow on purpose: this is a
+ * statistic, and an erase-per-sample would wear the medium for nothing. */
+#define PACK_STATE_SAVE_SEC 900u
 
 /** The persisted record.  Header FIRST, as App/nv_record.h requires. */
 typedef struct {
@@ -166,6 +243,7 @@ static sPackCfgRecord   s_cfgScratch;
  * task and cannot overlap each other, but Pack_Init runs on the func task at
  * boot and an upload arriving in that window would share the buffer. */
 static uint8_t          s_cfgScratchBusy;
+static uint32_t         s_lastStateSave_ms;
 static sPackStats       s_stats;
 static fFuncPost        s_post;
 static uint16_t         s_evtBase;
@@ -173,6 +251,10 @@ static uint8_t          s_provisioned;
 static uint8_t          s_inited;
 
 /* Private function prototypes ----------------------------------------------*/
+
+static void SocOnCommit(uint8_t idx, uint32_t groups);
+static void StateSave(void);
+static void StateRestore(void);
 
 static uint32_t CoreLock(void);
 static void     CoreUnlock(uint32_t saved);
@@ -452,6 +534,23 @@ static void BuildState(const sPackInst *in, uint8_t idx, sPackState *out,
     out->soh_pm           = in->live.soh_pm;
     out->socConf_pm       = (in->live.socConf_pm < cap) ? in->live.socConf_pm
                                                         : cap;
+
+    /* THE ESTIMATE REPLACES THE VENDOR'S ONLY ONCE IT HAS ANCHORED, and says
+     * so through packFlag_socEstimated -- a flag that has existed since the
+     * module was written and been produced by nothing until now.  Before the
+     * first anchor the JK's number stands, because an unanchored coulomb
+     * count is not an opinion, it is an accumulator. */
+    {
+        uint16_t      estConf = 0u;
+        const int32_t est     = PackSoc_UnitGet_pm(&in->soc.unit, &estConf);
+
+        out->socDrift_pm = (int16_t)in->soc.unit.driftResidual_pm;
+        if (est >= 0) {
+            out->soc_pm     = (uint16_t)est;
+            out->socConf_pm = (estConf < cap) ? estConf : cap;
+            out->flags     |= (uint32_t)packFlag_socEstimated;
+        }
+    }
     out->sohConf_pm       = (in->live.sohConf_pm < cap) ? in->live.sohConf_pm
                                                         : cap;
     out->cellMax_mV       = in->live.cellMax_mV;
@@ -622,6 +721,24 @@ static void BindAll(void)
             in->boundCount++;
         }
         in->bounds     = in->boundsOwn;
+        in->bal.cellCount = e->cellCount;
+        PackSoc_Init(&in->soc, e->nameplate_mAh);
+        {
+            uint8_t c;
+
+            /* A cell's share of the nameplate is the starting guess; it is
+             * replaced by a measurement the moment two anchors allow one. */
+            const uint32_t perCell = (e->cellCount > 0u)
+                                   ? (e->nameplate_mAh / e->cellCount)
+                                   : e->nameplate_mAh;
+
+            for (c = 0u; c < PACK_CELLS_MAX; c++) {
+                PackSoc_UnitInit(&in->socCell[c], e->nameplate_mAh);
+                (void)perCell;
+            }
+        }
+        in->haveBalSnap = 0u;
+        in->socRestSamples = 0u;
         in->fsm.caps   = res.caps;
         /* A type may qualify a SUCCESSFUL bind -- "resolved, but no plan
          * reads it".  Carrying that through is what makes the difference
@@ -702,6 +819,7 @@ int Pack_Init(uint16_t evtIdBase, fFuncPost post)
     ScratchRelease();
 
     BindAll();
+    StateRestore();
 
     TRice("[Pack] init: %u pack(s), provisioned=%u\n",
           (unsigned)s_cfg.count, (unsigned)s_provisioned);
@@ -878,6 +996,7 @@ void Pack_HandleEvent(uint16_t localEvt, void *arg)
 
         UnbindAll();
         BindAll();
+        StateRestore();
 
         (void)memset(&ev, 0, sizeof(ev));
         ev.type    = packEvt_config;
@@ -946,6 +1065,19 @@ void Pack_Tick(uint32_t now_ms)
         if ((in->type != NULL) && (in->type->tick != NULL)) {
             in->type->tick(i, now_ms);
         }
+    }
+
+    /* OUTSIDE THE PER-INSTANCE LOOP: this is one module-wide record, and
+     * inside the loop it was skipped entirely whenever no pack was bound
+     * (the `used` check continues before reaching it).
+     *
+     * Flash I/O is legal here -- this is the func task -- and the quarter
+     * hour cadence is what makes a lossy statistic cheap (§23.4). */
+    if ((s_provisioned != 0u) &&
+        ((uint32_t)(now_ms - s_lastStateSave_ms) >=
+         (PACK_STATE_SAVE_SEC * 1000u))) {
+        s_lastStateSave_ms = now_ms;
+        StateSave();
     }
 }
 
@@ -1222,6 +1354,12 @@ int Pack_ConfigApply(fPackByteSource src, void *srcCtx, sPackCfgResult *res)
 
     s_cfg         = *parsed;
     ScratchRelease();
+
+    /* THE TOTALS ARE KEYED BY INDEX, so a new configuration must discard
+     * them: reordering the pack list would otherwise hand pack 0 a different
+     * battery's weeks of accumulated balance transfer, which is worse than
+     * starting over because it looks plausible. */
+    (void)NvRecord_Forget(nvdbUser_packState);
     s_provisioned = (uint8_t)((s_cfg.count > 0u) ? 1u : 0u);
     s_stats.provisioned = s_provisioned;
 
@@ -1277,6 +1415,233 @@ int Pack_CmdIdFromName(const char *name, ePackCmdId *out)
 const char *Pack_CmdName(ePackCmdId cmd)
 {
     return PackCfg_CmdName(cmd);
+}
+
+int Pack_StatCount(uint8_t idx)
+{
+    if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+    return (int)s_inst[idx].statCount;
+}
+
+int Pack_StatGet(uint8_t idx, uint8_t n, sPackStat *out)
+{
+    uint32_t saved;
+    int      r;
+
+    if ((idx >= PACK_MAX) || (out == NULL) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+
+    saved = CoreLock();
+    if (n < s_inst[idx].statCount) {
+        *out = s_inst[idx].stats[n];
+        r    = packErr_ok;
+    } else {
+        r = packErr_notFound;
+    }
+    CoreUnlock(saved);
+    return r;
+}
+
+int Pack_BalanceStats(uint8_t idx, sPackBalanceStats *out)
+{
+    uint32_t saved;
+
+    if ((idx >= PACK_MAX) || (out == NULL) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+    if ((s_inst[idx].caps & (uint32_t)packCap_balancer) == 0u) {
+        /* No accessor without a capability behind it, and no capability
+         * answered for that the instance does not advertise (§10.2). */
+        return packErr_notSupported;
+    }
+
+    saved = CoreLock();
+    *out = s_inst[idx].bal;
+
+    /* THE DERIVED FIGURE, computed here rather than stored, so it can never
+     * disagree with the totals it comes from.
+     *
+     * A cell the balancer keeps having to CHARGE is below the pack in
+     * capacity -- hence the sign flip.  Relative to the pack, not absolute:
+     * the reference is the pack's own median transfer, so a pack whose
+     * balancer favours one end uniformly does not read as every cell being
+     * bad. */
+    PackFsm_BalanceDerive(out, out->capacityDelta_mAh);
+    CoreUnlock(saved);
+    return packErr_ok;
+}
+
+int Pack_GetCellEstimate(uint8_t idx, sPackCellEstimate *out)
+{
+    uint32_t saved;
+    uint8_t  c;
+
+    if ((idx >= PACK_MAX) || (out == NULL) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+    if ((s_inst[idx].caps & (uint32_t)packCap_cellDetail) == 0u) {
+        return packErr_notSupported;
+    }
+
+    (void)memset(out, 0, sizeof(*out));
+
+    saved = CoreLock();
+    {
+        const sPackInst *in = &s_inst[idx];
+        int32_t          cap = 0;
+
+        for (c = 0u; c < PACK_CELLS_MAX; c++) {
+            out->soc_pm[c]       = (int16_t)in->socCell[c].soc_pm;
+            out->capacity_mAh[c] = in->socCell[c].capacity_mAh;
+            out->capConf_pm[c]   = in->socCell[c].capConf_pm;
+            if (in->socCell[c].capacityLearned != 0u) {
+                out->measuredCount++;
+            }
+        }
+        out->cellCount  = in->cellCount;
+        out->weakestIdx = (int8_t)PackSoc_WeakestUnit(in->socCell,
+                                                      in->cellCount, &cap);
+    }
+    CoreUnlock(saved);
+    return packErr_ok;
+}
+
+int Pack_BalanceReset(uint8_t idx)
+{
+    uint32_t saved;
+
+    if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+
+    saved = CoreLock();
+    {
+        const uint8_t keep = s_inst[idx].bal.cellCount;
+
+        (void)memset(&s_inst[idx].bal, 0, sizeof(s_inst[idx].bal));
+        s_inst[idx].bal.cellCount = keep;
+        s_inst[idx].balSeen       = 0u;   /* re-establish the interval */
+    }
+    CoreUnlock(saved);
+    TRice("[Pack] balance totals reset on %u\n", (unsigned)idx);
+    return packErr_ok;
+}
+
+/** Write the accumulation back.  FUNC TASK ONLY -- it does flash I/O. */
+static void StateSave(void)
+{
+    static sPackStateRecord rec;     /* static: ~1 KB, and the func task
+                                        stack is 2 KB */
+    uint8_t  i;
+    uint32_t saved;
+
+    (void)memset(&rec.pack, 0, sizeof(rec.pack));
+
+    saved = CoreLock();
+    for (i = 0u; i < PACK_MAX; i++) {
+        const sPackInst *in = &s_inst[i];
+
+        if (in->used == 0u) {
+            continue;
+        }
+        (void)memcpy(rec.pack[i].in_mAs,  in->bal.in_mAs,
+                     sizeof(rec.pack[i].in_mAs));
+        (void)memcpy(rec.pack[i].out_mAs, in->bal.out_mAs,
+                     sizeof(rec.pack[i].out_mAs));
+        rec.pack[i].window_sec       = in->bal.window_sec;
+        rec.pack[i].activeSamples    = in->bal.activeSamples;
+        rec.pack[i].cellCount        = in->bal.cellCount;
+        rec.pack[i].soc_pm           = in->soc.unit.soc_pm;
+        rec.pack[i].driftResidual_pm = in->soc.unit.driftResidual_pm;
+        rec.pack[i].socConf_pm       = in->soc.unit.conf_pm;
+        rec.pack[i].socSeeded        = in->soc.unit.haveAnchor;
+        rec.pack[i].packCap_mAh      = in->soc.unit.capacity_mAh;
+        rec.pack[i].packCapConf_pm   = in->soc.unit.capConf_pm;
+        rec.pack[i].packCapLearned   = in->soc.unit.capacityLearned;
+        {
+            uint8_t c;
+
+            for (c = 0u; c < PACK_CELLS_MAX; c++) {
+                /* ONLY A MEASURED capacity is persisted.  A unit is born
+                 * holding the nameplate, so saving capacity_mAh
+                 * unconditionally and restoring "> 0 means learned" turned
+                 * the starting guess into 16 fabricated measurements on the
+                 * next boot -- the board reported measuredCells=16 with every
+                 * value exactly the nameplate. */
+                rec.pack[i].cellCap_mAh[c]    =
+                    (in->socCell[c].capacityLearned != 0u)
+                        ? in->socCell[c].capacity_mAh : 0;
+                rec.pack[i].cellCapConf_pm[c] = in->socCell[c].capConf_pm;
+            }
+        }
+    }
+    CoreUnlock(saved);
+
+    (void)NvRecord_Save(nvdbUser_packState, PACK_STATE_MAGIC,
+                        PACK_STATE_VERSION, &rec, sizeof(rec));
+}
+
+/** Restore one instance's accumulation after a bind.  FUNC TASK ONLY.
+ *
+ *  KEYED BY INDEX, which is only sound because a configuration change wipes
+ *  this record -- see Pack_ConfigApply.  Without that, pack 0 would inherit a
+ *  different battery's totals the moment the operator reordered the list. */
+static void StateRestore(void)
+{
+    static sPackStateRecord rec;
+    uint8_t  i;
+    uint32_t saved;
+
+    if (NvRecord_Load(nvdbUser_packState, PACK_STATE_MAGIC,
+                      PACK_STATE_VERSION, &rec, sizeof(rec)) != 0) {
+        return;                     /* absent or stale: start clean */
+    }
+
+    saved = CoreLock();
+    for (i = 0u; i < PACK_MAX; i++) {
+        sPackInst *in = &s_inst[i];
+
+        if ((in->used == 0u) ||
+            (rec.pack[i].cellCount != in->bal.cellCount)) {
+            continue;               /* different shape: do not adopt it */
+        }
+        (void)memcpy(in->bal.in_mAs,  rec.pack[i].in_mAs,
+                     sizeof(in->bal.in_mAs));
+        (void)memcpy(in->bal.out_mAs, rec.pack[i].out_mAs,
+                     sizeof(in->bal.out_mAs));
+        in->bal.window_sec    = rec.pack[i].window_sec;
+        in->bal.activeSamples = rec.pack[i].activeSamples;
+
+        if (rec.pack[i].socSeeded != 0u) {
+            in->soc.unit.soc_pm           = rec.pack[i].soc_pm;
+            in->soc.unit.anchorSoc_pm     = rec.pack[i].soc_pm;
+            in->soc.unit.driftResidual_pm = rec.pack[i].driftResidual_pm;
+            in->soc.unit.conf_pm          = rec.pack[i].socConf_pm;
+            in->soc.unit.haveAnchor       = 1u;
+        }
+        if (rec.pack[i].packCapLearned != 0u) {
+            in->soc.unit.capacity_mAh    = rec.pack[i].packCap_mAh;
+            in->soc.unit.capConf_pm      = rec.pack[i].packCapConf_pm;
+            in->soc.unit.capacityLearned = 1u;
+        }
+        {
+            uint8_t c;
+
+            for (c = 0u; c < PACK_CELLS_MAX; c++) {
+                if (rec.pack[i].cellCap_mAh[c] > 0) {
+                    in->socCell[c].capacity_mAh    = rec.pack[i].cellCap_mAh[c];
+                    in->socCell[c].capConf_pm      =
+                        rec.pack[i].cellCapConf_pm[c];
+                    in->socCell[c].capacityLearned = 1u;
+                }
+            }
+        }
+    }
+    CoreUnlock(saved);
+    TRice("[Pack] state restored from flash\n");
 }
 
 int Pack_Stats(sPackStats *out)
@@ -1346,6 +1711,7 @@ sPackCells *PackType_CellStaging(uint8_t idx)
     return &s_inst[idx].cellsStaging;
 }
 
+
 void PackType_Publish(uint8_t idx, uint32_t groups)
 {
     uint32_t saved;
@@ -1372,6 +1738,7 @@ void PackType_Publish(uint8_t idx, uint32_t groups)
     }
     s_inst[idx].live = s_inst[idx].staging;
     s_inst[idx].pendingGroups |= groups;
+    SocOnCommit(idx, groups);
     (void)PackFsm_NotePublish(&s_inst[idx].fsm, groups,
                               (uint32_t)osKernelGetTickCount());
     s_stats.updates++;
@@ -1421,6 +1788,233 @@ void PackType_CommandDone(uint8_t idx, ePackErr result)
     if (live != 0) {
         PostInt(packInt_commandDone, idx);
     }
+}
+
+/**
+ * @brief  Feed the SOC estimator from a fresh commit.  CALLED UNDER THE LOCK.
+ *
+ * Two independent inputs, on their own cadences:
+ *   - the vendor's mAh counter advances the coulomb count (§23.2);
+ *   - a NEAR-REST cell voltage folds into the accumulating anchor, weighted
+ *     by the square of the local OCV slope.
+ *
+ * THERE IS NO HARD GATE on the second.  A plateau sample is admitted at
+ * weight ~1 against a knee sample's ~400 and moves nothing; a hard 4 mV/%
+ * cut, run against 690 real samples from this pack, admitted NOTHING AT ALL
+ * (§24.3).
+ */
+static void SocOnCommit(uint8_t idx, uint32_t groups)
+{
+    sPackInst     *in  = &s_inst[idx];
+    const uint32_t cap = (in->soc.unit.capacity_mAh > 0) ? (uint32_t)in->soc.unit.capacity_mAh
+                                                     : in->nameplate_mAh;
+    int32_t        restLimit_mA;
+    int32_t        busyLimit_mA;
+
+    if (cap == 0u) {
+        return;
+    }
+
+    /* The vendor's counter: one step per commit that refreshed it. */
+    if ((groups & PACK_GRP_BIT(packGrp_charge)) != 0u) {
+        /* Largest believable change between two polls.  Generous -- this is
+         * catching re-seeds and clamp steps, not policing current. */
+        int32_t stepQ = 0;
+
+        if (PackSoc_NoteCounter(&in->soc, (int32_t)in->live.remaining_mAh,
+                                cap / 8u, &stepQ) != 0) {
+            uint8_t c;
+
+            /* THE PACK: the string charge, unmodified. */
+            PackSoc_UnitAdvance(&in->soc.unit, stepQ);
+
+            /* EACH CELL: the string charge PLUS what the balancer moved into
+             * or out of that particular cell since the previous step.
+             *
+             * THE CORRECTION HAPPENS HERE, BEFORE THE HAND-OFF, which is why
+             * the same PackSoc_UnitAdvance serves both: the estimator is
+             * handed "charge through this unit" and never learns that a
+             * balancer exists. */
+            for (c = 0u; c < in->cellCount; c++) {
+                const int32_t net = in->bal.in_mAs[c] - in->bal.out_mAs[c];
+                const int32_t dBal_mAh =
+                    (in->haveBalSnap != 0u)
+                        ? ((net - in->socBalSnap_mAs[c]) / 3600) : 0;
+
+                in->socBalSnap_mAs[c] = net;
+                PackSoc_UnitAdvance(&in->socCell[c], stepQ + dBal_mAh);
+            }
+            in->haveBalSnap = 1u;
+        }
+    }
+
+    /* THE GATE IS THE WHOLE DESIGN (§5.3 of the estimation doc): an
+     * estimator that admits bad samples converges CONFIDENTLY to a wrong
+     * answer, which is worse than not converging.  Each of these excludes a
+     * sample whose voltage is not the cell's OCV. */
+
+    /* 1. Disturbed?  Above C/20 the pack is being worked; note the time and
+     *    start the relaxation clock. */
+    busyLimit_mA = (int32_t)(cap / PACK_SOC_BUSY_C_DIV);
+    if ((in->live.current_mA > busyLimit_mA) ||
+        (in->live.current_mA < -busyLimit_mA)) {
+        in->socDisturbed_ms = (uint32_t)osKernelGetTickCount();
+        in->socHaveDisturb  = 1u;
+        return;
+    }
+
+    /* 2. Relaxed?  LFP polarisation decays slowly, so a low-current sample
+     *    taken shortly after a heavy one still reads high.  THIS IS THE
+     *    CHECK THAT WAS MISSING: without it a 30 A charge ending one second
+     *    ago counted as rest, biasing every anchor upward. */
+    if (in->socHaveDisturb != 0u) {
+        const uint32_t since =
+            (uint32_t)((uint32_t)osKernelGetTickCount() - in->socDisturbed_ms);
+
+        if (since < PACK_SOC_RELAX_MS) {
+            return;
+        }
+    }
+
+    /* 3. Near rest?  Below C/50 the IR term is small enough to ignore, which
+     *    matters because correcting it needs a per-cell resistance this
+     *    board does not always carry. */
+    restLimit_mA = (int32_t)(cap / PACK_SOC_REST_C_DIV);
+    if ((in->live.current_mA > restLimit_mA) ||
+        (in->live.current_mA < -restLimit_mA)) {
+        return;
+    }
+
+    /* 4. In the temperature band the OCV table describes. */
+    if ((in->live.tempMin_dC < PACK_SOC_TEMP_MIN_dC) ||
+        (in->live.tempMax_dC > PACK_SOC_TEMP_MAX_dC)) {
+        return;
+    }
+
+    /* 5. Not in protection.  A pack with an active alarm is not in a normal
+     *    operating state and its voltages do not mean what they usually do. */
+    if (in->live.alarms != 0u) {
+        return;
+    }
+
+    if (in->live.voltage_mV == 0u) {
+        return;
+    }
+
+    {
+        /* Pack-level SOC uses the MEAN cell, which is what the pack voltage
+         * already is once divided.  Per-cell SOC needs the cell array and is
+         * the next step, not this one. */
+        const uint8_t  n = (in->cellCount > 0u) ? in->cellCount : 16u;
+        const uint16_t meanCell_mV = (uint16_t)(in->live.voltage_mV / n);
+
+        PackSoc_UnitAnchorAdd(&in->soc.unit, meanCell_mV);
+
+        /* PER CELL, from the same gated sample.  Its own voltage, its own
+         * anchor -- which is what eventually makes C_i a per-cell number
+         * rather than a pack number divided by 16. */
+        {
+            uint8_t c;
+
+            for (c = 0u; (c < n) && (c < PACK_CELLS_MAX); c++) {
+                if (in->cellsLive.cell_mV[c] != 0u) {
+                    PackSoc_UnitAnchorAdd(&in->socCell[c],
+                                          in->cellsLive.cell_mV[c]);
+                }
+            }
+        }
+        in->socRestSamples++;
+    }
+
+    /* Resolve on a schedule rather than per sample: the anchor's value is in
+     * the averaging, and sqrt(N) is what turns a +/-1.5 % plateau reading
+     * into something usable. */
+    if ((in->socRestSamples % PACK_SOC_ANCHOR_EVERY) == 0u) {
+        int32_t  soc;
+        uint32_t sigma;
+
+        /* ONE RESOLVE, applied to the pack unit and to every cell unit --
+         * the same function, because each already carries its own charge.
+         * Capacity falls out of the same call for both. */
+        if (PackSoc_UnitAnchorResolve(&in->soc.unit, &soc, &sigma) != 0) {
+            uint8_t c;
+
+            (void)PackSoc_UnitApplyAnchor(&in->soc.unit, soc, sigma,
+                                          in->nameplate_mAh);
+
+            for (c = 0u; c < in->cellCount; c++) {
+                int32_t  cSoc  = 0;
+                uint32_t cSig  = 0;
+
+                if (PackSoc_UnitAnchorResolve(&in->socCell[c], &cSoc,
+                                              &cSig) != 0) {
+                    (void)PackSoc_UnitApplyAnchor(&in->socCell[c], cSoc, cSig,
+                                                  in->nameplate_mAh);
+                }
+            }
+        }
+    }
+}
+
+void PackType_PublishStats(uint8_t idx, const sPackStat *stats, uint8_t count)
+{
+    uint32_t saved;
+
+    if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u) || (stats == NULL)) {
+        return;
+    }
+    if (count > (uint8_t)PACK_STATS_MAX) {
+        count = (uint8_t)PACK_STATS_MAX;   /* truncate, never refuse */
+    }
+
+    /* Whole list at once: a reader must never see half an update. */
+    saved = CoreLock();
+    (void)memcpy(s_inst[idx].stats, stats, (size_t)count * sizeof(stats[0]));
+    s_inst[idx].statCount = count;
+    CoreUnlock(saved);
+}
+
+/**
+ * THE CORE OWNS THE INTEGRATION, not the type.  Every balancer needs the same
+ * arithmetic -- interval, mAs accumulation, per-cell attribution, the reset
+ * window -- and a copy of it in each type is a copy that can drift.
+ */
+void PackType_NoteBalance(uint8_t idx, int active, int32_t current_mA,
+                          uint8_t srcIdx, uint8_t sinkIdx, uint32_t now_ms)
+{
+    uint32_t saved;
+
+    if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u)) {
+        return;
+    }
+    if (current_mA < 0) {
+        current_mA = -current_mA;       /* magnitude; direction is src/sink */
+    }
+
+    saved = CoreLock();
+    {
+        sPackInst *in = &s_inst[idx];
+
+        if (in->balSeen == 0u) {
+            /* First report establishes the interval baseline and the window;
+             * nothing is integrated over an interval we did not observe. */
+            in->balSeen     = 1u;
+            in->balStart_ms = now_ms;
+            in->balLast_ms  = now_ms;
+        } else {
+            const uint32_t dt_ms = (uint32_t)(now_ms - in->balLast_ms);
+
+            in->balLast_ms = now_ms;
+
+            /* The RULES live in pack_fsm.c, where they are pure and host
+             * tested; this function owns only the lock and the clock. */
+            (void)PackFsm_BalanceAccumulate(&in->bal, active, current_mA,
+                                            dt_ms, PACK_BAL_MAX_GAP_MS,
+                                            srcIdx, sinkIdx);
+        }
+        in->bal.window_sec = (uint32_t)(now_ms - in->balStart_ms) / 1000u;
+    }
+    CoreUnlock(saved);
 }
 
 void PackType_RequestRebind(void)

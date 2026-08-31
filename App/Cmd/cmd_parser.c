@@ -86,7 +86,7 @@ static const sCmdEntry s_commands[] = {
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|save|forget|monitor|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
-    { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|cmd|config|erase)" },
+    { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|stats|balance|cmd|config|erase)" },
     { "sysmon",      cmd_sysmon,      "System monitor (tasks|heap|reset)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
@@ -813,6 +813,11 @@ static void cmd_pack(const char *args)
         TRiceS(" type=%s", Pack_TypeName(st.typeId));
         TRiceS(" cond=%s", pack_cond_name(st.cond));
         TRiceS(" why=%s\n", pack_why_name(st.why));
+        /* socDrift is the estimator's disagreement with its own coulomb
+         * count at the last anchor -- the bound on how wrong SOC can be. */
+        TRice("  soc drift=%d per-mille  estimated=%u\n",
+              (int)st.socDrift_pm,
+              (unsigned)((st.flags & (uint32_t)packFlag_socEstimated) ? 1u : 0u));
         TRice("  caps=%08x cmds=%02x flags=%02x conf soc=%u soh=%u (per-mille)\n",
               (unsigned)st.caps, (unsigned)st.cmds, (unsigned)st.flags,
               (unsigned)st.socConf_pm, (unsigned)st.sohConf_pm);
@@ -871,10 +876,86 @@ static void cmd_pack(const char *args)
             TRice("  cell%02u %u mV  lead=%u mOhm\n", (unsigned)c,
                   (unsigned)cl.cell_mV[c], (unsigned)cl.leadRes_mOhm[c]);
         }
+        {
+            sPackCellEstimate est;
+
+            if (Pack_GetCellEstimate(idx, &est) == packErr_ok) {
+                uint8_t k;
+
+                TRice("  per-cell estimate: %u of %u measured, weakest=%d\n",
+                      (unsigned)est.measuredCount, (unsigned)est.cellCount,
+                      (int)est.weakestIdx);
+                for (k = 0u; k < est.cellCount; k++) {
+                    TRice("   cell%02u soc=%d per-mille cap=%d mAh conf=%u\n",
+                          (unsigned)k, (int)est.soc_pm[k],
+                          (int)est.capacity_mAh[k],
+                          (unsigned)est.capConf_pm[k]);
+                }
+            }
+        }
         TRice("  balance: active=%u %d mA duty=%u src=%u sink=%u\n",
               (unsigned)cl.balanceActive, (int)cl.balanceCurrent_mA,
               (unsigned)cl.balanceDuty_pm, (unsigned)cl.balanceSrcIdx,
               (unsigned)cl.balanceSinkIdx);
+        return;
+    }
+
+    if (strncmp(args, "stats", 5) == 0) {
+        int n;
+        int i;
+
+        idx = (uint8_t)atoi(args + 5);
+        n   = Pack_StatCount(idx);
+        if (n < 0) {
+            TRice("pack %u: no such pack\n", (unsigned)idx);
+            return;
+        }
+        TRice("pack %u: %d statistics\n", (unsigned)idx, n);
+        for (i = 0; i < n; i++) {
+            sPackStat st;
+
+            if (Pack_StatGet(idx, (uint8_t)i, &st) != packErr_ok) {
+                continue;
+            }
+            TRiceS("  %s", st.name);
+            TRice(" = %d e%d unit=%u flags=%02x\n", (int)st.value,
+                  (int)st.scale_pow10, (unsigned)st.unit, (unsigned)st.flags);
+        }
+        return;
+    }
+
+    if (strncmp(args, "balance", 7) == 0) {
+        sPackBalanceStats b;
+        uint8_t           c;
+        int               r;
+
+        if (strstr(args, "reset") != NULL) {
+            idx = (uint8_t)atoi(args + 7);
+            TRice("pack %u: balance reset -> %d\n", (unsigned)idx,
+                  Pack_BalanceReset(idx));
+            return;
+        }
+        idx = (uint8_t)atoi(args + 7);
+        r   = Pack_BalanceStats(idx, &b);
+        if (r == packErr_notSupported) {
+            TRice("pack %u: this type has no balancer\n", (unsigned)idx);
+            return;
+        }
+        if (r != packErr_ok) {
+            TRice("pack %u: no such pack\n", (unsigned)idx);
+            return;
+        }
+        TRice("pack %u: window %u s, %u active samples, %u cells\n",
+              (unsigned)idx, (unsigned)b.window_sec,
+              (unsigned)b.activeSamples, (unsigned)b.cellCount);
+        /* capacityDelta is RELATIVE TO THE PACK MEDIAN and negative means
+         * the balancer keeps having to charge this cell -- i.e. it holds
+         * less than the pack (§23.3). */
+        for (c = 0u; c < b.cellCount; c++) {
+            TRice("  cell%02u in=%d mAs out=%d mAs  dCap=%d mAh\n",
+                  (unsigned)c, (int)b.in_mAs[c], (int)b.out_mAs[c],
+                  (int)b.capacityDelta_mAh[c]);
+        }
         return;
     }
 
@@ -922,7 +1003,8 @@ static void cmd_pack(const char *args)
         return;
     }
 
-    TRice("pack: status|list|show <n>|cells <n>|cmd <n> <name> <v>|config|erase\n");
+    TRice("pack: status|list|show <n>|cells <n>|stats <n>|balance <n> [reset]|"
+          "cmd <n> <name> <v>|config|erase\n");
 }
 
 static void cmd_nvdb(const char *args)

@@ -301,6 +301,11 @@ typedef struct {
     /* --- SOC/SOH and how much to believe each ------------------------- */
     uint16_t        soc_pm;
     uint16_t        soh_pm;
+    /* THE ESTIMATOR'S DISAGREEMENT WITH ITS OWN COULOMB COUNT at the last
+     * anchor, per-mille (§24.4).  It is the error the plateau accumulated,
+     * and the only measurement that bounds how wrong soc_pm can be while
+     * between anchors.  0 when never anchored twice. */
+    int16_t         socDrift_pm;
     uint16_t        socConf_pm;
     uint16_t        sohConf_pm;
 
@@ -731,6 +736,156 @@ int Pack_ConfigErase(void);
  * @note   Any TASK, NOT an ISR — copies under the same critical section.
  */
 int Pack_Stats(sPackStats *out);
+
+/* ==========================================================================
+ * Per-type statistics (§23.1)
+ *
+ * WHAT A PACK KNOWS ABOUT ITSELF, and that set differs per vendor: a JK
+ * exposes MOS temperature, precharge state and lifetime throughput; a
+ * Pylontech-speaking pack will expose something else entirely.
+ *
+ * A GENERIC LIST, deliberately, not a union per type.  The cluster reads the
+ * typed sPackState fields and ignores all of this; a UI, MQTT bridge or CLI
+ * walks the list and renders whatever is there with no per-vendor code.  That
+ * is what keeps §2's rule -- a consumer never learns which vendor is behind a
+ * pack -- true for the one consumer that actually aggregates.
+ *
+ * DESCRIPTIVE, NEVER LOAD-BEARING.  Nothing in this module may read a
+ * statistic back to make a decision; that is what the typed fields are for.
+ * A statistic something depends on is a field in the wrong place.
+ * ========================================================================== */
+
+/* Longest interval still counted as observed.  Beyond it we assume we stopped
+ * looking rather than that nothing happened. */
+/* Near-rest samples per resolved anchor.  The value is in the averaging:
+ * one 2 mV/%% sample is +/-1.5 %% SOC, and only sqrt(N) makes it usable. */
+#define PACK_SOC_ANCHOR_EVERY   120u
+
+#define PACK_BAL_MAX_GAP_MS     60000u
+
+#define PACK_STAT_NAME_LEN      24u
+#define PACK_STATS_MAX          16u
+
+typedef enum {
+    packStatFlag_none    = 0u,
+    packStatFlag_counter = 1u << 0,  /* monotonic; a delta is meaningful     */
+    packStatFlag_vendor  = 1u << 1,  /* raw vendor value, not normalised     */
+} ePackStatFlag;
+
+typedef struct {
+    char     name[PACK_STAT_NAME_LEN];
+    int32_t  value;             /* SCALED INTEGER -- no float crosses this
+                                   API, here as anywhere else               */
+    uint16_t unit;              /* MB_UNIT_*, shared with the Modbus module
+                                   so one renderer serves both              */
+    int8_t   scale_pow10;       /* real value = value x 10^scale_pow10       */
+    uint8_t  flags;             /* ePackStatFlag                            */
+} sPackStat;
+
+/**
+ * @brief  How many statistics this pack publishes.
+ * @param  idx - instance index
+ * @retval count, or a negative ePackErr
+ * @note   Any task.  Never blocks.
+ */
+int Pack_StatCount(uint8_t idx);
+
+/**
+ * @brief  Read one statistic.
+ * @param  idx - instance index
+ * @param  n - 0 .. Pack_StatCount()-1
+ * @param  out - filled on success
+ * @retval packErr_ok, packErr_badArg, packErr_notFound
+ * @note   Any task.  Never blocks.  Copied under the core lock, so a type
+ *         republishing mid-read cannot tear the entry.
+ */
+int Pack_StatGet(uint8_t idx, uint8_t n, sPackStat *out);
+
+/* ==========================================================================
+ * Balance transfer accounting (§23.3)
+ *
+ * The balancer is the ONE thing that breaks the shared-coulomb identity: every
+ * cell in a series string carries the same current except for what the
+ * balancer moves between two of them.  Measuring that is what lets a capacity
+ * deviation be separated from a mere state-of-charge offset -- see §22, where
+ * a single voltage snapshot could rank cells but could not convict one.
+ * ========================================================================== */
+
+typedef struct {
+    /* Charge the balancer has moved, per cell, in MILLIAMP-SECONDS.  mAs
+     * rather than mAh so the sample path never divides; a consumer divides by
+     * 3600 once, at the point of display. */
+    int32_t  in_mAs[PACK_CELLS_MAX];    /* added TO this cell               */
+    int32_t  out_mAs[PACK_CELLS_MAX];   /* taken FROM this cell             */
+
+    /* net = in - out.  A cell the balancer keeps having to CHARGE is below
+     * the pack in capacity, so capacityDelta carries the OPPOSITE sign of
+     * net transfer.  RELATIVE TO THE PACK MEDIAN, never an absolute cell
+     * capacity -- that still needs the two-knee measurement of §22. */
+    int32_t  capacityDelta_mAh[PACK_CELLS_MAX];
+
+    uint32_t window_sec;        /* how long this accumulation has run       */
+    uint32_t activeSamples;     /* intervals with the balancer actually on  */
+    uint8_t  cellCount;
+} sPackBalanceStats;
+
+/**
+ * @brief  Read the balance-transfer accumulation.
+ * @param  idx - instance index
+ * @param  out - filled on success
+ * @retval packErr_ok, packErr_notSupported when the type has no balancer,
+ *         packErr_badArg
+ * @note   Any task.  Copied under the core lock.
+ */
+int Pack_BalanceStats(uint8_t idx, sPackBalanceStats *out);
+
+/**
+ * @brief  Zero the accumulation and start a fresh measurement window.
+ * @param  idx - instance index
+ * @retval packErr_ok, packErr_badArg
+ * @note   Any task.  The operator's call: these totals are meaningful only
+ *         against a stated window.
+ */
+int Pack_BalanceReset(uint8_t idx);
+
+/* ==========================================================================
+ * Per-cell SOC and capacity (§26)
+ *
+ * A SEPARATE STRUCT, NOT PART OF sPackCells, and deliberately: sPackCells is
+ * the TYPE's staging buffer and is held twice per instance (live + staging).
+ * This is derived by the CORE from published values, so putting it there
+ * would have paid for a second copy that nothing ever writes -- 2 KB of main
+ * SRAM on an 8-instance build, for nothing.
+ * ========================================================================== */
+
+typedef struct {
+    /* THAT CELL's state of charge, not the pack's.  Cells share the string
+     * current but not their capacities, so a small cell moves further per
+     * amp-hour and reaches its limits first -- which is the entire reason a
+     * pack-level SOC cannot answer "which cell will fail". */
+    int16_t  soc_pm[PACK_CELLS_MAX];        /* -1 = not anchored yet        */
+
+    /* MEASURED between two anchors: C_i = dQ_i / dSOC_i, where dQ_i differs
+     * per cell only by the balance transfer.  An ABSOLUTE amp-hour figure,
+     * unlike sPackBalanceStats.capacityDelta_mAh, which is a deviation from
+     * the pack median.  0 until the measurement has been possible. */
+    int32_t  capacity_mAh[PACK_CELLS_MAX];
+    uint16_t capConf_pm[PACK_CELLS_MAX];
+
+    int8_t   weakestIdx;            /* by measured capacity; -1 = unknown   */
+    uint8_t  measuredCount;         /* how many cells have a capacity yet   */
+    uint8_t  cellCount;
+} sPackCellEstimate;
+
+/**
+ * @brief  Per-cell SOC and measured capacity.
+ * @param  idx - instance index
+ * @param  out - filled on success
+ * @retval packErr_ok, packErr_notSupported when the type reports no cells,
+ *         packErr_badArg
+ * @note   Any task.  Copied under the core lock.
+ */
+int Pack_GetCellEstimate(uint8_t idx, sPackCellEstimate *out);
 
 /* --- names, for a UI ------------------------------------------------------
  *

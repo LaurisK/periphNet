@@ -200,6 +200,16 @@ target_include_directories(test_pack_fsm PRIVATE
 )
 add_test(NAME pack_fsm COMMAND test_pack_fsm)
 
+add_executable(test_pack_soc
+    test_pack_soc.c
+    ${PROJECT_ROOT}/App/Pack/pack_soc.c
+)
+target_include_directories(test_pack_soc PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME pack_soc COMMAND test_pack_soc)
+
 add_executable(test_pack_cfg
     test_pack_cfg.c
     ${PROJECT_ROOT}/App/Pack/pack_cfg.c

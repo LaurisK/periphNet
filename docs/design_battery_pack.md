@@ -2016,3 +2016,537 @@ running." That case now shows only as `age_ms[packGrp_cells]` growing while
 That is the right trade: it is a fact about the operator's Modbus plan, and
 the module's job is to report the age and let a consumer judge it, not to
 invent a deadline and call the result staleness.
+
+---
+
+## 22. Can this identify the weakest cells? — measured assessment, 2026-08-27
+
+**Short answer: relative ranking, yes — and it already has. Absolute per-cell
+capacity in Ah, not yet: the inputs are all there, the estimator is not.**
+
+### What the module supplies today
+
+Per-cell voltage (16 cells, 1 mV, ~15 s lap), pack current, pack voltage,
+the JK's SOC, balancer current and active flag, temperature. All published,
+all `packCap_*`-gated, all verified against hardware.
+
+The cell decode is trustworthy: `sum(16 cells) = 52 510 mV` against
+`pack_voltage = 52 509 mV`, **1 mV on 52.5 V**, sustained.
+
+### What it does NOT do, and this is the whole gap
+
+- **No history.** `cellsLive` + `cellsStaging` and nothing else. Every read is
+  instantaneous; the moment it is published it is gone.
+  **`nvdbUser_packState` — 16 KB — is allocated, named, and written by
+  nothing.** That is where a cell history belongs and it is empty.
+- **No coulomb counting.** `grep -i coulomb App/Pack` returns nothing. There
+  is no charge accumulator anywhere in the module.
+- **No rest detection**, so no idea when a reading is near-OCV rather than
+  under load.
+- **No OCV→SOC curve**, so a millivolt cannot be turned into a percent.
+- **No balance-transfer accounting.** `balance_current` is decoded but never
+  integrated, and the source/sink attribution is inferred from the JK's
+  min/max register — which §20 now records as agreeing with the cell array
+  only **1 time in 6**.
+
+### The resolution limit, measured on this pack
+
+From 301 near-OCV samples (`|I| < 5 A`), local slope of mean cell voltage
+against the JK's SOC:
+
+| SOC band | dV/dSOC | 1 mV resolves | on 261 Ah |
+|---|---|---|---|
+| 42 → 57 % | +1.14 mV/% | 0.88 % SOC | 2.3 Ah |
+| 57 → 62 % | **−0.65 mV/%** | — | — |
+| 62 → 72 % | +1.94 mV/% | 0.51 % SOC | 1.3 Ah |
+| 72 → 77 % | +3.88 mV/% | 0.26 % SOC | 0.7 Ah |
+
+Two things fall out of this table:
+
+1. **Resolution is good enough near the knees and poor on the plateau** — 0.7
+   Ah per millivolt at 77 %, degrading to 2.3 Ah lower down. Exactly the
+   anchor-scarcity problem of
+   `design_bms_cell_health_estimation.md` §5.9, now with numbers from this
+   pack rather than from a datasheet.
+2. **The 57→62 % band has a NEGATIVE slope**, which is physically impossible
+   at rest — voltage cannot fall as charge rises. That is not a measurement
+   fault, it is **the JK's own SOC estimate being wrong by more than the
+   voltage change over that band**, which is precisely the reason this project
+   set out to build its own estimator rather than trust the vendor's.
+
+### What the data already shows
+
+At 41 % SOC and −1.8 A (IR contribution under 1 mV, so effectively OCV), the
+16 cells deviate from their mean by:
+
+```
+cell  6   -13.1 mV      <- clear outlier
+cell  3    -8.1 mV
+cell  8/9  -5.1 mV
+...
+cell 12/13/14/15  +9.9 mV each
+```
+
+**Cell 6 is the weakest cell in this pack**, and cell 3 is second. That
+ranking came out of the module's own published data with no estimator at all.
+
+### What is still needed to call it capacity rather than a ranking
+
+**One number cannot separate "low capacity" from "merely discharged".** The
+discriminator is the sign at the two ends:
+
+- a **low-capacity** cell is lowest at the bottom knee **and highest at the
+  top knee** — it fills and empties first;
+- a cell offset by **balance drift** sits on the same side at both ends.
+
+So a single bottom-knee snapshot ranks candidates; it does not convict them.
+Cell 6 needs to be checked at the top of the next charge. If it is also the
+*highest* there, it has the least capacity. If it is still the lowest, it is
+simply down on charge and the balancer has not caught up.
+
+**The monitor now stores the full per-cell array** (it previously kept only
+min/max, which is why yesterday's 75–80 % excursion cannot answer this). The
+next charge to the top knee produces the other half of the measurement.
+
+### Verdict
+
+| Goal | Status |
+|---|---|
+| Rank cells, find the weak ones | **Achievable now**, demonstrated — cell 6 |
+| Distinguish weak from unbalanced | **Needs both knees**; one bottom-knee sample in hand, top-knee pending |
+| Per-cell capacity in Ah | **Needs the estimator**: history in `nvdbUser_packState`, coulomb counting, rest detection, an OCV table, and balance-transfer accounting — none of which exist |
+
+The module was always specified to carry the estimator *behind* this API
+(§2), optional per type, landing without a consumer noticing. Nothing found
+here changes that plan; this section is the evidence that the inputs it needs
+are real and sufficient, and a measurement of how precise it can hope to be.
+
+---
+
+## 23. Statistics, charge accounting and balance transfer — design
+
+Three gaps, from the 2026-08-27 review. Ordered by what other outputs depend
+on them.
+
+### 23.1 Per-type statistics are a GENERIC LIST, not a typed struct
+
+**The requirement:** the module must show an operator what a pack knows about
+itself, and *that set differs per vendor* — a JK exposes MOS temperature,
+balance-lead resistance and a precharge state; a Dyness Powerbrick will
+expose something else entirely.
+
+**The shape:** a type publishes an array of named metrics. The core stores and
+serves them; it never learns what any of them mean.
+
+```c
+typedef struct {
+    char     name[PACK_STAT_NAME_LEN];  /* "mos_temp", "cycle_capacity"      */
+    int32_t  value;                     /* SCALED INTEGER, never a float     */
+    uint16_t unit;                      /* MB_UNIT_*, shared with Modbus     */
+    int8_t   scale_pow10;               /* value x 10^scale = the real thing */
+    uint8_t  flags;                     /* ePackStatFlag                     */
+} sPackStat;
+```
+
+**Why a list and not a union per type.** §2's load-bearing rule is that a
+consumer "never learns which vendor is behind it". A typed union breaks that
+for every consumer, to serve exactly one of them. A list keeps the split
+clean:
+
+- **the cluster** reads the neutral `sPackState` fields and ignores statistics
+  entirely — it is aggregating batteries, not describing them;
+- **a UI, MQTT bridge or CLI** walks the list generically and renders whatever
+  is there, with no per-vendor code and no rebuild when a type gains a metric.
+
+This is the same decision the Modbus module already made with points, and it
+reuses `MB_UNIT_*` so a renderer that can display a Modbus point can display a
+pack statistic.
+
+**Statistics are DESCRIPTIVE, never load-bearing.** Nothing in the module may
+read one back to make a decision — that is what the typed `sPackState` fields
+are for. A statistic that something depends on is a field in the wrong place.
+
+### 23.2 Charge accounting rides the JK's mAh counters, not its SOC
+
+**Confirmed against the firmware** (`FUN_08016156`, `shared_05.c:3415`): the
+integrator keeps a **sub-mAh residual accumulator** (64-bit, at `+0x18`),
+extracts whole mAh, and carries the remainder. The 1 % resolution problem
+belongs to `SOC%` alone; `remaining_capacity`, `full_capacity` and
+`cycle_capacity` are all **mAh**.
+
+So the division of labour is:
+
+| regime | source | why |
+|---|---|---|
+| **plateau** | the JK's `remaining_capacity` delta | a real integrator, mAh, 5 s cadence, sub-mAh internally — better than anything we could rebuild from a 5 s current sample |
+| **knees** | our own cell-voltage anchoring | the JK's counter is *fenced* to `[full/100, full x 99/100]` and pinned outside it, and 1 mV buys 0.26 % SOC up there (§22) |
+
+**Two discontinuities must be detected, never integrated:**
+
+1. **Re-seed.** §3.2 of the estimation design: on a configuration change the
+   JK recomputes `remaining_capacity` from a voltage estimate. The counter
+   jumps.
+2. **Clamp.** At the fence the counter stops moving while real charge flows.
+
+Both are caught the same way: compare the observed `remaining_capacity` delta
+against the charge implied by the measured current over the same interval. A
+delta that disagrees with `I x dt` beyond a tolerance is a discontinuity — the
+accounting interval is closed and a new one opened, rather than a bogus number
+being folded in.
+
+`cycle_capacity` (`SOCCycleCap`) is **exposed in the config and consumed by
+nothing today.** It is monotonic and persisted by the BMS (every 1 Ah, NV id
+`0x363`), which makes it the one counter that survives our reboots for free,
+and it belongs in the statistics list. **It is NOT a bidirectional throughput
+counter — see §25.2, which corrects an earlier reading of this file.**
+
+### 23.3 Balance transfer accounting — required, and it has two outputs
+
+The balancer is the one thing that breaks the shared-coulomb identity: every
+cell in a series string sees the same current *except* for what the balancer
+moves between two of them.
+
+**Attribution uses the JK's OWN `cell_minmax_nbr` register, not our
+`argmin`/`argmax`.** §2.5 established that `MaxVolCellNbr`/`MinVolCellNbr`
+*are* the balancer's operands by construction — the firmware selects them and
+then balances them. §20 records that those indices agree with a recomputed
+argmin/argmax only about 1 time in 6, and that is irrelevant here: the
+question is not "which cell is highest" but "which cell is the balancer
+working on", and only the JK can answer that.
+
+**Output 1 — per-cell charge moved, resettable.**
+
+```
+balanceIn_mAs[cell]    charge the balancer has ADDED to this cell
+balanceOut_mAs[cell]   charge it has TAKEN from this cell
+```
+
+Accumulated in **milliamp-seconds** to avoid a divide on the sample path, from
+`balance_current` integrated over the interval while `BalanSta != 0`, credited
+to the sink and debited from the source. Resettable per pack, so an operator
+can start a fresh measurement window.
+
+**Output 2 — capacity relative to the pack.**
+
+A cell that repeatedly needs charge *put into it* to keep up is a cell with
+less capacity than the pack. Net transfer per cell over a window is therefore
+a direct, cumulative, low-noise proxy for capacity deviation:
+
+```
+netTransfer_mAs[cell] = balanceIn_mAs[cell] - balanceOut_mAs[cell]
+capacityDelta_mAh[cell] ~= -netTransfer_mAh[cell]   (relative to pack median)
+```
+
+Sign convention: **a cell that had to be charged by the balancer is BELOW the
+pack median in capacity**, hence the negation. This is a *relative* figure
+against the pack's own median and is explicitly not an absolute cell capacity
+— that still needs the two-knee measurement of §22.
+
+**Why this is worth more than a voltage snapshot.** §22 ranked cell 6 as
+weakest from a single bottom-knee reading, but noted that one snapshot cannot
+separate "low capacity" from "merely discharged". Integrated balance transfer
+can: it accumulates over days, it is immune to the OCV plateau problem
+entirely, and a cell that is simply offset gets corrected once and then stops
+consuming transfer, while a genuinely small cell keeps consuming it forever.
+
+### 23.4 Persistence
+
+Balance totals accumulate over weeks and the site power-cycles — board #1
+did exactly that on 2026-08-27, uptime 34 396 s -> 0. Totals therefore live in
+**`nvdbUser_packState`**, the 16 KB area that has been allocated and unused
+since the module was written. Written on a slow cadence, not per sample: this
+is a statistic, and §C13 of the nvDb design already establishes that a
+statistic may be lossy.
+
+### 23.5 What is deliberately still NOT built
+
+Rest detection, an OCV->SOC table and knee anchoring. Nothing above depends on
+them: statistics are descriptive, charge accounting rides the JK's own
+integrator, and balance transfer is measured rather than inferred. They are
+prerequisites for **absolute** per-cell capacity in Ah, and that remains §22's
+open item.
+
+---
+
+## 24. The SOC estimator — coulomb counting, and a GRADED knee gate
+
+Settled direction: **coulomb counting carries the plateau, OCV re-anchors in
+the knees, and the knees are far wider than the JK treats them.** This section
+adds the numbers, and one measured correction that changes the design.
+
+### 24.1 The bands, from the OCV table
+
+Differentiating the LFP table in
+[design_bms_cell_health_estimation.md](design_bms_cell_health_estimation.md)
+§4:
+
+| SOC band | dOCV/ds | 1 mV resolves |
+|---|---|---|
+| 0–5 % | 120 mV/% | 0.01 % |
+| 5–10 % | 20 mV/% | 0.05 % |
+| 10–20 % | 5 mV/% | 0.20 % |
+| **20–30 %** | **2 mV/%** | **0.50 %** |
+| 30–80 % | ~1 mV/% | 1.0 % |
+| **80–90 %** | **2 mV/%** | **0.50 %** |
+| 90–95 % | 6 mV/% | 0.17 % |
+| 95–99 % | 20 mV/% | 0.05 % |
+
+**The JK stops integrating only outside `[full/100, full x 99/100]`** — 1 % and
+99 %. The genuinely informative regions begin at **20 %** and **90 %**: the
+bottom band is **20x wider** than the JK's, the top band **10x wider**. That
+is the whole reason to re-derive SOC rather than take the vendor's: not that
+its arithmetic is wrong, but that it re-anchors only where this pack almost
+never goes.
+
+### 24.2 Bands are defined by VOLTAGE, never by the JK's SOC
+
+The obvious way to write the gate is "anchor when SOC < 20 %". That is
+circular: the JK's SOC is the quantity being replaced, and §22 measured it
+producing a **negative** dV/dSOC over one band — physically impossible at
+rest, so its SOC was wrong by more than the voltage change across the band.
+
+The gate therefore keys on **measured cell voltage**, against the OCV table's
+own breakpoints. Voltage is what is observed; SOC is what is derived.
+
+### 24.3 THE MEASURED CORRECTION: the gate must be graded, not a hard cut
+
+§5.3 of the estimation design specifies a binary gate at `|dOCV/ds| > 4 mV/%`.
+**Run against 690 real samples from board #1, that gate produces ZERO
+anchors.**
+
+Near-rest (`|I| < C/50 = 5.2 A`, 341 of 690 samples) the mean cell voltage
+spanned **3263–3332 mV** — entirely inside the plateau. It came within 8 mV of
+the top band and 13 mV of the bottom, and crossed neither. The JK's own fence
+did no better: **zero** samples at SOC <= 1 % or >= 99 % in the whole window.
+
+Lowering the gate changes that completely:
+
+| gate | equivalent band | anchors in window | share of near-rest samples |
+|---|---|---|---|
+| 4 mV/% | SOC <20 / >90 | **0** | 0 % |
+| **2 mV/%** | SOC <30 / >80 | **66** (38 bottom, 28 top) | **19 %** |
+| 1.5 mV/% | SOC <40 / >75 | 103 | 30 % |
+
+So the design becomes: **no hard cut. Weight every candidate sample by the
+local slope and let the arithmetic decide.**
+
+Inverse-variance weighting is the principled form. With cell-voltage noise
+`sigma_V` and local slope `k`, the SOC implied by one sample has
+`sigma_s = sigma_V / k`, so its weight is `k^2`:
+
+```
+w_i        = k(V_i)^2
+s_anchor   = sum(w_i * s_i) / sum(w_i)
+sigma_est  = sigma_V / sqrt(sum(w_i))
+```
+
+A plateau sample is not *rejected*; it simply carries `k^2 = 1` against a
+knee sample's `k^2 = 400` and contributes nothing measurable. A hard cut is
+the same thing done crudely, and on this pack it discards everything.
+
+**What the weighting buys, on real numbers.** At 2 mV/% with `sigma_V` ~ 3 mV,
+one sample gives +/- 1.5 % SOC — poor. The 38 bottom-band samples in this
+window average to **+/- 0.24 %**, because the error falls as `sqrt(N)`. That
+is a usable anchor built entirely out of samples the 4 mV/% gate threw away.
+
+### 24.4 Where each source is authoritative
+
+| regime | SOC from | why |
+|---|---|---|
+| plateau | **coulomb counting** — the JK's `remaining_capacity` delta | a real mAh integrator with sub-mAh internal carry (§23.2); voltage says nothing here |
+| knees | **OCV, weighted by `k^2`** | 0.05–0.5 % per sample, and it is absolute rather than accumulated |
+| always | anchors **re-seed** the coulomb counter, and the gap between prediction and anchor **measures the drift** | that residual is the current-sense offset estimate of §5.9.2, and it is the only thing that bounds how far the plateau estimate can be wrong |
+
+Per cell, coulombs are shared by the series string **plus the balance transfer
+now measured in §23.3** — which is what makes a per-cell SOC, and eventually a
+per-cell capacity between two anchors, arithmetic rather than guesswork.
+
+### 24.5 Honest expectation
+
+On this pack, in this window, a **graded** gate anchors on roughly one sample
+in five of the near-rest ones, at both ends, every day. A **hard** gate
+anchors never. Neither the JK nor a 4 mV/% implementation would have produced
+a single usable anchor in twelve hours of real operation — which is the
+measurement that justifies the whole approach.
+
+---
+
+## 25. The band structure, and which JK counter is bidirectional
+
+Two questions, both answered against the firmware and the live board rather
+than from the datasheet.
+
+### 25.1 The bands are 0–30 / 30–80 / 80–100, and there are no hard edges
+
+The natural guess is `0–20 / 20–90 / 90–100`. Computed from the shipped OCV
+table and the weight the estimator actually assigns (`w = k^2`, relative to
+the flattest point on the curve):
+
+| SOC | OCV | slope | weight vs plateau | role |
+|---|---|---|---|---|
+| 0–10 % | 2500–3200 mV | 20–120 mV/% | **400–14400x** | OCV dominates |
+| 10–20 % | 3200–3250 mV | 5 mV/% | **25x** | OCV anchors |
+| 20–30 % | 3250–3270 mV | 2 mV/% | **4x** | OCV contributes |
+| **30–80 %** | **3270–3320 mV** | **1 mV/%** | **1x** | **coulomb counting alone** |
+| 80–90 % | 3320–3340 mV | 2 mV/% | **4x** | OCV contributes |
+| 90–95 % | 3340–3370 mV | 6 mV/% | **36x** | OCV anchors |
+| 95–100 % | 3370–3650 mV | 20–200 mV/% | **40000x** | OCV dominates |
+
+So the coulomb-only region is **30–80 %**, not 20–90 %. The 20–30 % and
+80–90 % shoulders still carry 4x the plateau's weight, and §24.3 measured that
+those shoulders are the only anchors this pack produced in twelve hours — a
+hard cut at 20/90 would have discarded all of them.
+
+**And the implementation has no boundaries at all.** Nothing in `pack_soc.c`
+tests "am I below 30 %". Every near-rest sample is folded in at weight `k^2`,
+so the curve's own shape decides: a 3649 mV sample outweighs a 3289 mV one by
+40 000 to 1 and the plateau contributes nothing measurable without anyone
+having to name a threshold. The table above describes what the arithmetic
+does; it is not a set of constants in the code.
+
+Our pack's measured near-rest range, 3263–3332 mV, maps to **~28 % – ~85 %** —
+just far enough into both shoulders to anchor, and nowhere near either
+dominant region.
+
+### 25.2 `remaining_capacity` is bidirectional; `cycle_capacity` is not — CORRECTION
+
+**`remaining_capacity` (`RT[0xA8]`) is signed and counts both directions.**
+That is the counter the estimator integrates, so the worked case behaves
+correctly:
+
+> charge 5 kWh, discharge 3 kWh, charge 8 kWh, all between the knees
+> -> the counter nets **+10 kWh**, and the estimator's SOC moves by exactly
+> that.
+
+Verified on the board: over a 4.2 h window `remaining_capacity` moved
+**+101.5 Ah** while our own integration of the reported current gave
+**+98.1 Ah** — 3.5 % apart, which is what 60 s sampling of a 5 s counter with
+sub-mAh internal carry should look like.
+
+**`cycle_capacity` (`RT[0xB4]`) does NOT count charge.** In that same window
+**98.5 Ah of charge flowed and it moved 0.002 Ah** — quantisation, not
+accumulation.
+
+This corrects a reading made earlier in §23.2. The source shows the
+throughput path passing `param_2 & 0x7fffffff` — the sign bit cleared, i.e. a
+magnitude — where the `remaining_capacity` path passes the same argument
+unmasked. That contrast is real, but it is *inside a conditional whose
+predicate Ghidra lost* (`cVar6`, assigned from a bare `FUN_0800e640()` call
+with its return value dropped). The magnitude mask says only "the accumulated
+quantity is unsigned", not "every interval is accumulated".
+
+**What it actually counts is not yet established.** The board has been
+charging for the whole stats-capture window — 254 samples, **zero
+discharging** — so the only thing measured is the negative: it is not charge.
+The likely reading is discharge-only, which would make
+`cycle_count = cycle_capacity / design_capacity` the conventional
+"equivalent full discharges" (8311.45 / 261 = 31.8, and the board reports
+`cycle_count = 31` — consistent). **That remains a hypothesis until a
+discharge window is observed**, and the monitor is now recording the data
+that will settle it.
+
+**Nothing depends on the answer.** The estimator uses `remaining_capacity`,
+which is confirmed bidirectional; `cycle_capacity` is a statistic (§23.1),
+and statistics are explicitly descriptive and never load-bearing.
+
+---
+
+## 26. Per-cell SOC and capacity — ONE estimator, used twice
+
+### 26.1 The correction that shaped this
+
+The first implementation had two estimators: a pack path (`sPackSoc`,
+`PackSoc_AnchorAdd`, `PackSoc_ApplyAnchor`) and a cell path (`sPackSocCell`,
+`PackSoc_CellAnchorAdd`, `PackSoc_CellsResolve`, `PackSoc_CellsAdvance`).
+Two copies of the same equations, which is two copies that can drift apart —
+and they already had, because the cell path applied balance correction
+*inside* itself while the pack path had no such notion.
+
+**A pack and a cell differ in exactly three arguments**: the voltage that
+anchors them, the capacity the charge is a fraction of, and how much charge
+went through them. So they are now **one type, `sPackSocUnit`, and one set of
+functions**, used twice.
+
+The refactor removed 91 lines and produced **pack-level capacity learning for
+free** — the pack unit measures `C = dQ/dSOC` by the same call that measures a
+cell's, where previously only cells could.
+
+Proof that the sharing is real rather than nominal: breaking
+`PackSoc_UnitAdvance` fails **five** tests spanning both scopes — three
+pack-level (`counter_once_seeded`, `clamps_at_both_ends`,
+`measures_the_drift`) and one cell-level (`smaller_cell_moves_further`).
+
+### 26.2 Balancing is applied BEFORE the hand-off
+
+The estimator is given "the charge that passed through THIS unit" and knows
+nothing about balancers:
+
+```
+pack unit:  dQ = dQ_string
+cell unit:  dQ = dQ_string + (balanceIn_i - balanceOut_i)   <- caller does this
+```
+
+`PackSoc_UnitAdvance` sees only a number. That is what lets one function
+serve both, and it keeps a battery concept out of what is otherwise pure
+arithmetic — the same separation that keeps `pack_fsm.c` and `pack_soc.c`
+libc-only and host-testable.
+
+It also puts the correction where the information is: only `pack.c` holds
+both the balance totals and the string charge, so only `pack.c` can combine
+them.
+
+### 26.3 Capacity, and why the balance term is load-bearing
+
+```
+C_i = dQ_i / dSOC_i
+```
+
+**Without the balance term every C_i would be identical**, because every cell
+in a series string carries the same current — the measurement would be an
+identity, not a discovery. The balancer is the only thing that makes dQ
+differ per cell, which is why §23.3 had to exist before this section could.
+
+Three guards, each tested:
+
+| guard | value | why |
+|---|---|---|
+| minimum dSOC | 150 per-mille | `C = dQ/dSOC`, so relative error is `sigma*sqrt(2)/dSOC`; below ~15 % the division amplifies noise instead of measuring |
+| plausibility band | `[nameplate/4, nameplate*2]` | a mis-paired anchor or missed discontinuity becomes a rejection, not "this cell is 900 Ah" |
+| blend 3:1 | with the running value | one pair of anchors is noisy, and a capacity that jumps around cannot decide a replacement |
+
+Both directions count: a discharge measures capacity as well as a charge, and
+refusing one would halve an already scarce anchor supply.
+
+### 26.4 What a consumer gets
+
+`Pack_GetCellEstimate()` -> per-cell `soc_pm` (-1 = not anchored),
+`capacity_mAh` (absolute, measured), `capConf_pm`, and **`weakestIdx`** — the
+answer the module exists for. On the CLI as `pack cells`, over HTTP in
+`/api/pack/cells`.
+
+It is a **separate struct, not part of `sPackCells`**, and deliberately:
+`sPackCells` is the type's staging buffer and is held twice per instance, so
+core-derived values in it are paid for twice. Putting them there cost 2 KB of
+main SRAM for a copy nothing writes, and was moved out.
+
+### 26.5 Cost, and the constraint that now binds
+
+`sPackSocUnit` exists 16 times per instance across 8 instances, so its
+padding is measured in kilobytes. It is ordered widest-first and narrowed
+where the range allows — SOC values are per-mille and fit `int16` — which
+recovered about 1 KB.
+
+**Main SRAM is now the binding constraint at ~92 %**, not CCM (91.4 %, and
+untouched by any of this) and not flash (89 %). Roughly 10 KB remains. Any
+further per-cell state should be counted against that budget before it is
+added, and `PACK_MAX = 8` is the multiplier that makes small structs
+expensive.
+
+### 26.6 Still not measured
+
+`soc_pm` reads -1 and `capacity_mAh` is unmeasured on the live board, which
+is correct rather than broken: an anchor needs 120 near-rest samples past a
+10-minute relaxation window, and a capacity needs a *second* anchor at least
+15 % SOC away. The pack has been charging at 20–30 A almost continuously.
+The arithmetic is proven on the bench; the conditions have not yet occurred
+on the roof.

@@ -22,6 +22,8 @@
 #include "App/Pack/pack_cfg.h"
 #include "App/Modbus/modbus.h"
 
+#include "Shared/Modbus/modbus_units.h"
+
 #include "cmsis_os.h"          /* osKernelGetTickCount, for the frame clock */
 
 #include "trice.h"
@@ -54,6 +56,8 @@ typedef struct {
     uint16_t remaining;
     uint16_t fullCapacity;
     uint16_t sohPrecharge;
+    uint16_t cycleCapacity;         /* SOCCycleCap: lifetime throughput mAh  */
+    uint16_t cycleCount;
     uint16_t chgDsgState;
     uint16_t cellMinMaxNbr;
     uint16_t balanceCurrent;
@@ -81,6 +85,18 @@ typedef struct {
     uint8_t       tempSeen;         /* a temperature landed in THIS frame     */
     uint8_t       balanceState;     /* hi byte of balsta_soc                  */
     uint8_t       unbindPending;    /* Unbind waited for a borrowed reqItem   */
+
+    /* Raw values kept only to republish the statistics list (§23.1).  These
+     * are DESCRIPTIVE: nothing in the module reads them back to decide
+     * anything, which is exactly what keeps them out of sPackState. */
+    int32_t       statCycleCap_mAh;
+    int32_t       statCycleCount;
+    int32_t       statMosTemp_dC;
+    int32_t       statSohPrecharge;
+    int32_t       statFullCap_mAh;
+    int32_t       statRemain_mAh;
+    int32_t       statBalCurrent_mA;
+    uint8_t       statDirty;
     uint8_t       boundCount;
     uint8_t       devOrd;
     uint8_t       used;
@@ -106,6 +122,57 @@ static int  Submit(uint8_t idx, const sPackCommand *cmd, uint32_t timeout_ms);
  * reset point, and PackType_Publish is a frame CLOSE with no counterpart
  * that opens one.
  */
+/** Rebuild and republish the statistics list (§23.1).
+ *
+ *  A WHOLE LIST AT ONCE, so a reader never sees half an update.  Only values
+ *  the config actually resolved are emitted -- an absent point produces no
+ *  entry rather than an entry reading zero, which is the same rule the
+ *  capability bits follow. */
+static void PublishStats(uint8_t idx)
+{
+    sJkInst  *in = &s_jk[idx];
+    sPackStat st[PACK_STATS_MAX];
+    uint8_t   n  = 0u;
+
+    #define JK_STAT(cond, nm, val, un, sc, fl)                              \
+        do {                                                                \
+            if ((cond) && (n < (uint8_t)PACK_STATS_MAX)) {                  \
+                (void)memset(&st[n], 0, sizeof(st[n]));                     \
+                (void)snprintf(st[n].name, sizeof(st[n].name), "%s", (nm)); \
+                st[n].value       = (val);                                  \
+                st[n].unit        = (un);                                   \
+                st[n].scale_pow10 = (sc);                                   \
+                st[n].flags       = (fl);                                   \
+                n++;                                                        \
+            }                                                               \
+        } while (0)
+
+    /* The JK's own charge counters, in mAh -- the numbers §23.2 says to
+     * trust, as opposed to its SOC percentage. */
+    JK_STAT(in->pt.cycleCapacity != JK_PT_NONE, "cycle_capacity",
+            in->statCycleCap_mAh, MB_UNIT_AH, -3,
+            (uint8_t)packStatFlag_counter);
+    JK_STAT(in->pt.cycleCount != JK_PT_NONE, "cycle_count",
+            in->statCycleCount, MB_UNIT_NONE, 0,
+            (uint8_t)packStatFlag_counter);
+    JK_STAT(in->pt.fullCapacity != JK_PT_NONE, "full_capacity",
+            in->statFullCap_mAh, MB_UNIT_AH, -3, (uint8_t)packStatFlag_none);
+    JK_STAT(in->pt.remaining != JK_PT_NONE, "remaining_capacity",
+            in->statRemain_mAh, MB_UNIT_AH, -3, (uint8_t)packStatFlag_none);
+    JK_STAT(in->pt.mosTemp != JK_PT_NONE, "mos_temp",
+            in->statMosTemp_dC, MB_UNIT_CELSIUS, -1,
+            (uint8_t)packStatFlag_none);
+    JK_STAT(in->pt.balanceCurrent != JK_PT_NONE, "balance_current",
+            in->statBalCurrent_mA, MB_UNIT_A, -3, (uint8_t)packStatFlag_none);
+    JK_STAT(in->pt.sohPrecharge != JK_PT_NONE, "soh_precharge",
+            in->statSohPrecharge, MB_UNIT_NONE, 0,
+            (uint8_t)packStatFlag_vendor);
+    #undef JK_STAT
+
+    PackType_PublishStats(idx, st, n);
+    in->statDirty = 0u;
+}
+
 static void CloseCellFrame(uint8_t idx)
 {
     sPackCells *cells = PackType_CellStaging(idx);
@@ -281,6 +348,8 @@ static void walk_points(uint8_t devOrd, sJkInst *in, uint32_t *caps,
         JK_MAP(remaining,       "remaining_capacity")
         JK_MAP(fullCapacity,    "full_capacity")
         JK_MAP(sohPrecharge,    "soh_precharge")
+        JK_MAP(cycleCapacity,   "cycle_capacity")
+        JK_MAP(cycleCount,      "cycle_count")
         JK_MAP(chgDsgState,     "chg_dsg_state")
         JK_MAP(cellMinMaxNbr,   "cell_minmax_nbr")
         JK_MAP(balanceCurrent,  "balance_current")
@@ -603,6 +672,9 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
             if (in->cellGroups != 0u) {
                 CloseCellFrame(i);
             }
+            if (in->statDirty != 0u) {
+                PublishStats(i);
+            }
         }
         return;
     }
@@ -674,7 +746,20 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
                     cells->balanceSinkIdx = PACK_CELL_NONE;
                 }
                 in->cellGroups |= PACK_GRP_BIT(packGrp_cells);
+
+                /* HAND IT TO THE CORE TO INTEGRATE (§23.3).  The source and
+                 * sink are the JK's OWN MaxVolCellNbr/MinVolCellNbr, because
+                 * those are the balancer's operands by construction -- a
+                 * recomputed argmin/argmax answers a different question and
+                 * agrees with the register only about one time in six (§20). */
+                PackType_NoteBalance(i, (int)cells->balanceActive,
+                                     cells->balanceCurrent_mA,
+                                     cells->balanceSrcIdx,
+                                     cells->balanceSinkIdx,
+                                     (uint32_t)osKernelGetTickCount());
             }
+            in->statBalCurrent_mA = ev->u.sample.value;
+            in->statDirty         = 1u;
         } else if (pt == in->pt.balancePwmDsg) {
             cells = PackType_CellStaging(i);
             if (cells != NULL) {
@@ -684,11 +769,29 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
                 in->cellGroups |= PACK_GRP_BIT(packGrp_cells);
             }
         } else if (pt == in->pt.remaining) {
+            in->statRemain_mAh = ev->u.sample.value;
+            in->statDirty      = 1u;
             raw->remaining_mAh = (uint32_t)ev->u.sample.value;
             in->groups |= PACK_GRP_BIT(packGrp_charge);
         } else if (pt == in->pt.fullCapacity) {
+            in->statFullCap_mAh = ev->u.sample.value;
+            in->statDirty       = 1u;
             raw->capacity_mAh = (uint32_t)ev->u.sample.value;
             in->groups |= PACK_GRP_BIT(packGrp_charge);
+        } else if (pt == in->pt.cycleCapacity) {
+            /* SOCCycleCap: the JK's LIFETIME CHARGE THROUGHPUT in mAh, and
+             * per docs/design_bms_cell_health_estimation.md §3.6 the one
+             * counter of the vendor's worth trusting outright -- a genuine
+             * integrator, persisted by the BMS, so it survives our reboots
+             * for free.  Exposed in the config since the config was written
+             * and consumed by nothing until now. */
+            in->statCycleCap_mAh = ev->u.sample.value;
+            in->statDirty = 1u;
+            in->groups |= PACK_GRP_BIT(packGrp_vendorInfo);
+        } else if (pt == in->pt.cycleCount) {
+            in->statCycleCount = ev->u.sample.value;
+            in->statDirty = 1u;
+            in->groups |= PACK_GRP_BIT(packGrp_vendorInfo);
         } else if (pt == in->pt.sohPrecharge) {
             raw->soh_pm     = (uint16_t)((((uint32_t)ev->u.sample.value >> 8) &
                                           0xFFu) * 10u);
@@ -718,6 +821,8 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
              * PublishCells may stamp packGrp_cells. */
             in->groups |= PACK_GRP_BIT(packGrp_electrical);
         } else if (pt == in->pt.mosTemp) {
+            in->statMosTemp_dC = ev->u.sample.value;
+            in->statDirty      = 1u;
             /* THE FIRST TEMPERATURE OF THE BLOCK RESETS BOTH EXTREMES.
              * Staging persists across frames, so folding a min/max into it
              * sample by sample made cellMax/tempMax monotonically rising and
