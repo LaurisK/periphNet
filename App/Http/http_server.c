@@ -112,7 +112,8 @@ static const char index_html[] =
     "</div></div>"
     "<div class=card><h3>System</h3>"
     "<div id=sysinfo class=info>Loading...</div><div id=systasks></div>"
-    "<button class=btn-dl onclick=resetPeaks()>Reset peaks</button></div>"
+    "<button class=btn-dl onclick=resetPeaks()>Reset peaks</button>"
+    "<button class=btn-del onclick=reboot()>Reboot</button></div>"
     "<div class=card><h3>Battery Pack</h3>"
     "<div id=pkhdr class=info>Loading...</div>"
     "<div id=pkcells></div>"
@@ -193,6 +194,11 @@ static const char index_html[] =
     "+(k.stale?' STALE':'')+(k.present?'':' GONE')+'\\n'});"
     "document.getElementById('systasks').innerHTML='<pre>'+t+'</pre>'"
     "}).catch(()=>{})}"
+    "function reboot(){if(!confirm('Reboot the board now?'))return;"
+    "fetch(B+'/api/system/reboot',{method:'POST'})"
+    ".then(function(){document.getElementById('sysinfo').textContent="
+    "'Rebooting - reconnecting...';setTimeout(function(){location.reload()},"
+    "12000)})}"
     "function resetPeaks(){fetch(B+'/api/system/reset-peaks',{method:'POST'})"
     ".then(()=>pollSys()).catch(()=>{})}"
     "function pollPack(){fetch(B+'/api/pack/status').then(r=>r.json()).then(j=>{"
@@ -1391,6 +1397,38 @@ static void handle_system_reset_peaks(struct netconn *conn)
     send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
 }
 
+/* POST /api/system/reboot[?delay_ms=N]
+ *
+ * The route that was missing.  Until now the only ways to restart a deployed
+ * board were the CLI -- USB CDC or UART1, i.e. a site visit -- and abusing
+ * POST /api/fwu/install to make the bootloader do it, which arms FWU state
+ * nobody wanted and leaves last_fwu_result carrying a failure that never
+ * happened (docs/issue_modbus_engine_stall.md 10.7).
+ *
+ * It answers BEFORE it acts: the reset is armed on a deadline and performed by
+ * defaultTask, so the caller gets a 200 rather than a dropped connection it
+ * has to interpret.
+ */
+static void handle_system_reboot(struct netconn *conn)
+{
+    int delay = query_int("delay_ms", 1000);
+
+    if (delay < 0 || delay > 60000) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"delay_ms out of range (0..60000)\"}");
+        return;
+    }
+
+    System_RequestReboot((uint32_t)delay);
+    TRice("System: reboot requested over HTTP\n");
+
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"status\":\"rebooting\",\"delay_ms\":%u}",
+             (unsigned)((delay < (int)SYSTEM_REBOOT_MIN_DELAY_MS)
+                            ? (int)SYSTEM_REBOOT_MIN_DELAY_MS : delay));
+    send_json(conn, "200 OK", resp_buf);
+}
+
 /* --------------------------------------------------------------------------
  * Modbus observation (/api/modbus/dump, /api/modbus/monitor)
  *
@@ -1424,6 +1462,71 @@ static void handle_modbus_monitor(struct netconn *conn, int enable)
     snprintf(resp_buf, sizeof(resp_buf), "{\"monitor\":%s}",
              Modbus_GetMonitor() ? "true" : "false");
     send_json(conn, "200 OK", resp_buf);
+}
+
+/* --------------------------------------------------------------------------
+ * Line occupancy (/api/modbus/bus)
+ *
+ * How much of each RS485 pair is already spoken for.  It is reported per PORT
+ * and not per device or per plan on purpose: the wire is what is shared, so
+ * the wire is the only thing a budget can be kept against.
+ *
+ * Read `win_permille` first -- lifetime `duty_permille` averages away the
+ * bursts that actually collide.  A `max_ms` sitting near the response timeout
+ * means some slave is not answering, and a silent slave is the most expensive
+ * traffic there is: it holds the line for the whole timeout and returns
+ * nothing.
+ * -------------------------------------------------------------------------- */
+
+static void handle_modbus_bus(struct netconn *conn)
+{
+    size_t off = 0u;
+
+    off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"ports\":[");
+
+    for (uint8_t id = 0u; id < (uint8_t)mbPort_last; id++) {
+        sModbusBusStats st;
+        int             w;
+
+        if (Modbus_BusStats(id, &st) != 0) {
+            continue;
+        }
+        w = snprintf(resp_buf + off, sizeof(resp_buf) - off,
+                     "%s{\"port\":\"%s\",\"registered\":%s,\"txns\":%lu,"
+                     "\"busy_ms\":%lu,\"elapsed_ms\":%lu,"
+                     "\"duty_permille\":%u,\"win_permille\":%u,"
+                     "\"window_sec\":%u,\"last_ms\":%u,\"max_ms\":%u}",
+                     (id == 0u) ? "" : ",",
+                     (id == (uint8_t)mbPort_test) ? "test" : "rs485",
+                     st.registered ? "true" : "false",
+                     (unsigned long)st.txns,
+                     (unsigned long)st.busy_ms,
+                     (unsigned long)st.elapsed_ms,
+                     (unsigned)st.duty_permille,
+                     (unsigned)st.win_permille,
+                     (unsigned)st.window_sec,
+                     (unsigned)st.last_ms,
+                     (unsigned)st.max_ms);
+        if (w < 0 || (size_t)w >= (sizeof(resp_buf) - off)) {
+            break;              /* never truncate mid-object */
+        }
+        off += (size_t)w;
+    }
+
+    snprintf(resp_buf + off, sizeof(resp_buf) - off, "]}");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* POST /api/modbus/bus/reset -- zero every port's counters and restart the
+ * window, so an occupancy figure can be pinned to one deliberate interval
+ * instead of to uptime. */
+static void handle_modbus_bus_reset(struct netconn *conn)
+{
+    for (uint8_t id = 0u; id < (uint8_t)mbPort_last; id++) {
+        Modbus_BusStatsReset(id);
+    }
+    TRice("Modbus: bus counters cleared over HTTP\n");
+    send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
 }
 
 /* --------------------------------------------------------------------------
@@ -2262,12 +2365,19 @@ static void handle_pack_status(struct netconn *conn)
         (unsigned)stats.lateCompletes);
 
     for (i = 0u; i < PACK_MAX; i++) {
-        sPackState st;
+        sPackState   st;
+        sPackSocDiag diag;
         uint32_t   g;
         int        first = 1;
 
         if (Pack_GetState(i, &st) != packErr_ok) {
             continue;
+        }
+        /* Diagnostics live outside sPackState (which is size-budgeted per
+         * instance), so they are a second read -- zeroed on failure, which
+         * reads as "not measured". */
+        if (Pack_SocDiag(i, &diag) != packErr_ok) {
+            (void)memset(&diag, 0, sizeof(diag));
         }
         if (n > (PACK_STATUS_JSON_CAP - 512u)) {
             break;                      /* never overrun; report what fits */
@@ -2279,6 +2389,8 @@ static void handle_pack_status(struct netconn *conn)
             "\"voltage_mV\":%u,\"current_mA\":%d,"
             "\"soc_pm\":%u,\"soh_pm\":%u,"
             "\"socConf_pm\":%u,\"sohConf_pm\":%u,\"socDrift_pm\":%d,"
+            "\"dcRes_uOhm\":%lu,\"dcResSteps\":%lu,"
+            "\"anchorSamples\":%lu,\"anchorIrSamples\":%lu,"
             "\"remaining_mAh\":%u,\"capacity_mAh\":%u,\"nameplate_mAh\":%u,"
             "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
             "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
@@ -2298,6 +2410,10 @@ static void handle_pack_status(struct netconn *conn)
             (unsigned)st.soc_pm, (unsigned)st.soh_pm,
             (unsigned)st.socConf_pm, (unsigned)st.sohConf_pm,
             (int)st.socDrift_pm,
+            (unsigned long)diag.dcRes_uOhm,
+            (unsigned long)diag.dcResSteps,
+            (unsigned long)diag.anchorSamples,
+            (unsigned long)diag.anchorIrSamples,
             (unsigned)st.remaining_mAh, (unsigned)st.capacity_mAh,
             (unsigned)st.nameplate_mAh,
             (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,
@@ -3483,6 +3599,8 @@ static void handle_connection(struct netconn *conn)
         handle_system_status(conn);
     } else if (route_is("POST /api/system/reset-peaks")) {
         handle_system_reset_peaks(conn);
+    } else if (route_is("POST /api/system/reboot")) {
+        handle_system_reboot(conn);
     } else if (route_is("POST /api/modbus/dump/on")) {
         handle_modbus_dump(conn, 1);
     } else if (route_is("POST /api/modbus/dump/off")) {
@@ -3491,6 +3609,10 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_monitor(conn, 1);
     } else if (route_is("POST /api/modbus/monitor/off")) {
         handle_modbus_monitor(conn, 0);
+    } else if (route_is("GET /api/modbus/bus")) {
+        handle_modbus_bus(conn);
+    } else if (route_is("POST /api/modbus/bus/reset")) {
+        handle_modbus_bus_reset(conn);
     } else if (route_is("POST /api/modbus/write")) {
         handle_modbus_write(conn, &stream);
     } else if (route_is("GET /api/nvdb/layout")) {
