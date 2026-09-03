@@ -57,6 +57,12 @@ extern "C" {
  *  on CAN1 (PD0/PD1) and the battery on CAN2 (PB5/PB6).  Both are
  *  configurable because which connector a harness lands on is a fact about a
  *  cabinet, not about this firmware. */
+/* WHICH CELL FACES WHICH DEVICE IS A SITE FACT, AND THESE TWO LINES ARE THE
+ * ONLY PLACE IT IS ASSERTED -- wrongly, on zaliakalnis, where the battery is
+ * on CAN1.  Harmless while bridging (both directions forward regardless), and
+ * a silent takeover of the wrong cell in `bms` mode.  It has to become
+ * configuration, together with a pack's CAN binding, which cannot name a bus
+ * either: docs/issue_can_bus_roles_not_configurable.md. */
 #define CAN_BRIDGE_INVERTER_BUS     canBus_1
 #define CAN_BRIDGE_BATTERY_BUS      canBus_2
 
