@@ -102,6 +102,14 @@ typedef enum {
     nvdbUser_packCfg,           /* the uploaded pack configuration          */
     nvdbUser_packState,         /* per-pack learned state — reserved        */
 
+    /* App/Can/can_log.c — a ring of CAN frames for multi-day monitoring
+     * (docs/design_can_bridge.md §12).  ONE user despite being a ring: it is
+     * self-describing on the medium (a header per unit, a magic + version per
+     * area) exactly like the FWU blob areas, so it needs no second area for
+     * metadata the way packCfg/packState do for genuinely different
+     * lifecycles. */
+    nvdbUser_canLog,
+
     nvdbUser_last               /* sentinel — a count, never stored         */
 } eNvDbUser;
 

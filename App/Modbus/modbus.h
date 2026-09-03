@@ -599,6 +599,20 @@ typedef struct {
     uint8_t  monitor;
 } sModbusStats;
 
+/* Scheduler health (docs/modbus.md §5.2).  `ticksArmed` MUST equal `ticksLive`
+ * and `armFailures` MUST stay zero; anything else means scheduled sequences
+ * have no clock behind them and the wire has gone quiet without any other
+ * indicator changing. */
+typedef struct {
+    uint32_t droppedPokes;  /* wakes that did not fit the engine queue      */
+    uint32_t armFailures;   /* clocks that would not arm — must stay 0      */
+    uint8_t  sequences;     /* live {device, plan, time table} sequences    */
+    uint8_t  ticksLive;     /* distinct periods carrying them               */
+    uint8_t  ticksArmed;    /* of those, actually running                   */
+} sModbusScheduleStats;
+
+int Modbus_ScheduleStats(sModbusScheduleStats *out);
+
 int Modbus_Stats(sModbusStats *out);
 
 /** @brief  Trice dump of engine + config + per-device state (`modbus status`). */

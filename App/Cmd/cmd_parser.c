@@ -10,6 +10,10 @@
 #include "App/Cmd/cmd_parser.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
+#include "App/Can/can_bridge.h"
+#include "App/Can/can_bus.h"
+#include "App/Can/can_log.h"
+#include "App/Can/can_monitor.h"
 #include "App/Mon/sysmon.h"
 #include "App/system.h"
 #include "App/Test/modbus_test_port.h"
@@ -28,6 +32,7 @@
 #include "trice.h"
 #include "usart.h"
 #include "stm32f4xx_hal.h"
+#include <ctype.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -72,6 +77,8 @@ static void cmd_help(const char *args);
 static void cmd_reboot(const char *args);
 static void cmd_dfu(const char *args);
 static void cmd_bms(const char *args);
+static void cmd_can(const char *args);
+static int  parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen);
 static void cmd_modbus(const char *args);
 static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
@@ -82,6 +89,7 @@ static void cmd_sysmon(const char *args);
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
+    { "can",         cmd_can,         "CAN bridge + flash trace (start|stop|mode|status|ids|trace|log|send)" },
     { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
     { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|save|forget|monitor|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
@@ -159,6 +167,355 @@ static void cmd_bms(const char *args)
               BmsReader_IsRunning() ? "running" : "stopped");
     } else {
         TRice("Usage: bms start|stop|send|read|set|status\n");
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * CAN bridge
+ * -------------------------------------------------------------------------- */
+
+/** Print one bus's counters. */
+static void CanPrintBus(eCanBus bus)
+{
+    sCanBusStats st;
+
+    if (CanBus_GetStats(bus, &st) != 0) {
+        return;
+    }
+    TRice("  CAN%u %s %u bps rx=%u tx=%u/%u drop=%u\n",
+          (unsigned)bus + 1u, st.running ? "up" : "down", st.bitrate_bps,
+          st.rxCnt, st.txDoneCnt, st.txAcceptedCnt, st.txDroppedCnt);
+    TRice("       ovr=%u err=%u busoff=%u(%u) esr rec=%u tec=%u q=%u/%u\n",
+          st.rxOverrunCnt, st.errorCnt, st.busOffCnt, st.busOff,
+          st.rxErrorCnt, st.txErrorCnt, st.txQueueDepth, st.txQueuePeak);
+}
+
+/** Print the identifier register of one bus, one row at a time. */
+static void CanPrintIds(eCanBus bus)
+{
+    uint32_t now_ms = HAL_GetTick();
+    uint8_t  n = CanMon_IdCount(bus);
+
+    TRice("CAN%u: %u identifiers\n", (unsigned)bus + 1u, n);
+    for (uint8_t i = 0u; i < n; i++) {
+        sCanMonId r;
+
+        if (CanMon_GetIdAt(bus, i, &r) != 0) {
+            break;
+        }
+        TRice("  %03X%s rx=%u tx=%u chg=%u age=%ums gap=%u..%ums\n",
+              r.id, r.ext ? "x" : "", r.rxCnt, r.txCnt, r.changeCnt,
+              now_ms - r.lastStamp_ms, r.minGap_ms, r.maxGap_ms);
+        TRice("      dlc=%u %02X%02X%02X%02X%02X%02X%02X%02X\n",
+              r.dlc, r.data[0], r.data[1], r.data[2], r.data[3],
+              r.data[4], r.data[5], r.data[6], r.data[7]);
+    }
+}
+
+/** Dump the trace ring, oldest first. */
+static void CanPrintTrace(uint16_t max)
+{
+    uint16_t n = CanMon_TraceCount();
+    uint16_t first = 0u;
+
+    if ((max != 0u) && (n > max)) {
+        first = (uint16_t)(n - max);
+    }
+
+    TRice("CAN trace: %u of %u frames\n", n - first, n);
+    for (uint16_t i = first; i < n; i++) {
+        sCanMonTrace t;
+
+        if (CanMon_GetTraceAt(i, &t) != 0) {
+            break;
+        }
+        TRice("  %ums CAN%u %c %03X [%u]", t.stamp_ms,
+              (unsigned)t.bus + 1u,
+              (t.dir == (uint8_t)canDir_rx) ? 'R' : 'T', t.id, t.dlc);
+        TRice(" %02X%02X%02X%02X%02X%02X%02X%02X\n",
+              t.data[0], t.data[1], t.data[2], t.data[3],
+              t.data[4], t.data[5], t.data[6], t.data[7]);
+    }
+}
+
+/** Print the flash trace's own state: mode, capacity, how much it holds. */
+static void CanPrintLogStatus(void)
+{
+    sCanLogStatus st;
+
+    if (CanLog_GetStatus(&st) != 0) {
+        return;
+    }
+    TRiceS("CAN log: mode=%s", (char *)CanLog_ModeName((eCanLogMode)st.mode));
+    TRiceS(" state=%s", (char *)CanLog_StateName((eCanLogState)st.state));
+    TRice(" gap>=%ums heartbeat<=%ums\n", st.minGap_ms, st.heartbeat_ms);
+    TRice("  held=%u/%u recs (next=%u oldest=%u) staged=%u/%u area=%uB boot=%u\n",
+          st.heldRecs, st.capacityRecs, st.nextRec, st.oldestRec,
+          st.staged, CANLOG_STAGE_DEPTH, st.areaSize_bytes, st.bootId);
+    TRice("  dropped=%u stalled=%u writeErr=%u\n",
+          st.droppedCnt, st.stalledCnt, st.writeErrCnt);
+}
+
+static void CanPrintStatus(void)
+{
+    sCanBridgeStatus br;
+    sCanMonStats     mon;
+
+    if (CanBridge_GetStatus(&br) != 0) {
+        return;
+    }
+    CanMon_GetStats(&mon);
+
+    TRiceS("CAN bridge: mode=%s", (char *)CanBridge_ModeName((eCanBrMode)br.mode));
+    TRice(" battery=CAN%u inverter=CAN%u %u bps\n",
+          (unsigned)br.batteryBus + 1u, (unsigned)br.inverterBus + 1u,
+          br.bitrate_bps);
+    TRice("  bat->inv fwd=%u supp=%u drop=%u\n",
+          br.toInverter.forwardedCnt, br.toInverter.suppressedCnt,
+          br.toInverter.droppedCnt);
+    TRice("  inv->bat fwd=%u supp=%u drop=%u\n",
+          br.toBattery.forwardedCnt, br.toBattery.suppressedCnt,
+          br.toBattery.droppedCnt);
+    TRiceS("  source %s", (char *)(br.sourceBound ? "bound" : "NONE"));
+    TRice(" emits=%u every %ums, override ",
+          br.sourceEmitCnt, br.sourcePeriod_ms);
+    TRiceS("%s", (char *)(br.overrideAll ? "all" : "list"));
+    TRice(" (%u ids)\n", br.overrideCnt);
+    TRice("  monitor recorded=%u idOverflow=%u trace=%s dropped=%u\n",
+          mon.recordedCnt, mon.idOverflowCnt, mon.tracing ? "on" : "off",
+          mon.traceDroppedCnt);
+    CanPrintBus(canBus_1);
+    CanPrintBus(canBus_2);
+    CanPrintLogStatus();
+}
+
+/**
+ * CAN command: the CAN1/CAN2 bridge, its traffic register, and its flash
+ * trace.
+ *
+ * Usage:
+ *   can start [monitor|bridge|bms] [bitrate]  — bring both buses up
+ *   can stop                                  — take both buses down
+ *   can mode <off|monitor|bridge|bms>         — change policy, wire stays up
+ *   can status                                — modes, counters, bus health
+ *   can ids [1|2]                             — the identifier register
+ *   can trace <on|off|show [n]>               — the RAM frame ring (seconds)
+ *   can log status                            — the flash trace's own state
+ *   can log mode <off|changes|all> [gap] [hb] — capture policy (ms, ms)
+ *   can log read <recNo>                      — one record by global number
+ *   can log wipe                              — erase the flash trace
+ *   can send <bus> <id> <hexbytes>            — put one frame on a bus
+ *   can roles <batteryBus> <inverterBus>      — which cell is which side
+ *   can override <all|none|id ...>            — what bms mode takes over
+ *   can reset                                 — zero every counter
+ */
+static void cmd_can(const char *args)
+{
+    if (strncmp(args, "start", 5) == 0) {
+        eCanBrMode mode = canBrMode_bridge;
+        uint32_t   bitrate_bps = 0u;
+        const char *p = args + 5;
+
+        while (*p == ' ') {
+            p++;
+        }
+        if ((*p != '\0') && ((*p < '0') || (*p > '9'))) {
+            if (CanBridge_ModeFromName(p, &mode) != 0) {
+                TRice("Usage: can start [monitor|bridge|bms] [bitrate]\n");
+                return;
+            }
+            while ((*p != '\0') && (*p != ' ')) {
+                p++;
+            }
+            while (*p == ' ') {
+                p++;
+            }
+        }
+        if ((*p >= '0') && (*p <= '9')) {
+            bitrate_bps = (uint32_t)strtoul(p, NULL, 0);
+        }
+        if (mode == canBrMode_off) {
+            TRice("can start needs monitor, bridge or bms\n");
+            return;
+        }
+        if (CanBridge_Start(mode, bitrate_bps) != 0) {
+            TRice("CAN bridge start FAILED\n");
+            return;
+        }
+        CanPrintStatus();
+    } else if (strncmp(args, "stop", 4) == 0) {
+        (void)CanBridge_Stop();
+    } else if (strncmp(args, "mode ", 5) == 0) {
+        eCanBrMode mode;
+
+        if (CanBridge_ModeFromName(args + 5, &mode) != 0) {
+            TRice("Usage: can mode <off|monitor|bridge|bms>\n");
+            return;
+        }
+        if (CanBridge_SetMode(mode) != 0) {
+            TRice("CAN mode change FAILED\n");
+            return;
+        }
+        CanPrintStatus();
+    } else if (strncmp(args, "status", 6) == 0) {
+        CanPrintStatus();
+    } else if (strncmp(args, "ids", 3) == 0) {
+        int which = atoi(args + 3);
+
+        if (which == 1) {
+            CanPrintIds(canBus_1);
+        } else if (which == 2) {
+            CanPrintIds(canBus_2);
+        } else {
+            CanPrintIds(canBus_1);
+            CanPrintIds(canBus_2);
+        }
+    } else if (strncmp(args, "trace on", 8) == 0) {
+        CanMon_TraceEnable(1);
+        TRice("CAN trace armed (%u frames)\n", CANMON_TRACE_MAX);
+    } else if (strncmp(args, "trace off", 9) == 0) {
+        CanMon_TraceEnable(0);
+        TRice("CAN trace off\n");
+    } else if (strncmp(args, "trace", 5) == 0) {
+        CanPrintTrace((uint16_t)atoi(args + 5));
+    } else if (strncmp(args, "send ", 5) == 0) {
+        unsigned  bus = 0u;
+        unsigned  id = 0u;
+        char      hex[32];
+        sCanFrame frame;
+        int       len;
+
+        hex[0] = '\0';
+        if (sscanf(args + 5, "%u %x %31s", &bus, &id, hex) < 2) {
+            TRice("Usage: can send <1|2> <id-hex> [databytes-hex]\n");
+            return;
+        }
+        memset(&frame, 0, sizeof(frame));
+        len = parse_hex_bytes(hex, frame.data, sizeof(frame.data));
+        if (len < 0) {
+            TRice("can send: malformed hex payload\n");
+            return;
+        }
+        if ((bus < 1u) || (bus > (unsigned)canBus_last)) {
+            TRice("can send: bus must be 1 or 2\n");
+            return;
+        }
+        frame.bus = (uint8_t)(bus - 1u);
+        frame.id  = id;
+        frame.ext = (id > 0x7FFu) ? 1u : 0u;
+        frame.dlc = (uint8_t)len;
+        if (CanBus_Send(&frame) != 0) {
+            TRice("can send: refused (bus down or queue full)\n");
+            return;
+        }
+        TRice("can send: CAN%u %03X [%u]\n", bus, id, frame.dlc);
+    } else if (strncmp(args, "roles ", 6) == 0) {
+        unsigned bat = 0u;
+        unsigned inv = 0u;
+
+        if (sscanf(args + 6, "%u %u", &bat, &inv) != 2) {
+            TRice("Usage: can roles <batteryBus> <inverterBus>\n");
+            return;
+        }
+        if (CanBridge_SetRoles((eCanBus)(bat - 1u), (eCanBus)(inv - 1u)) != 0) {
+            TRice("can roles: refused (stop the bridge first, and the two "
+                  "sides must differ)\n");
+            return;
+        }
+        TRice("can roles: battery=CAN%u inverter=CAN%u\n", bat, inv);
+    } else if (strncmp(args, "override ", 9) == 0) {
+        const char *p = args + 9;
+
+        if (strncmp(p, "all", 3) == 0) {
+            CanBridge_SetOverrideAll(1);
+            TRice("can override: the whole battery->inverter direction\n");
+        } else if (strncmp(p, "none", 4) == 0) {
+            CanBridge_ClearOverrides();
+            CanBridge_SetOverrideAll(0);
+            TRice("can override: nothing (bms mode relays everything)\n");
+        } else {
+            CanBridge_SetOverrideAll(0);
+            while (isxdigit((int)(unsigned char)*p) != 0) {
+                uint32_t id = (uint32_t)strtoul(p, NULL, 16);
+
+                if (CanBridge_AddOverrideId(id) != 0) {
+                    TRice("can override: list full\n");
+                    break;
+                }
+                TRice("can override: +%03X\n", id);
+                while ((*p != '\0') && (*p != ' ')) {
+                    p++;
+                }
+                while (*p == ' ') {
+                    p++;
+                }
+            }
+        }
+    } else if (strncmp(args, "log status", 10) == 0) {
+        CanPrintLogStatus();
+    } else if (strncmp(args, "log mode ", 9) == 0) {
+        const char *p = args + 9;
+        eCanLogMode mode;
+        uint32_t    minGap_ms = CANLOG_MIN_GAP_MS;
+        uint32_t    heartbeat_ms = CANLOG_HEARTBEAT_MS;
+        unsigned    g = 0u;
+        unsigned    h = 0u;
+        int         got;
+
+        if (CanLog_ModeFromName(p, &mode) != 0) {
+            TRice("Usage: can log mode <off|changes|all> [gap_ms] [hb_ms]\n");
+            return;
+        }
+        while ((*p != '\0') && (*p != ' ')) {
+            p++;
+        }
+        while (*p == ' ') {
+            p++;
+        }
+        got = sscanf(p, "%u %u", &g, &h);
+        if (got >= 1) {
+            minGap_ms = g;
+        }
+        if (got >= 2) {
+            heartbeat_ms = h;
+        }
+        if (CanLog_SetPolicy(mode, minGap_ms, heartbeat_ms) != 0) {
+            TRice("can log mode: refused\n");
+            return;
+        }
+        CanPrintLogStatus();
+    } else if (strncmp(args, "log wipe", 8) == 0) {
+        if (CanLog_Wipe() != 0) {
+            TRice("can log wipe: no usable flash area\n");
+            return;
+        }
+        TRice("CAN log: wipe requested\n");
+    } else if (strncmp(args, "log read ", 9) == 0) {
+        uint32_t   recNo = (uint32_t)strtoul(args + 9, NULL, 0);
+        sCanLogRec rec;
+        int        rc = CanLog_ReadRec(recNo, &rec);
+
+        if (rc != 0) {
+            TRice("can log read %u: unavailable (%d)\n", recNo, rc);
+            return;
+        }
+        TRice("rec %u: t=%ums CAN%u %c %03X [%u]", recNo, rec.stamp_ms,
+              (unsigned)CANLOG_META_BUS(rec.meta) + 1u,
+              CANLOG_META_DIR(rec.meta) ? 'T' : 'R', rec.id,
+              CANLOG_META_DLC(rec.meta));
+        TRice(" %02X%02X%02X%02X%02X%02X%02X%02X\n",
+              rec.data[0], rec.data[1], rec.data[2], rec.data[3],
+              rec.data[4], rec.data[5], rec.data[6], rec.data[7]);
+    } else if (strncmp(args, "log", 3) == 0) {
+        TRice("Usage: can log status|mode|read|wipe\n");
+    } else if (strncmp(args, "reset", 5) == 0) {
+        CanBus_ResetStats();
+        CanBridge_ResetStats();
+        CanMon_Reset();
+        TRice("CAN counters cleared\n");
+    } else {
+        TRice("Usage: can start|stop|mode|status|ids|trace|log|send|roles|"
+              "override|reset\n");
     }
 }
 

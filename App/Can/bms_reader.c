@@ -1,83 +1,42 @@
 /**
  * @file    bms_reader.c
- * @brief   Pylontech BMS CAN reader — receives and parses battery frames on CAN2
+ * @brief   Pylontech BMS CAN reader — parses the battery frame set into a
+ *          display struct
  *
- * CAN2 is re-initialised to 500 kbps with acceptance filters for Pylontech IDs.
- * Frames are received via RX FIFO0 interrupt (HAL_CAN_RxFifo0MsgPendingCallback).
- * BmsReader_Poll() is kept as a safety net to drain anything the ISR missed.
+ * IT NO LONGER OWNS A PERIPHERAL.  It used to re-initialise CAN2 and define
+ * the one weak RX-FIFO-pending callback the HAL offers, which is what blocked
+ * every other CAN consumer on this board (docs/design_battery_pack.md §16.5).
+ * Now it is an ordinary subscriber of App/Can/can_bus.c: the bridge owns the
+ * wire, and this file asks for 0x350-0x35F on whichever bus the battery is on.
+ *
+ * Its output is a float display struct and stays that way deliberately — it
+ * feeds the CLI and the web UI.  Anything making a DECISION about a battery
+ * goes through App/Pack, whose types parse the packed frames into integers.
  */
 
+/* Includes -----------------------------------------------------------------*/
+
 #include "App/Can/bms_reader.h"
-#include "can.h"
+#include "App/Can/can_bridge.h"
+#include "App/Can/can_bus.h"
+
 #include "trice.h"
+#include "stm32f4xx_hal.h"
+
 #include <string.h>
 
+/* Private defines ----------------------------------------------------------*/
+
+/** The Pylontech block: 0x350-0x35F, matched on the top seven bits. */
+#define BMS_READER_ID           0x350u
+#define BMS_READER_MASK         0x7F0u
+
+/* Private variables --------------------------------------------------------*/
+
 static sPylonBatteryData s_data;
+static int               s_sub = -1;
 static volatile int s_running;
 static volatile uint32_t s_rxCount;
-
-/* --------------------------------------------------------------------------
- * CAN2 reconfiguration to 500 kbps + filters + RX interrupt
- *
- * Same timing as CAN1: Prescaler=6, BS1=10, BS2=3 → 500 kbps.
- *
- * CAN2 filter banks start at bank 14 (banks 0–13 belong to CAN1).
- * Mask filter accepts 0x350–0x35F.
- * -------------------------------------------------------------------------- */
-
-static int can2_init_500k(void)
-{
-    HAL_CAN_DeInit(&hcan2);
-
-    hcan2.Instance                  = CAN2;
-    hcan2.Init.Prescaler            = 6;
-    hcan2.Init.Mode                 = CAN_MODE_NORMAL;
-    hcan2.Init.SyncJumpWidth        = CAN_SJW_1TQ;
-    hcan2.Init.TimeSeg1             = CAN_BS1_10TQ;
-    hcan2.Init.TimeSeg2             = CAN_BS2_3TQ;
-    hcan2.Init.TimeTriggeredMode    = DISABLE;
-    hcan2.Init.AutoBusOff           = ENABLE;
-    hcan2.Init.AutoWakeUp           = DISABLE;
-    hcan2.Init.AutoRetransmission   = ENABLE;
-    hcan2.Init.ReceiveFifoLocked    = DISABLE;
-    hcan2.Init.TransmitFifoPriority = DISABLE;
-
-    if (HAL_CAN_Init(&hcan2) != HAL_OK) {
-        return -1;
-    }
-
-    /* Accept 0x350–0x35F (mask: ignore lower 4 bits of the 11-bit ID)
-     * Filter ID:   0x350 << 5 = 0x6A00
-     * Filter Mask:  0x7F0 << 5 = 0xFE00  (bits 10:4 must match)
-     */
-    CAN_FilterTypeDef filter = {
-        .FilterIdHigh         = 0x350 << 5,
-        .FilterIdLow          = 0x0000,
-        .FilterMaskIdHigh     = 0x7F0 << 5,
-        .FilterMaskIdLow      = 0x0000,
-        .FilterFIFOAssignment = CAN_FILTER_FIFO0,
-        .FilterBank           = 14,
-        .FilterMode           = CAN_FILTERMODE_IDMASK,
-        .FilterScale          = CAN_FILTERSCALE_32BIT,
-        .FilterActivation     = CAN_FILTER_ENABLE,
-        .SlaveStartFilterBank = 14,
-    };
-
-    if (HAL_CAN_ConfigFilter(&hcan2, &filter) != HAL_OK) {
-        return -1;
-    }
-
-    if (HAL_CAN_Start(&hcan2) != HAL_OK) {
-        return -1;
-    }
-
-    /* Enable RX FIFO0 message pending interrupt */
-    if (HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
-        return -1;
-    }
-
-    return 0;
-}
 
 /* --------------------------------------------------------------------------
  * Frame parsing (called from ISR context and from Poll)
@@ -152,22 +111,15 @@ static void parse_frame(uint32_t stdId, const uint8_t *data, uint8_t dlc)
 }
 
 /* --------------------------------------------------------------------------
- * HAL CAN RX callback — called from CAN2_RX0_IRQHandler via HAL_CAN_IRQHandler
+ * Subscription callback — ISR context, via the can_bus dispatcher
  * -------------------------------------------------------------------------- */
 
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+static void OnFrame(const sCanFrame *frame, void *ctx)
 {
-    if (hcan->Instance != CAN2 || !s_running) {
-        return;
-    }
+    (void)ctx;
 
-    CAN_RxHeaderTypeDef header;
-    uint8_t data[8];
-
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) == HAL_OK) {
-        if (header.IDE == CAN_ID_STD) {
-            parse_frame(header.StdId, data, header.DLC);
-        }
+    if ((frame->rtr == 0u) && (frame->ext == 0u)) {
+        parse_frame(frame->id, frame->data, frame->dlc);
     }
 }
 
@@ -177,28 +129,44 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 
 void BmsReader_Start(void)
 {
-    if (s_running) return;
+    eCanBus bus = CanBridge_BatteryBus();
+
+    if (s_running) {
+        return;
+    }
+
+    if (!CanBus_IsRunning(bus)) {
+        TRice("err:BmsReader: CAN%u is down - start the bridge first\n",
+              (unsigned)bus + 1u);
+        return;
+    }
 
     memset((void *)&s_data, 0, sizeof(s_data));
     s_rxCount = 0;
 
-    if (can2_init_500k() != 0) {
-        TRice("BmsReader: CAN2 init failed\n");
+    s_sub = CanBus_Subscribe(bus, BMS_READER_ID, BMS_READER_MASK,
+                             OnFrame, NULL);
+    if (s_sub < 0) {
+        TRice("err:BmsReader: no free subscription slot\n");
         return;
     }
 
     s_running = 1;
-    TRice("BmsReader: started on CAN2 (500 kbps, IRQ)\n");
+    TRice("BmsReader: listening on CAN%u for 0x350-0x35F\n",
+          (unsigned)bus + 1u);
 }
 
 void BmsReader_Stop(void)
 {
-    if (!s_running) return;
+    if (!s_running) {
+        return;
+    }
 
     s_running = 0;
-    HAL_CAN_DeactivateNotification(&hcan2, CAN_IT_RX_FIFO0_MSG_PENDING);
-    HAL_CAN_Stop(&hcan2);
-    HAL_CAN_DeInit(&hcan2);
+    if (s_sub >= 0) {
+        (void)CanBus_Unsubscribe(s_sub);
+        s_sub = -1;
+    }
 
     TRice("BmsReader: stopped (rx=%u frames)\n", s_rxCount);
 }
@@ -208,21 +176,14 @@ int BmsReader_IsRunning(void)
     return s_running;
 }
 
+/**
+ * Nothing to poll any more: the dispatcher drains the FIFO in the RX ISR and
+ * hands frames straight to OnFrame.  Kept because the CLI calls it before
+ * printing, and because a caller asking "is there anything new" deserves an
+ * answer that is true rather than a compile error.
+ */
 void BmsReader_Poll(void)
 {
-    if (!s_running) return;
-
-    CAN_RxHeaderTypeDef header;
-    uint8_t data[8];
-
-    /* Safety net: drain anything the ISR might have missed */
-    while (HAL_CAN_GetRxFifoFillLevel(&hcan2, CAN_RX_FIFO0) > 0) {
-        if (HAL_CAN_GetRxMessage(&hcan2, CAN_RX_FIFO0, &header, data) == HAL_OK) {
-            if (header.IDE == CAN_ID_STD) {
-                parse_frame(header.StdId, data, header.DLC);
-            }
-        }
-    }
 }
 
 const sPylonBatteryData *BmsReader_GetData(void)

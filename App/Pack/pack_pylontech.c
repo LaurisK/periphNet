@@ -6,18 +6,24 @@
  * this dialect.
  *
  * IT CANNOT BIND YET, AND THAT IS THE HONEST STATE RATHER THAN A STUB.
- * App/Can/bms_reader.c:158 defines the single weak
- * HAL_CAN_RxFifo0MsgPendingCallback, and a second definition of a weak symbol
- * is a link error — "whoever wins" is not a design.  So this type registers
- * its blueprint, parses its bind token, and refuses to bind with a stated
- * reason until App/Can grows one RX dispatcher that owns the callback and
- * fans out to bms_reader and to this file (§16 item 5).
+ *
+ * THE PREREQUISITE IS NOW GONE: App/Can/can_bus.c owns the single weak
+ * RX-FIFO-pending callback the HAL offers and fans frames out by (bus, id, mask),
+ * so §16 item 5 is answered — CanBus_Subscribe(bus, 0x350, 0x7F0, cb, ctx) is
+ * all this file needs to start receiving, and bms_reader.c already does
+ * exactly that alongside it.
+ *
+ * WHAT IS STILL MISSING IS THIS TYPE'S OWN HALF, and it is not a line of
+ * plumbing: parsing the packed frames into integers, tracking rxMask per
+ * instance, publishing through PackType_Publish from ISR context, and closing
+ * a partial set in Tick.  None of it is written, so binding still refuses with
+ * a stated reason rather than advertising capabilities it cannot deliver.
  *
  * The core maps that refusal to packWhy_typeUnavailable, which is distinct
  * from packWhy_noType precisely for this case: the operator's configuration
  * is correct and the firmware is the limitation.
  *
- * Deliberately does NOT include pylontech.h yet.  When the dispatcher lands
+ * Deliberately does NOT include pylontech.h yet.  When the parser lands
  * this file will parse the PACKED FRAME STRUCTS into integers directly and
  * never touch sPylonBatteryData, whose fields are floats — no float crosses
  * this API, and none is created behind it.
@@ -55,7 +61,7 @@ static void Tick(uint8_t idx, uint32_t now_ms);
 /**
  * The blueprint.
  *
- * capsMax is what an instance COULD offer once the dispatcher exists, and it
+ * capsMax is what an instance COULD offer once the parser exists, and it
  * is deliberately short of the JK's: **capacity in amp-hours is absent from
  * the Pylontech frame set as implemented** — sPylonBatteryData has no capacity
  * field and 0x35F is unimplemented — so a consumer gets nameplate_mAh from
@@ -125,7 +131,7 @@ static int Bind(const sPackBindInfo *info, sPackBindResult *res)
 
     /* The token is checked even though the bind cannot succeed, so a
      * malformed one is reported as malformed rather than being hidden behind
-     * the missing dispatcher. */
+     * the missing parser. */
     if (parse_bind(info->bindKey, &nodeId) != 0) {
         /* THE OPERATOR'S CONFIG is wrong here, not the firmware -- say so,
          * rather than letting this be relabelled "type unavailable". */
@@ -137,12 +143,13 @@ static int Bind(const sPackBindInfo *info, sPackBindResult *res)
     s_pylon[info->idx].nodeId = nodeId;
     s_pylon[info->idx].used   = 0u;
 
-    /* THE PREREQUISITE, not a stub.  Until App/Can owns one RX dispatcher
-     * this type has no way to receive a frame, and advertising capabilities
-     * it cannot deliver is how a consumer learns to distrust the API. */
+    /* The dispatcher exists now; the parse and publish path in this file does
+     * not.  Advertising capabilities it cannot deliver is how a consumer
+     * learns to distrust the API, so it still says no — with the reason
+     * updated to the one that is actually true. */
     res->why = (uint8_t)packWhy_typeUnavailable;
-    TRice("[Pack] pylontech node %u: no CAN RX dispatcher, cannot bind\n",
-          (unsigned)nodeId);
+    TRice("[Pack] pylontech node %u: type has no frame parser yet, cannot "
+          "bind\n", (unsigned)nodeId);
     return packErr_notSupported;
 }
 
@@ -171,7 +178,7 @@ static void Tick(uint8_t idx, uint32_t now_ms)
     (void)idx;
     (void)now_ms;
 
-    /* WHEN THE DISPATCHER LANDS this is where a push type closes a partial
+    /* WHEN THE PARSER LANDS this is where a push type closes a partial
      * frame set that stopped arriving: publish when rxMask completes, or when
      * the tick finds an incomplete set older than ~1.2 s.  A sticky rxMask
      * that never completes because a frame is simply absent from the dialect

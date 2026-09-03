@@ -16,6 +16,9 @@
 
 #include "App/app_freertos.h"
 #include "App/system.h"
+#include "App/Can/bms_reader.h"
+#include "App/Can/can_bridge.h"
+#include "App/Can/can_log.h"
 #include "App/Cmd/cmd_parser.h"
 #include "App/Http/http_server.h"
 #include "App/Modbus/modbus.h"
@@ -254,6 +257,41 @@ void App_DefaultTaskEntry(void)
         (void)Func_Start();
     }
 
+    /* The CAN1/CAN2 bridge.
+     *
+     * IT COMES UP FORWARDING, and that is the deliberate choice: this board
+     * sits BETWEEN a battery and an inverter, so any boot state other than
+     * `bridge` is a boot that silently cuts the inverter off from its BMS.
+     * On a board that is not wired to either side it costs nothing — there is
+     * no traffic to forward and nothing is ever transmitted.
+     *
+     * There is NO persisted CAN configuration yet, so mode, bitrate and bus
+     * roles are compile-time defaults; changing one over the tunnel
+     * (POST /api/can/mode) lasts until the next reset.  That is a known gap,
+     * not an oversight: a new nvDb user changes the storage layout, and the
+     * layout is still pinned to what the bootloader was built for.
+     *
+     * The reader is started with it so the battery frame set is decoded for
+     * the UI and the CLI from boot; it only subscribes, and puts nothing on
+     * the wire. */
+    if (CanBridge_Start(canBrMode_bridge, CAN_BRIDGE_DEFAULT_BPS) == 0) {
+        BmsReader_Start();
+    } else {
+        TRice("err:CAN: bridge did not start\n");
+    }
+
+    /* The flash trace: a multi-day ring of CAN frames, so a bus can be left
+     * running and read back in pieces days later instead of only while
+     * someone is watching `can trace`.  Needs its nvDb area, which the
+     * relayout above already placed; an unusable area (pre-nvDb board that
+     * has not yet relaid out) leaves this in canLogState_idle and every
+     * other CAN feature keeps working. */
+    if (CanLog_Init() != 0) {
+        TRice("err:CanLog: no usable flash area (state=idle)\n");
+    } else {
+        TRice("CanLog: opening its first unit (mode=changes)\n");
+    }
+
     /* Hand the Ethernet netif back to the ETH DMA's checksum offload.
      *
      * lwipopts.h now compiles software checksum generation IN, because the
@@ -335,6 +373,12 @@ void App_DefaultTaskEntry(void)
          * one the IWDG and TIM14 already cover. */
         SysMon_TaskCheckin(monId);
         SysMon_Poll();
+
+        /* CAN flash trace: pop staged records into flash, opening the next
+         * unit when the current one fills.  Bounded to a handful of
+         * bit-clearing 16-byte page programs per call (see App/Can/can_log.c)
+         * -- safe to run on the same task that kicks the IWDG. */
+        CanLog_Service();
 
         /* ---- LED1 status indication ---- */
         if (ledFastCtr > 0U) {

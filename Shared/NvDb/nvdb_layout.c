@@ -98,6 +98,13 @@ static const uint32_t s_targetSizes[nvdbUser_last] = {
     [nvdbUser_triceUdpCfg]      = 0x1000u,
     [nvdbUser_packCfg]          = 0x1000u,   /*  4 KB, rarely written */
     [nvdbUser_packState]        = 0x4000u,   /* 16 KB, reserved       */
+
+    /* 4 MB: at the "changed payloads + 60 s heartbeat" default policy this
+     * holds roughly 65-70 hours of a bridged Pylontech set on two buses —
+     * "watch it for a couple of days" (docs/design_can_bridge.md §12).  Free
+     * space above wgCfg is ~7.3 MB, so this uses a bit over half of it and
+     * leaves headroom for everything else this board still grows. */
+    [nvdbUser_canLog]           = 0x400000u,
 };
 
 /* The assumed-current layout (§4.4.1): the board's existing hand-assigned map

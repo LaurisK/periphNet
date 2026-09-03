@@ -481,6 +481,31 @@ foreach(_f ${_pack_consumers})
     endif()
 endforeach()
 
+# --- CAN module boundary (docs/design_can_bridge.md §5) -----------------------
+# ONE FILE OWNS THE bxCAN CELLS.  The class of bug this prevents has already
+# happened once: App/Can/bms_reader.c re-initialised CAN2 and defined the only
+# weak HAL_CAN_RxFifo0MsgPendingCallback, which is a link-level monopoly — it
+# blocked pack_pylontech outright (docs/design_battery_pack.md §16 item 5) and
+# would have blocked the bridge too.  A second definition of that callback is
+# not a merge conflict, it is a silent choice made by link order.
+#
+# So: nothing in App/ may name a CAN HAL function or a CAN handle except
+# App/Can/can_bus.c.  Consumers subscribe, send and read counters through
+# can_bus.h.  Core/ is exempt — CubeMX owns can.c and the IRQ handlers.
+
+file(GLOB_RECURSE _can_srcs CONFIGURE_DEPENDS "App/*.c" "App/*.h")
+foreach(_f ${_can_srcs})
+    if(_f MATCHES "App/Can/can_bus\\.c")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hits REGEX "HAL_CAN_[A-Za-z]|hcan1|hcan2")
+    if(_hits)
+        message(FATAL_ERROR
+                "CAN module boundary: only App/Can/can_bus.c may own the bxCAN "
+                "cells: ${_f}: ${_hits}")
+    endif()
+endforeach()
+
 # --- Backtrace library ---
 
 set(BACKTRACE_SOURCES

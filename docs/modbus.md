@@ -1342,16 +1342,56 @@ There is **no polling loop**. Scheduling is an independent, event-driven instanc
 that emits events at the periods the config asks for; the engine services them.
 Nothing walks the config looking for work.
 
-**One timer per device per time table of every live plan covering it, and only
-while something is subscribed.** A device gets one timer per (plan, time table)
-that reaches it, not one per derived read block. Creating and destroying them is
-what subscribing and unsubscribing does. A timer is named
-`{deviceId, planId, timeTableId}` — the plan is part of the identity because two
-plans may cover one device, and their time tables are numbered independently —
-rather than by a period value recovered by scanning. FreeRTOS software timers are
-cheap enough that there is no reason to build something else; the discipline is
-that the timer callback runs in the timer service task, so like the ISR case it
-**only posts an event**.
+**The clock is not the identity.** A **sequence** is named
+`{deviceId, planId, timeTableId}` — the plan is part of it because two plans may
+cover one device and number their time tables independently — and that is what
+`missed` counts, what a plan edit tears down, and what one run of the wire
+covers. It is not one per derived read block. But a sequence does not need a
+clock of its own: what needs a clock is a **period**, and periods repeat. A
+**tick** is one FreeRTOS software timer per *distinct* period, reference-counted
+and shared by every sequence at that period; a sequence records which tick owns
+it. The tick callback runs in the timer service task, so like the ISR case it
+**only posts** — it marks every sequence riding it due and posts a single wake
+for the lot.
+
+The JK configuration that first ran this had 28 sequences at four distinct
+periods, so the shape is not a marginal saving: it is 4 timers instead of 28,
+and one poke per coincidence instead of 28 into a 16-deep queue.
+
+**Rebuilding is a diff, and that is a correctness property, not an
+optimisation.** A subscription arriving or a config going live re-walks the
+config and *marks* the sequences it wants; a sequence whose identity and period
+are unchanged keeps its slot, its tick, its pending `due` and its `missed`, and
+issues no timer command at all. Only sequences nobody asked for are swept, and
+a tick is stopped only when its last user goes.
+
+This is load-bearing. The original shape armed one timer per sequence and
+destroyed the whole set on every rebuild, which flooded the 10-deep FreeRTOS
+timer command queue from a task the timer service cannot preempt: the deletes
+consumed the queue, every subsequent `osTimerStart` failed *unchecked*, and the
+engine was left holding slots that reported themselves scheduled with nothing
+armed behind them. The board then sat silent and permanently unscheduled while
+every health indicator — task alive, checking in, `polled: true`, `port_up:
+true` — kept reading fine, and only a reboot recovered it
+(`docs/issue_modbus_engine_stall.md`). Two rules keep it out:
+
+- **No FreeRTOS object is created or destroyed on a repeating path.** A tick
+  slot mints its timer once and reuses it across acquire/release cycles. The
+  common reconfigurations — a subscriber coming or going, a config apply that
+  does not change any period — issue *zero* timer commands.
+- **Every timer command is checked and may block.** They go to FreeRTOS
+  directly rather than through CMSIS-RTOS2, whose `osTimerStart` is
+  `xTimerChangePeriod(..., 0)` and cannot express a wait. A bounded wait is
+  legal here: this is the modbus task, off the wire path.
+
+**The armed set is verified, not assumed.** After a rebuild settles, every tick
+with users must satisfy `xTimerIsTimerActive()`. A tick that does not is
+counted, logged and re-armed. The check is deferred by ~50 ms because a queued
+command is not yet an armed timer and this task outranks the one that arms it.
+`ticksArmed` vs `ticksLive` and `armFailures` are reported by `modbus status`
+and in `/api/modbus/config/status` under `scheduler`, because they are the only
+readings that tell "idle because nothing is subscribed" from "idle because the
+clocks stopped".
 
 **A sequence is what one timer fires:** the derived read blocks of one device for
 one time table of one plan, run back to back on that device's port. Two things
@@ -1409,16 +1449,19 @@ from the plan's device set with `Modbus_PlanModify` and its timers go with it �
 hot, persistent, and not an upload (§3.5). That is the case the device set was
 worth having for.
 
-**Plan lifecycle drives timers directly.** A plan going live creates one timer per
-(device, time table) it covers; a plan losing its last subscriber, being edited, or
-a config swap destroys them. Stop the timers, let anything in flight land, rebuild.
+**Plan lifecycle drives sequences directly.** A plan going live creates one
+sequence per (device, time table) it covers; a plan losing its last subscriber,
+being edited, or a config swap retires them. Ticks follow only through their
+reference counts, so a plan edit that does not change the set of distinct
+periods touches no timer.
 A completion arriving for a device being torn down is discarded on a per-device
 generation counter — no waiting, no locks. Editing a plan therefore rebuilds only
 the timers of the devices *that plan* covers; a second plan over the same device is
 untouched, because its timers are a different identity.
 
-**Not staggered, and first-come-first-served.** A plan's timers all start when it
-goes live, so everything it covers is due at once and stays phase-locked;
+**Not staggered, and first-come-first-served.** Everything at one period shares
+one clock, so it is due at once and stays phase-locked by construction rather
+than by luck;
 sequences due together are serviced in arrival order. Both are accepted: they are
 latency effects on a line that serialises anyway, and they are visible through the
 missed counter if they ever stop being acceptable.

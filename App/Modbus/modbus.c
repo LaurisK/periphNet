@@ -1363,6 +1363,15 @@ int Modbus_Stats(sModbusStats *out)
     return 0;
 }
 
+int Modbus_ScheduleStats(sModbusScheduleStats *out)
+{
+    if (out == NULL) {
+        return mbErr_badArg;
+    }
+    ModbusEngine_ScheduleStats(out);
+    return 0;
+}
+
 void Modbus_LogStatus(void)
 {
     ModbusEngine_LogStatus();

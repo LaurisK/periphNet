@@ -1570,12 +1570,14 @@ in sysmon. **Worst-case interrupt-off time introduced: ~1 µs.**
    wrong.
 4. **Anything named cluster, membership, aggregate or "the battery" in
    `pack.h`.**
-5. **A second `HAL_CAN_RxFifo0MsgPendingCallback`.** `bms_reader.c:158` already
-   defines the single weak symbol; a second definition is a link error and
-   "whoever wins" is not a design. **`pack_pylontech` is blocked until `App/Can`
-   grows one RX dispatcher** (`Can_RxSubscribe(id, mask, cb, ctx)`) that owns the
-   callback and fans out to `bms_reader` and the pack type. A prerequisite, not
-   a detail.
+5. ~~**A second `HAL_CAN_RxFifo0MsgPendingCallback`.**~~ **Done 2026-09-03** —
+   `App/Can/can_bus.c` owns the single weak symbol and fans frames out by
+   `(bus, id, mask)` through `CanBus_Subscribe`; `bms_reader` is now an
+   ordinary subscriber alongside it
+   ([design_can_bridge.md](design_can_bridge.md) §4). **`pack_pylontech` still
+   does not bind**, but the reason has changed and its source says so: what is
+   missing is now that type's own half — parsing the packed frames, per-instance
+   `rxMask`, publishing from ISR context, closing a partial set in `tick`.
 6. **Consuming `sPylonBatteryData`.** Its fields are floats and it is a display
    struct. The type parses the packed frame structs into integers directly.
 7. **A `Pack_Start` / `Pack_Stop` / a per-pack task / a `Pack_GetStatePtr`.**
@@ -1635,7 +1637,12 @@ placeholder.
    contract. **Deferred by decision — a question for when the hardware
    arrives.**
 
-**Prerequisite, tracked separately:** the `App/Can` RX dispatcher (§16 item 5).
+~~**Prerequisite, tracked separately:** the `App/Can` RX dispatcher (§16 item
+5).~~ **Landed 2026-09-03** with the CAN1/CAN2 bridge —
+[design_can_bridge.md](design_can_bridge.md). It also supplies the other two
+things the cluster needs from that side: a way to stop the real pack reaching
+the inverter (`bms` mode) and a slot to answer the inverter from
+(`CanBridge_SetSource`).
 
 **Follow-ups outside this document:**
 

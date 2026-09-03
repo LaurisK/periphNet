@@ -1,6 +1,10 @@
 /**
  * @file    bms_reader.h
- * @brief   Pylontech BMS CAN reader — receives and parses battery frames on CAN2
+ * @brief   Pylontech BMS CAN reader — parses the battery frame set for display
+ *
+ * A subscriber of App/Can/can_bus.c, not a peripheral owner: it asks for
+ * 0x350-0x35F on whichever bus the bridge says the battery is on, so the bus
+ * must already be up.
  */
 
 #ifndef BMS_READER_H_
@@ -8,18 +12,18 @@
 
 #include "App/Can/pylontech.h"
 
-/** Initialise CAN2 for 500 kbps RX with filters for Pylontech IDs. */
+/** Subscribe to 0x350-0x35F on the battery bus.  Needs the bus running. */
 void BmsReader_Start(void);
 
-/** Stop reader and de-init CAN2. */
+/** Drop the subscription.  Leaves the bus alone. */
 void BmsReader_Stop(void);
 
 /** Returns 1 if reader is running. */
 int BmsReader_IsRunning(void);
 
 /**
- * Poll for received CAN frames and parse them.
- * Call periodically (e.g., every 100 ms).
+ * No-op: frames arrive by interrupt through the dispatcher.  Kept so a caller
+ * may still say "refresh" before reading, and cost nothing.
  */
 void BmsReader_Poll(void);
 

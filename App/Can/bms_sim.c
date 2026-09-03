@@ -1,15 +1,30 @@
 /**
  * @file    bms_sim.c
- * @brief   Pylontech BMS simulator — transmits battery CAN frames on CAN1
+ * @brief   Pylontech BMS simulator — the board answering an inverter itself
  *
- * Simulates a 16S 48V LiFePO4 battery pack with Pylontech CAN protocol.
- * CAN1 is re-initialised to 500 kbps on start.
+ * Simulates a 16S 48V LiFePO4 pack in the Pylontech dialect.
+ *
+ * IT IS THE BRIDGE'S FRAME SOURCE, and that is its real job now.  In
+ * canBrMode_bms the bridge stops relaying the battery and calls a registered
+ * source once a second to answer the inverter instead; this file is what
+ * occupies that slot today.  When the battery cluster exists it takes the same
+ * slot with real numbers, and neither the bridge nor the inverter learns
+ * anything new — which is the whole reason the seam is a callback and not a
+ * call into this file.
+ *
+ * It owns NO peripheral: frames go out through App/Can/can_bus.c on whichever
+ * bus the inverter is on.
  */
 
+/* Includes -----------------------------------------------------------------*/
+
 #include "App/Can/bms_sim.h"
+#include "App/Can/can_bridge.h"
+#include "App/Can/can_bus.h"
 #include "App/Can/pylontech.h"
-#include "can.h"
+
 #include "trice.h"
+
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -41,61 +56,29 @@ static struct {
 };
 
 /* --------------------------------------------------------------------------
- * CAN1 reconfiguration to 500 kbps
- *
- * APB1 = 42 MHz.  500k = 42M / (Prescaler * (1 + BS1 + BS2))
- * Prescaler=6, BS1=10TQ, BS2=3TQ → 6 × 14 = 84 → 500 kbps.
- * Sample point = 11/14 = 78.6 %.
+ * Frame transmission — through the shared bus layer, never the HAL
  * -------------------------------------------------------------------------- */
 
-static int can1_init_500k(void)
+static void TxFrame(uint32_t stdId, const void *data, uint8_t dlc)
 {
-    HAL_CAN_DeInit(&hcan1);
+    sCanFrame frame;
 
-    hcan1.Instance                  = CAN1;
-    hcan1.Init.Prescaler            = 6;
-    hcan1.Init.Mode                 = CAN_MODE_NORMAL;
-    hcan1.Init.SyncJumpWidth        = CAN_SJW_1TQ;
-    hcan1.Init.TimeSeg1             = CAN_BS1_10TQ;
-    hcan1.Init.TimeSeg2             = CAN_BS2_3TQ;
-    hcan1.Init.TimeTriggeredMode    = DISABLE;
-    hcan1.Init.AutoBusOff           = ENABLE;
-    hcan1.Init.AutoWakeUp           = DISABLE;
-    hcan1.Init.AutoRetransmission   = ENABLE;
-    hcan1.Init.ReceiveFifoLocked    = DISABLE;
-    hcan1.Init.TransmitFifoPriority = DISABLE;
+    memset(&frame, 0, sizeof(frame));
+    frame.id  = stdId;
+    frame.dlc = dlc;
+    frame.bus = (uint8_t)CanBridge_InverterBus();
+    memcpy(frame.data, data, (dlc > 8u) ? 8u : dlc);
 
-    if (HAL_CAN_Init(&hcan1) != HAL_OK) {
-        return -1;
-    }
-
-    if (HAL_CAN_Start(&hcan1) != HAL_OK) {
-        return -1;
-    }
-
-    return 0;
+    (void)CanBus_Send(&frame);
 }
 
-/* --------------------------------------------------------------------------
- * Frame transmission helpers
- * -------------------------------------------------------------------------- */
-
-static int can1_tx(uint32_t stdId, const void *data, uint8_t dlc)
+/** The bridge's source slot.  RTOS timer context, once per period. */
+static void SourceCb(eCanBus inverterBus, void *ctx)
 {
-    CAN_TxHeaderTypeDef header = {
-        .StdId = stdId,
-        .ExtId = 0,
-        .IDE   = CAN_ID_STD,
-        .RTR   = CAN_RTR_DATA,
-        .DLC   = dlc,
-    };
+    (void)inverterBus;
+    (void)ctx;
 
-    uint32_t mailbox;
-    if (HAL_CAN_AddTxMessage(&hcan1, &header, (uint8_t *)data, &mailbox) != HAL_OK) {
-        return -1;
-    }
-
-    return 0;
+    BmsSim_SendOnce();
 }
 
 /* --------------------------------------------------------------------------
@@ -104,26 +87,34 @@ static int can1_tx(uint32_t stdId, const void *data, uint8_t dlc)
 
 void BmsSim_Start(void)
 {
-    if (s_sim.running) return;
+    eCanBus bus = CanBridge_InverterBus();
 
-    if (can1_init_500k() != 0) {
-        TRice("BmsSim: CAN1 init failed\n");
+    if (s_sim.running) {
+        return;
+    }
+
+    /* Registering the source is enough: the bridge starts and stops the timer
+     * with the mode, so `bms start` in canBrMode_bridge arms nothing and puts
+     * no frame on a bus the real battery is still driving. */
+    if (CanBridge_SetSource(SourceCb, NULL, PYLON_TX_INTERVAL_MS) != 0) {
+        TRice("err:BmsSim: could not take the bridge source slot\n");
         return;
     }
 
     s_sim.running = 1;
-    TRice("BmsSim: started on CAN1 (500 kbps)\n");
+    TRice("BmsSim: source armed for CAN%u (%u ms); emits in bms mode\n",
+          (unsigned)bus + 1u, PYLON_TX_INTERVAL_MS);
 }
 
 void BmsSim_Stop(void)
 {
-    if (!s_sim.running) return;
+    if (!s_sim.running) {
+        return;
+    }
 
-    HAL_CAN_Stop(&hcan1);
-    HAL_CAN_DeInit(&hcan1);
-
+    (void)CanBridge_SetSource(NULL, NULL, 0u);
     s_sim.running = 0;
-    TRice("BmsSim: stopped\n");
+    TRice("BmsSim: source released\n");
 }
 
 int BmsSim_IsRunning(void)
@@ -142,7 +133,7 @@ void BmsSim_SendOnce(void)
         f.maxChargeCurrent_dA      = (int16_t)(s_sim.maxChargeCurrent * 10.0f);
         f.maxDischargeCurrent_dA   = (int16_t)(s_sim.maxDischargeCurrent * 10.0f);
         f.dischargeVoltageLimit_dV = (uint16_t)(s_sim.dischargeVoltageLimit * 10.0f);
-        can1_tx(PYLON_CAN_ID_LIMITS, &f, 8);
+        TxFrame(PYLON_CAN_ID_LIMITS, &f, 8);
     }
 
     /* 0x355 — SOC/SOH */
@@ -150,7 +141,7 @@ void BmsSim_SendOnce(void)
         sPylonSoc f;
         f.soc_pct = s_sim.soc;
         f.soh_pct = s_sim.soh;
-        can1_tx(PYLON_CAN_ID_SOC, &f, 4);
+        TxFrame(PYLON_CAN_ID_SOC, &f, 4);
     }
 
     /* 0x356 — Measurements */
@@ -159,7 +150,7 @@ void BmsSim_SendOnce(void)
         f.voltage_cV     = (int16_t)(s_sim.voltage * 100.0f);
         f.current_dA     = (int16_t)(s_sim.current * 10.0f);
         f.temperature_dC = (int16_t)(s_sim.temperature * 10.0f);
-        can1_tx(PYLON_CAN_ID_MEASURE, &f, 6);
+        TxFrame(PYLON_CAN_ID_MEASURE, &f, 6);
     }
 
     /* 0x359 — Alarms (all clear) */
@@ -169,7 +160,7 @@ void BmsSim_SendOnce(void)
         f.moduleNum = 0x01;
         f.ascii_P   = 'P';
         f.ascii_N   = 'N';
-        can1_tx(PYLON_CAN_ID_ALARM, &f, 7);
+        TxFrame(PYLON_CAN_ID_ALARM, &f, 7);
     }
 
     /* 0x35C — Charge/discharge enable */
@@ -177,14 +168,14 @@ void BmsSim_SendOnce(void)
         sPylonChgCtrl f;
         f.flags    = PYLON_FLAG_CHARGE_EN | PYLON_FLAG_DISCHARGE_EN;
         f.reserved = 0;
-        can1_tx(PYLON_CAN_ID_CHGCTRL, &f, 2);
+        TxFrame(PYLON_CAN_ID_CHGCTRL, &f, 2);
     }
 
     /* 0x35E — Manufacturer name */
     {
         uint8_t name[8];
         memcpy(name, PYLON_MFG_NAME, 8);
-        can1_tx(PYLON_CAN_ID_MFGNAME, name, 8);
+        TxFrame(PYLON_CAN_ID_MFGNAME, name, 8);
     }
 }
 

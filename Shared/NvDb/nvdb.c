@@ -99,6 +99,7 @@ static const char *const s_userNames[nvdbUser_last] = {
     [nvdbUser_triceUdpCfg]      = "triceUdpCfg",
     [nvdbUser_packCfg]          = "packCfg",
     [nvdbUser_packState]        = "packState",
+    [nvdbUser_canLog]           = "canLog",
 };
 
 /* Private function prototypes ----------------------------------------------*/

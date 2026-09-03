@@ -1,6 +1,9 @@
 /**
  * @file    bms_sim.h
- * @brief   Pylontech BMS simulator — transmits battery CAN frames on CAN1
+ * @brief   Pylontech BMS simulator — the board answering an inverter itself
+ *
+ * Occupies the CAN bridge's frame-source slot: it emits only in
+ * canBrMode_bms, on whichever bus the inverter is on, and owns no peripheral.
  */
 
 #ifndef BMS_SIM_H_
@@ -8,18 +11,19 @@
 
 #include <stdint.h>
 
-/** Initialise CAN1 for 500 kbps TX and start periodic BMS frame transmission. */
+/** Take the bridge source slot.  Emission starts when the mode does. */
 void BmsSim_Start(void);
 
-/** Stop BMS simulator and de-init CAN1. */
+/** Release the bridge source slot. */
 void BmsSim_Stop(void);
 
 /** Returns 1 if simulator is running. */
 int BmsSim_IsRunning(void);
 
 /**
- * Transmit one round of all Pylontech frames.
- * Call from a task/timer at ~1 Hz (PYLON_TX_INTERVAL_MS).
+ * Transmit one round of all Pylontech frames on the inverter bus.
+ * The bridge calls this at PYLON_TX_INTERVAL_MS in bms mode; the CLI calls it
+ * directly to put one round on the wire by hand.
  */
 void BmsSim_SendOnce(void);
 

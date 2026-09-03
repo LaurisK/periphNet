@@ -7,15 +7,21 @@
  *
  * THERE IS NO POLLING LOOP (§5.2).  Scheduling is an independent, event-driven
  * instance that emits events at the periods the config asks for, and the
- * engine services them; nothing walks the config looking for work.  One timer
- * per device per time table of every live plan covering it, and only while
- * something is subscribed — creating and destroying them is what subscribing
- * and unsubscribing does.
+ * engine services them; nothing walks the config looking for work.
+ *
+ * A SEQUENCE is named {device, plan, time table} and is what one run of the
+ * wire covers; a CLOCK is named by period and is shared by every sequence at
+ * that period.  Sequences come and go with subscriptions, but the clocks only
+ * change when the set of distinct periods does — so the common case, a
+ * subscriber arriving or a config being applied, issues no timer command at
+ * all.
  *
  * There is no Start/Stop pair either: Modbus_Init is the entire lifecycle.
  */
 #ifndef MODBUS_ENGINE_H_
 #define MODBUS_ENGINE_H_
+
+#include "App/Modbus/modbus.h"
 
 #include <stdint.h>
 
@@ -42,8 +48,9 @@ void ModbusEngine_Poke(void);
  * @brief  The set of live plans changed (a subscription came or went, or a
  *         config went live), so the timers must be rebuilt.
  *
- *         A plan going live creates one timer per (device, time table) it
- *         covers; a plan losing its last subscriber destroys them.
+ *         Handled as a DIFF: a sequence whose {device, plan, time table} and
+ *         period are unchanged keeps its slot, its clock, its pending `due`
+ *         and its `missed` count, and costs nothing.
  */
 void ModbusEngine_Resched(void);
 
@@ -52,6 +59,19 @@ uint32_t ModbusEngine_ResponseTimeoutMs(void);
 
 void ModbusEngine_Counters(uint32_t *polls, uint32_t *errors,
                            uint32_t *missed);
+
+/**
+ * @brief  The scheduler's own state: how many sequences are live, how many
+ *         clocks carry them, and how many of those clocks are ACTUALLY
+ *         RUNNING.
+ *
+ *         `ticksArmed != ticksLive`, or a non-zero `armFailures`, means
+ *         sequences are riding a clock that is not ticking — the engine would
+ *         then sit silent with every other status field reading healthy, which
+ *         is the failure this reporting exists to make visible
+ *         (docs/issue_modbus_engine_stall.md).
+ */
+void ModbusEngine_ScheduleStats(sModbusScheduleStats *out);
 
 void ModbusEngine_LogStatus(void);
 

@@ -22,6 +22,10 @@
 #include "App/Log/crash.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_consumer.h"
+#include "App/Can/can_bridge.h"
+#include "App/Can/can_log.h"
+#include "App/Can/can_bus.h"
+#include "App/Can/can_monitor.h"
 #include "App/Mon/sysmon.h"
 #include "usart.h"
 #include "usbd_cdc_if.h"
@@ -114,6 +118,25 @@ static const char index_html[] =
     "<div id=pkcells></div>"
     "<div id=pkstats class=info></div>"
     "<button class=btn-dl onclick=balReset()>Reset balance totals</button></div>"
+    "<div class=card><h3>CAN Bridge</h3>"
+    "<div id=canhdr class=info>Loading...</div>"
+    "<div id=canbus class=info></div>"
+    "<div style='margin-top:6px'>"
+    "<button class=btn-up onclick=canMode('bridge')>Bridge</button>"
+    "<button class=btn-dl onclick=canMode('monitor')>Monitor</button>"
+    "<button class=btn-inst onclick=canMode('bms')>Be the BMS</button>"
+    "<button class=btn-del onclick=canMode('off')>Off</button>"
+    "<button class=btn-dl onclick=canReset()>Reset counters</button>"
+    "</div>"
+    "<div id=cantraffic></div>"
+    "<h3 style='margin-top:14px'>Flash Trace</h3>"
+    "<div id=canloghdr class=info>Loading...</div>"
+    "<div style='margin-top:6px'>"
+    "<button class=btn-up onclick=canLogMode('changes')>Changes</button>"
+    "<button class=btn-dl onclick=canLogMode('all')>All frames</button>"
+    "<button class=btn-del onclick=canLogMode('off')>Off</button>"
+    "<button class=btn-del onclick=canLogWipe()>Wipe</button>"
+    "</div></div>"
     "<div class=card><h3>Last Crash</h3>"
     "<div id=crash>Loading...</div></div>"
     "<script>"
@@ -230,7 +253,51 @@ static const char index_html[] =
     "function balReset(){if(!confirm('Reset accumulated balance totals?'))return;"
     "fetch(B+'/api/pack/balance/reset?idx=0',{method:'POST'}).then(()=>pollCells())}"
 
-    "function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats()}"
+    "function canRows(b,j){var h='<tr><td colspan=6><b>CAN'+b+'</b></td></tr>';"
+    "if(!j.ids.length){h+='<tr><td colspan=6 class=dim>no traffic</td></tr>';"
+    "return h}"
+    "j.ids.forEach(function(r){h+='<tr><td>'+r.id+'</td><td>rx '+r.rx"
+    "+'</td><td>tx '+r.tx+'</td><td>'+r.data+'</td><td>'+r.age_ms"
+    "+' ms</td><td>'+(r.max_gap_ms?r.min_gap_ms+'-'+r.max_gap_ms+' ms':'-')"
+    "+'</td></tr>'});return h}"
+    "function pollCan(){fetch(B+'/api/can/status').then(r=>r.json()).then(j=>{"
+    "var t='Mode: <b>'+j.mode+'</b> | battery CAN'+j.battery_bus"
+    "+' &rarr; inverter CAN'+j.inverter_bus+' | '+j.bitrate_bps+' bps';"
+    "if(j.mode=='bms')t+=' | source '+(j.source.bound?'bound':"
+    "'<span class=warn>MISSING</span>')+', '+j.source.emits+' emits';"
+    "document.getElementById('canhdr').innerHTML=t;"
+    "var f=j.forward,m=j.monitor;"
+    "var b='bat&rarr;inv fwd '+f.to_inverter.forwarded+' / supp '"
+    "+f.to_inverter.suppressed+' / drop '+f.to_inverter.dropped"
+    "+'<br>inv&rarr;bat fwd '+f.to_battery.forwarded+' / supp '"
+    "+f.to_battery.suppressed+' / drop '+f.to_battery.dropped+'<br>';"
+    "j.buses.forEach(function(u){b+='CAN'+u.bus+' '+(u.running?'up':'down')"
+    "+' rx '+u.rx+' tx '+u.tx_done+'/'+u.tx_accepted+' drop '+u.tx_dropped"
+    "+' err '+u.errors+' busoff '+u.bus_off_count"
+    "+' rec/tec '+u.rec+'/'+u.tec+'<br>'});"
+    "b+='recorded '+m.recorded+', id overflow '+m.id_overflow;"
+    "document.getElementById('canbus').innerHTML=b}).catch(()=>{});"
+    "Promise.all([fetch(B+'/api/can/traffic?bus=1').then(r=>r.json()),"
+    "fetch(B+'/api/can/traffic?bus=2').then(r=>r.json())]).then(function(a){"
+    "document.getElementById('cantraffic').innerHTML="
+    "'<table class=cells>'+canRows(1,a[0])+canRows(2,a[1])+'</table>'"
+    "}).catch(()=>{})}"
+    "function canMode(m){fetch(B+'/api/can/mode?mode='+m,{method:'POST'})"
+    ".then(()=>pollCan()).catch(()=>{})}"
+    "function canReset(){fetch(B+'/api/can/reset',{method:'POST'})"
+    ".then(()=>pollCan()).catch(()=>{})}"
+    "function pollCanLog(){fetch(B+'/api/can/log/status').then(r=>r.json()).then(j=>{"
+    "var t='Mode: <b>'+j.mode+'</b> ('+j.state+') | held '+j.held_recs+' / '"
+    "+j.capacity_recs+' recs | gap&gt;='+j.min_gap_ms+'ms hb&lt;='"
+    "+j.heartbeat_ms+'ms<br>staged '+j.staged+'/'+j.stage_depth"
+    "+' | dropped '+j.dropped+' stalled '+j.stalled+' writeErr '"
+    "+j.write_errors+' | area '+(j.area_size_bytes/1048576).toFixed(1)+' MB';"
+    "document.getElementById('canloghdr').innerHTML=t}).catch(()=>{})}"
+    "function canLogMode(m){fetch(B+'/api/can/log/mode?mode='+m,{method:'POST'})"
+    ".then(()=>pollCanLog()).catch(()=>{})}"
+    "function canLogWipe(){if(!confirm('Erase the whole flash trace?'))return;"
+    "fetch(B+'/api/can/log/wipe',{method:'POST'}).then(()=>pollCanLog()).catch(()=>{})}"
+    "function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats();pollCan();pollCanLog()}"
     "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
     ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
     ".catch(e=>show('fmsg',e,0))}"
@@ -963,6 +1030,40 @@ static bool query_has(const char *key)
     return (hit != NULL) && (eol == NULL || hit < eol);
 }
 
+/** `?key=<token>` from the request line, copied out NUL-terminated.
+ *  Bounded to the request line for the same reason query_int is: a header
+ *  must not be able to supply a parameter.
+ *  @retval the token length, or negative when the key is absent. */
+static int query_token(const char *key, char *out, size_t len)
+{
+    const char *eol = strpbrk(req_buf, "\r\n");
+    const char *q   = strchr(req_buf, '?');
+    const char *hit;
+    size_t      n = 0u;
+
+    if ((out == NULL) || (len == 0u) || (q == NULL) ||
+        ((eol != NULL) && (q > eol))) {
+        return -1;
+    }
+    hit = strstr(q, key);
+    if ((hit == NULL) || ((eol != NULL) && (hit >= eol))) {
+        return -1;
+    }
+    hit += strlen(key);
+    if (*hit != '=') {
+        return -1;
+    }
+    hit++;
+    while ((*hit != '\0') && (*hit != '&') && (*hit != ' ') &&
+           (*hit != '\r') && (*hit != '\n') && (n < (len - 1u))) {
+        out[n] = *hit;
+        n++;
+        hit++;
+    }
+    out[n] = '\0';
+    return (int)n;
+}
+
 static void handle_nvdb_usage(struct netconn *conn)
 {
     bool  scan = query_has("scan=1");
@@ -1690,6 +1791,28 @@ static void handle_modbus_cfg_status(struct netconn *conn)
         counts.capabilities, counts.devices, counts.plans, counts.points,
         st.stagedValid ? "true" : "false",
         st.swapPending ? "true" : "false");
+
+    /* Scheduler health.  `ticks_armed` short of `ticks_live`, or a non-zero
+     * `arm_failures`, is the ONE reading that distinguishes "the engine is
+     * idle because nothing is subscribed" from "the engine is idle because its
+     * clocks stopped" — every other field on this page looks identical in both
+     * (docs/issue_modbus_engine_stall.md §1). */
+    {
+        sModbusScheduleStats sc;
+
+        if (Modbus_ScheduleStats(&sc) == 0 && n > 0 &&
+            n < (int)sizeof(resp_buf)) {
+            n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+                ",\"scheduler\":{\"sequences\":%u,\"ticks_live\":%u,"
+                "\"ticks_armed\":%u,\"arm_failures\":%lu,"
+                "\"dropped_pokes\":%lu,\"healthy\":%s}",
+                sc.sequences, sc.ticksLive, sc.ticksArmed,
+                (unsigned long)sc.armFailures,
+                (unsigned long)sc.droppedPokes,
+                (sc.ticksArmed == sc.ticksLive && sc.armFailures == 0u)
+                    ? "true" : "false");
+        }
+    }
 
     /* Per device: its port, whether that port has a driver, which plans cover
      * it and whether anything is actually polling it — "why is this device not
@@ -2492,6 +2615,465 @@ static void handle_pack_cfg_delete(struct netconn *conn)
               "{\"ok\":true,\"provisioned\":false}");
 }
 
+/* --------------------------------------------------------------------------
+ * CAN bridge
+ *
+ * The CLI reaches this module over USB CDC / UART1 only, i.e. with physical
+ * access — which on a tunnel-only board is a site visit.  So everything the
+ * bridge can be told to do has to be reachable here as well, including the
+ * mode change that turns the board into the inverter's BMS.
+ * -------------------------------------------------------------------------- */
+
+#define CAN_JSON_CAP        3072u
+#define CAN_TRACE_DEFAULT   32
+
+/** 8 payload bytes as hex, always DLC-long. */
+static void can_hex(char *out, const uint8_t *data, uint8_t dlc)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint8_t n = (dlc > 8u) ? 8u : dlc;
+
+    for (uint8_t i = 0u; i < n; i++) {
+        out[i * 2u]      = digits[(data[i] >> 4) & 0x0Fu];
+        out[i * 2u + 1u] = digits[data[i] & 0x0Fu];
+    }
+    out[n * 2u] = '\0';
+}
+
+static size_t can_bus_json(char *buf, size_t cap, size_t off, eCanBus bus)
+{
+    sCanBusStats st;
+    int          w;
+
+    if (CanBus_GetStats(bus, &st) != 0) {
+        return off;
+    }
+    w = snprintf(buf + off, cap - off,
+        "{\"bus\":%u,\"running\":%s,\"bitrate_bps\":%lu,"
+        "\"rx\":%lu,\"tx_done\":%lu,\"tx_accepted\":%lu,\"tx_dropped\":%lu,"
+        "\"rx_overrun\":%lu,\"errors\":%lu,\"last_error\":\"0x%08lX\","
+        "\"bus_off_count\":%lu,\"bus_off\":%s,\"rec\":%u,\"tec\":%u,"
+        "\"tx_queue\":%u,\"tx_queue_peak\":%u}",
+        (unsigned)bus + 1u, st.running ? "true" : "false",
+        (unsigned long)st.bitrate_bps,
+        (unsigned long)st.rxCnt, (unsigned long)st.txDoneCnt,
+        (unsigned long)st.txAcceptedCnt, (unsigned long)st.txDroppedCnt,
+        (unsigned long)st.rxOverrunCnt, (unsigned long)st.errorCnt,
+        (unsigned long)st.lastError, (unsigned long)st.busOffCnt,
+        st.busOff ? "true" : "false", st.rxErrorCnt, st.txErrorCnt,
+        st.txQueueDepth, st.txQueuePeak);
+    if ((w < 0) || ((size_t)w >= (cap - off))) {
+        return cap - 1u;
+    }
+    return off + (size_t)w;
+}
+
+/* GET /api/can/status — mode, roles, forwarding counters and both cells. */
+static void handle_can_status(struct netconn *conn)
+{
+    sCanBridgeStatus br;
+    sCanMonStats     mon;
+    char            *buf;
+    size_t           off;
+
+    if (CanBridge_GetStatus(&br) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"bridge state unavailable\"}");
+        return;
+    }
+    CanMon_GetStats(&mon);
+
+    buf = (char *)pvPortMalloc(CAN_JSON_CAP);
+    if (buf == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+
+    off = (size_t)snprintf(buf, CAN_JSON_CAP,
+        "{\"mode\":\"%s\",\"battery_bus\":%u,\"inverter_bus\":%u,"
+        "\"bitrate_bps\":%lu,"
+        "\"source\":{\"bound\":%s,\"emits\":%lu,\"period_ms\":%lu},"
+        "\"override\":{\"all\":%s,\"count\":%u,\"ids\":[",
+        CanBridge_ModeName((eCanBrMode)br.mode),
+        (unsigned)br.batteryBus + 1u, (unsigned)br.inverterBus + 1u,
+        (unsigned long)br.bitrate_bps,
+        br.sourceBound ? "true" : "false",
+        (unsigned long)br.sourceEmitCnt, (unsigned long)br.sourcePeriod_ms,
+        br.overrideAll ? "true" : "false", br.overrideCnt);
+    if (off >= CAN_JSON_CAP) {
+        off = CAN_JSON_CAP - 1u;
+    }
+
+    for (uint8_t i = 0u; i < br.overrideCnt; i++) {
+        int w = snprintf(buf + off, CAN_JSON_CAP - off, "%s\"0x%03lX\"",
+                         (i == 0u) ? "" : ",",
+                         (unsigned long)br.overrideId[i]);
+        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off))) {
+            break;
+        }
+        off += (size_t)w;
+    }
+
+    off += (size_t)snprintf(buf + off, CAN_JSON_CAP - off,
+        "]},\"forward\":{"
+        "\"to_inverter\":{\"forwarded\":%lu,\"suppressed\":%lu,\"dropped\":%lu},"
+        "\"to_battery\":{\"forwarded\":%lu,\"suppressed\":%lu,\"dropped\":%lu}},"
+        "\"monitor\":{\"recorded\":%lu,\"id_overflow\":%lu,\"tracing\":%s,"
+        "\"trace_dropped\":%lu},\"buses\":[",
+        (unsigned long)br.toInverter.forwardedCnt,
+        (unsigned long)br.toInverter.suppressedCnt,
+        (unsigned long)br.toInverter.droppedCnt,
+        (unsigned long)br.toBattery.forwardedCnt,
+        (unsigned long)br.toBattery.suppressedCnt,
+        (unsigned long)br.toBattery.droppedCnt,
+        (unsigned long)mon.recordedCnt, (unsigned long)mon.idOverflowCnt,
+        mon.tracing ? "true" : "false",
+        (unsigned long)mon.traceDroppedCnt);
+    if (off >= CAN_JSON_CAP) {
+        off = CAN_JSON_CAP - 1u;
+    }
+
+    off = can_bus_json(buf, CAN_JSON_CAP, off, canBus_1);
+    if ((off + 2u) < CAN_JSON_CAP) {
+        buf[off] = ',';
+        off++;
+    }
+    off = can_bus_json(buf, CAN_JSON_CAP, off, canBus_2);
+    snprintf(buf + off, CAN_JSON_CAP - off, "]}");
+
+    send_json(conn, "200 OK", buf);
+    vPortFree(buf);
+}
+
+/* GET /api/can/traffic?bus=N — the identifier register of one bus. */
+static void handle_can_traffic(struct netconn *conn, eCanBus bus)
+{
+    uint32_t now_ms = HAL_GetTick();
+    uint8_t  count  = CanMon_IdCount(bus);
+    char    *buf;
+    size_t   off;
+    uint8_t  written = 0u;
+    bool     truncated = false;
+
+    buf = (char *)pvPortMalloc(CAN_JSON_CAP);
+    if (buf == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    off = (size_t)snprintf(buf, CAN_JSON_CAP,
+                           "{\"bus\":%u,\"count\":%u,\"ids\":[",
+                           (unsigned)bus + 1u, count);
+
+    for (uint8_t i = 0u; i < count; i++) {
+        sCanMonId r;
+        char      hex[17];
+        int       w;
+
+        if (CanMon_GetIdAt(bus, i, &r) != 0) {
+            break;
+        }
+        can_hex(hex, r.data, r.dlc);
+        w = snprintf(buf + off, CAN_JSON_CAP - off,
+            "%s{\"id\":\"0x%03lX\",\"ext\":%s,\"rtr\":%s,\"dlc\":%u,"
+            "\"rx\":%lu,\"tx\":%lu,\"changes\":%lu,\"age_ms\":%lu,"
+            "\"min_gap_ms\":%lu,\"max_gap_ms\":%lu,\"data\":\"%s\"}",
+            (written == 0u) ? "" : ",", (unsigned long)r.id,
+            r.ext ? "true" : "false", r.rtr ? "true" : "false", r.dlc,
+            (unsigned long)r.rxCnt, (unsigned long)r.txCnt,
+            (unsigned long)r.changeCnt,
+            (unsigned long)(now_ms - r.lastStamp_ms),
+            (unsigned long)r.minGap_ms, (unsigned long)r.maxGap_ms, hex);
+        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off - 32u))) {
+            truncated = true;
+            break;
+        }
+        off += (size_t)w;
+        written++;
+    }
+
+    snprintf(buf + off, CAN_JSON_CAP - off, "],\"returned\":%u,"
+             "\"truncated\":%s}", written, truncated ? "true" : "false");
+    send_json(conn, "200 OK", buf);
+    vPortFree(buf);
+}
+
+/* GET /api/can/trace?n=N — the newest N frames of the ring, oldest first. */
+static void handle_can_trace(struct netconn *conn)
+{
+    sCanMonStats mon;
+    uint16_t     total = CanMon_TraceCount();
+    int          want  = query_int("n", CAN_TRACE_DEFAULT);
+    uint16_t     first = 0u;
+    uint16_t     written = 0u;
+    char        *buf;
+    size_t       off;
+
+    CanMon_GetStats(&mon);
+    if ((want > 0) && (total > (uint16_t)want)) {
+        first = (uint16_t)(total - (uint16_t)want);
+    }
+
+    buf = (char *)pvPortMalloc(CAN_JSON_CAP);
+    if (buf == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    off = (size_t)snprintf(buf, CAN_JSON_CAP,
+        "{\"tracing\":%s,\"held\":%u,\"dropped\":%lu,\"frames\":[",
+        mon.tracing ? "true" : "false", total,
+        (unsigned long)mon.traceDroppedCnt);
+
+    for (uint16_t i = first; i < total; i++) {
+        sCanMonTrace t;
+        char         hex[17];
+        int          w;
+
+        if (CanMon_GetTraceAt(i, &t) != 0) {
+            break;
+        }
+        can_hex(hex, t.data, t.dlc);
+        w = snprintf(buf + off, CAN_JSON_CAP - off,
+            "%s{\"t_ms\":%lu,\"bus\":%u,\"dir\":\"%s\",\"id\":\"0x%03lX\","
+            "\"dlc\":%u,\"data\":\"%s\"}",
+            (written == 0u) ? "" : ",", (unsigned long)t.stamp_ms,
+            (unsigned)t.bus + 1u,
+            (t.dir == (uint8_t)canDir_rx) ? "rx" : "tx",
+            (unsigned long)t.id, t.dlc, hex);
+        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off - 32u))) {
+            break;
+        }
+        off += (size_t)w;
+        written++;
+    }
+
+    snprintf(buf + off, CAN_JSON_CAP - off, "],\"returned\":%u}", written);
+    send_json(conn, "200 OK", buf);
+    vPortFree(buf);
+}
+
+/* POST /api/can/mode?mode=<off|monitor|bridge|bms>[&bitrate=N]
+ *
+ * One route for start, stop and the live break, because they are one decision:
+ * `off` stops the buses, anything else starts them if they are down and
+ * changes policy in place if they are up. */
+/* GET /api/can/log/status */
+static void handle_can_log_status(struct netconn *conn)
+{
+    sCanLogStatus st;
+    char          buf[512];
+
+    if (CanLog_GetStatus(&st) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"log state unavailable\"}");
+        return;
+    }
+    snprintf(buf, sizeof(buf),
+        "{\"mode\":\"%s\",\"state\":\"%s\",\"min_gap_ms\":%lu,"
+        "\"heartbeat_ms\":%lu,\"capacity_recs\":%lu,\"held_recs\":%lu,"
+        "\"oldest_rec\":%lu,\"next_rec\":%lu,\"staged\":%u,"
+        "\"stage_depth\":%u,\"area_size_bytes\":%lu,\"boot_id\":%lu,"
+        "\"dropped\":%lu,\"stalled\":%lu,\"write_errors\":%lu}",
+        CanLog_ModeName((eCanLogMode)st.mode),
+        CanLog_StateName((eCanLogState)st.state),
+        (unsigned long)st.minGap_ms, (unsigned long)st.heartbeat_ms,
+        (unsigned long)st.capacityRecs, (unsigned long)st.heldRecs,
+        (unsigned long)st.oldestRec, (unsigned long)st.nextRec,
+        st.staged, (unsigned)CANLOG_STAGE_DEPTH,
+        (unsigned long)st.areaSize_bytes, (unsigned long)st.bootId,
+        (unsigned long)st.droppedCnt, (unsigned long)st.stalledCnt,
+        (unsigned long)st.writeErrCnt);
+    send_json(conn, "200 OK", buf);
+}
+
+/* POST /api/can/log/mode?mode=<off|changes|all>[&gap_ms=N][&heartbeat_ms=N]
+ *
+ * Runtime policy only -- not persisted, exactly like the bridge's own mode
+ * (docs/design_can_bridge.md §9 item 1).  Omitted gap/heartbeat keep the
+ * module's compiled defaults, not whatever was previously set, so a caller
+ * that only wants to switch mode is not required to also restate them. */
+static void handle_can_log_mode(struct netconn *conn)
+{
+    char        name[16];
+    eCanLogMode mode;
+    uint32_t    minGap_ms    = (uint32_t)query_int("gap_ms", CANLOG_MIN_GAP_MS);
+    uint32_t    heartbeat_ms = (uint32_t)query_int("heartbeat_ms",
+                                                   CANLOG_HEARTBEAT_MS);
+
+    if (query_token("mode", name, sizeof(name)) <= 0) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"mode is required: off|changes|all\"}");
+        return;
+    }
+    if (CanLog_ModeFromName(name, &mode) != 0) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"unknown mode\"}");
+        return;
+    }
+    if (CanLog_SetPolicy(mode, minGap_ms, heartbeat_ms) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"policy change refused\"}");
+        return;
+    }
+    handle_can_log_status(conn);
+}
+
+/* GET /api/can/log/read?rec=N -- one record by its global number. */
+static void handle_can_log_read(struct netconn *conn)
+{
+    uint32_t   recNo = (uint32_t)query_int("rec", 0);
+    sCanLogRec rec;
+    char       hex[17];
+    char       buf[256];
+    int        rc = CanLog_ReadRec(recNo, &rec);
+
+    if (rc != 0) {
+        char err[96];
+
+        snprintf(err, sizeof(err),
+                 "{\"error\":\"record %lu unavailable (%d)\"}",
+                 (unsigned long)recNo, rc);
+        send_json(conn, "404 Not Found", err);
+        return;
+    }
+    can_hex(hex, rec.data, CANLOG_META_DLC(rec.meta));
+    snprintf(buf, sizeof(buf),
+        "{\"rec\":%lu,\"t_ms\":%lu,\"bus\":%u,\"dir\":\"%s\","
+        "\"id\":\"0x%03X\",\"ext\":%s,\"rtr\":%s,\"dlc\":%u,\"data\":\"%s\"}",
+        (unsigned long)recNo, (unsigned long)rec.stamp_ms,
+        (unsigned)CANLOG_META_BUS(rec.meta) + 1u,
+        CANLOG_META_DIR(rec.meta) ? "tx" : "rx", rec.id,
+        CANLOG_META_EXT(rec.meta) ? "true" : "false",
+        CANLOG_META_RTR(rec.meta) ? "true" : "false",
+        CANLOG_META_DLC(rec.meta), hex);
+    send_json(conn, "200 OK", buf);
+}
+
+/* POST /api/can/log/wipe -- discard the flash trace and start at record 0. */
+static void handle_can_log_wipe(struct netconn *conn)
+{
+    if (CanLog_Wipe() != 0) {
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"no usable flash area\"}");
+        return;
+    }
+    send_json(conn, "200 OK", "{\"status\":\"wipe requested\"}");
+}
+
+static void handle_can_mode(struct netconn *conn)
+{
+    char       name[16];
+    eCanBrMode mode;
+    uint32_t   bitrate_bps = (uint32_t)query_int("bitrate", 0);
+
+    if (query_token("mode", name, sizeof(name)) <= 0) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"mode is required: off|monitor|bridge|bms\"}");
+        return;
+    }
+    if (CanBridge_ModeFromName(name, &mode) != 0) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"unknown mode\"}");
+        return;
+    }
+
+    if (mode == canBrMode_off) {
+        (void)CanBridge_Stop();
+    } else if (CanBridge_GetMode() == canBrMode_off) {
+        if (CanBridge_Start(mode, bitrate_bps) != 0) {
+            send_json(conn, "500 Internal Server Error",
+                      "{\"error\":\"could not bring the buses up\"}");
+            return;
+        }
+    } else if (CanBridge_SetMode(mode) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"mode change refused\"}");
+        return;
+    } else {
+        /* changed in place */
+    }
+
+    handle_can_status(conn);
+}
+
+/* POST /api/can/trace/<on|off> */
+static void handle_can_trace_enable(struct netconn *conn, int on)
+{
+    CanMon_TraceEnable(on);
+    send_json(conn, "200 OK", on ? "{\"tracing\":true}" : "{\"tracing\":false}");
+}
+
+/* POST /api/can/reset — zero every counter, keep the wire up. */
+static void handle_can_reset(struct netconn *conn)
+{
+    CanBus_ResetStats();
+    CanBridge_ResetStats();
+    CanMon_Reset();
+    send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
+}
+
+/* POST /api/can/send?bus=N&id=351&data=3002F401F401C001
+ *
+ * `id` and `data` are hex, `data` is 0..8 bytes.  This is a diagnostic: it is
+ * how an inverter's reaction to one frame can be tried from a laptop over the
+ * tunnel, without the board pretending to be a battery first. */
+static void handle_can_send(struct netconn *conn)
+{
+    char      idTok[12];
+    char      dataTok[20];
+    sCanFrame frame;
+    int       bus = query_int("bus", 0);
+    int       len;
+
+    memset(&frame, 0, sizeof(frame));
+
+    if ((bus < 1) || (bus > (int)canBus_last)) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"bus must be 1 or 2\"}");
+        return;
+    }
+    if (query_token("id", idTok, sizeof(idTok)) <= 0) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"id is required (hex)\"}");
+        return;
+    }
+    frame.id = (uint32_t)strtoul(idTok, NULL, 16);
+    if (frame.id > 0x1FFFFFFFu) {
+        send_json(conn, "422 Unprocessable Entity",
+                  "{\"error\":\"id out of range\"}");
+        return;
+    }
+    frame.ext = (frame.id > 0x7FFu) ? 1u : 0u;
+    frame.bus = (uint8_t)(bus - 1);
+
+    len = query_token("data", dataTok, sizeof(dataTok));
+    if (len > 0) {
+        if (((len % 2) != 0) || (len > 16)) {
+            send_json(conn, "422 Unprocessable Entity",
+                      "{\"error\":\"data must be 0..8 hex bytes\"}");
+            return;
+        }
+        for (int i = 0; i < (len / 2); i++) {
+            char byte[3] = { dataTok[i * 2], dataTok[i * 2 + 1], '\0' };
+            char *endp = NULL;
+
+            frame.data[i] = (uint8_t)strtoul(byte, &endp, 16);
+            if ((endp == NULL) || (*endp != '\0')) {
+                send_json(conn, "422 Unprocessable Entity",
+                          "{\"error\":\"data is not hex\"}");
+                return;
+            }
+        }
+        frame.dlc = (uint8_t)(len / 2);
+    }
+
+    if (CanBus_Send(&frame) != 0) {
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"bus is down or its queue is full\"}");
+        return;
+    }
+    send_json(conn, "200 OK", "{\"sent\":true}");
+}
+
 static void handle_wg_status(struct netconn *conn)
 {
     wg_status_json(resp_buf, sizeof(resp_buf));
@@ -2960,6 +3542,31 @@ static void handle_connection(struct netconn *conn)
         handle_pack_cfg_get(conn);
     } else if (route_is("DELETE /api/pack/config")) {
         handle_pack_cfg_delete(conn);
+    } else if (route_is("GET /api/can/status")) {
+        handle_can_status(conn);
+    } else if (route_is("GET /api/can/traffic")) {
+        handle_can_traffic(conn, (query_int("bus", 1) == 2) ? canBus_2
+                                                            : canBus_1);
+    } else if (route_is("GET /api/can/trace")) {
+        handle_can_trace(conn);
+    } else if (route_is("POST /api/can/trace/on")) {
+        handle_can_trace_enable(conn, 1);
+    } else if (route_is("POST /api/can/trace/off")) {
+        handle_can_trace_enable(conn, 0);
+    } else if (route_is("POST /api/can/mode")) {
+        handle_can_mode(conn);
+    } else if (route_is("POST /api/can/send")) {
+        handle_can_send(conn);
+    } else if (route_is("POST /api/can/reset")) {
+        handle_can_reset(conn);
+    } else if (route_is("GET /api/can/log/status")) {
+        handle_can_log_status(conn);
+    } else if (route_is("POST /api/can/log/mode")) {
+        handle_can_log_mode(conn);
+    } else if (route_is("GET /api/can/log/read")) {
+        handle_can_log_read(conn);
+    } else if (route_is("POST /api/can/log/wipe")) {
+        handle_can_log_wipe(conn);
     } else if (route_is("GET /api/wg/status")) {
         handle_wg_status(conn);
     } else if (route_is("POST /api/wg/config")) {

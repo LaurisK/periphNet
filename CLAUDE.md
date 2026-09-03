@@ -20,7 +20,7 @@ the design assessment of moving that wait to a timer + callback:
 
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
 
-**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
+**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The CAN half of that path now exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
 
@@ -48,9 +48,13 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — ~383 KB flash (480 KB limit), ~86 KB main
-  SRAM of 128 KB and ~58 KB CCM of 64 KB (**CCM is the tight one — ~92 %**);
-  the `.bin` is signed in-place (IMAGE_SIZE + HMAC patched) after every build
+- `build/application.elf` / `.bin` — ~451 KB flash (480 KB limit), ~122 KB main
+  SRAM of 128 KB and ~58.5 KB CCM of 64 KB. **BOTH RAM regions are now tight:
+  main SRAM is at ~96 % and CCM at ~91 %**, so main SRAM is currently the
+  tighter of the two — a new multi-KB `.bss` array no longer fits without
+  taking something out. (2026-09-03; the older "~86 KB main SRAM, CCM is the
+  tight one" figure in this file was stale by ~36 KB.) The `.bin` is signed
+  in-place (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
   used for OTA (needs python3 `cryptography` + `intelhex` packages)
@@ -174,6 +178,13 @@ live in `docs/modbus.md` §6.
 - **External Flash:** W25Q64 (8MB, SPI2 at 21MHz) — JEDEC 0xEF/0x40/0x17
 - **EEPROM:** AT24C02BN (256 bytes, I2C)
 - **Ethernet PHY:** DP83848IVV (RMII)
+- **CAN1:** PD0/RX PD1/TX — the **inverter** side by default
+- **CAN2:** PB5/RX PB6/TX — the **battery** side by default. bxCAN filter banks
+  are shared: CAN1 owns 0-13, CAN2 owns 14-27, and CAN2 needs CAN1's clock. Both
+  cells come up at 500 kbit with **wide-open filters** and the boot mode is
+  `bridge` — the board sits in the path, so any other boot state cuts the
+  inverter off from its BMS. `App/Can/can_bus.c` is the ONLY file allowed to
+  name a CAN HAL function or handle; CMake fails the build otherwise
 - **Trice:** USART3 PD8/TX PD9/RX, 460800 baud — **output OFF by default**
   (`TRICE_UART_OUTPUT` in `App/triceConfig.h`); tracing is UDP + USB CDC
 - **DMA1 Stream3/Stream4:** SPI2_RX / SPI2_TX (external flash). These are
@@ -306,14 +317,21 @@ both blobs at addresses compiled into it, and the FWU→BL handoff that would
 let it learn otherwise is still undesigned. So the built-in layout
 (`s_targetSizes` in `nvdb_layout.c`) reproduces the hand-assigned map exactly:
 on first boot `nvDb` adopts it (§4.4.1 first adoption), adds its two pinned
-areas plus `mqttCfg`/`triceUdpCfg` above them, and moves nothing. `imageMeta`
+areas plus every user this image has grown since — `mqttCfg`/`triceUdpCfg`,
+`packCfg`/`packState`, and now `nvdbUser_canLog` (App/Can's flash trace,
+[docs/design_can_bridge.md](docs/design_can_bridge.md) §10; 4 MB, the largest
+single user on the board) — above them, and moves nothing else. `imageMeta`
 is 12 KB rather than 4 KB because it absorbs the 8 KB hole the old map left,
 so the packer reproduces the old addresses without learning to leave holes.
 `FwuCtl_BlContractHolds()` checks the agreement at boot and
 `POST /api/fwu/install` **refuses with 409** if a layout ever breaks it,
 rather than letting a board discover it by not booting.
 
-The compacting layout ships as `periphnet` v2 once that handoff exists.
+The compacting layout ships as `periphnet` v3 once that handoff exists —
+bumped from v2 when `nvdbUser_canLog` landed, since a new user is itself a
+layout change even though this image's *placement policy* did not otherwise
+move.
+
 Relocation itself is fully tested host-side — including a sweep that cuts the
 power at all 60 steps of a relayout and checks every user's bytes
 afterwards.
@@ -329,7 +347,18 @@ PeriphNet/
                                   #   USART3 wire (default OFF, UDP + USB CDC)
     app_info.c                    # sAppInfo const in .app_header section
     application.ld                # Linker: 0x08008000, 480KB + APP_HEADER region
-    Can/                          # Pylontech BMS reader + simulator (CAN)
+    Can/                          # THE CAN MODULE: can_bus (the ONLY owner of
+                                  #   both bxCAN cells — bit timing, wide-open
+                                  #   filters, per-bus software TX queue, and
+                                  #   THE RX dispatcher: one weak HAL callback,
+                                  #   fanned out by (bus, id, mask)),
+                                  #   can_bridge (modes: off/monitor/bridge/
+                                  #   bms; per-direction policy; the frame
+                                  #   source that answers the inverter),
+                                  #   can_monitor (the tap: per-identifier
+                                  #   register + trace ring), bms_reader and
+                                  #   bms_sim (now an ordinary subscriber and
+                                  #   the bridge's frame source), pylontech.h
     Cmd/cmd_parser.c/h            # CLI command parser (composition root)
     nv_record.h                   # a CRC'd, versioned record in one nvDb
                                   #   area. USER-side policy: nvDb never
@@ -381,8 +410,9 @@ PeriphNet/
                                   #   pack_types.h (the registration roster),
                                   #   pack_jkbms (pull/Modbus),
                                   #   pack_pylontech (push/CAN — registers but
-                                  #   REFUSES TO BIND until App/Can has an RX
-                                  #   dispatcher, which is honest, not a stub)
+                                  #   STILL REFUSES TO BIND: the CAN RX
+                                  #   dispatcher it waited for now exists, what
+                                  #   is missing is its own frame parser)
   Shared/                         # First-party code compiled into BOTH targets
                                   #   (depends only on HAL + libc, no RTOS/lwIP)
     Crypto/                       # sha256, hmac_sha256, aes128, aes_gcm
@@ -742,6 +772,13 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/pack/config` | POST | Upload + apply a pack configuration. 422 names the offending **pack index and key**; 409 while another parse holds the shared scratch |
 | `/api/pack/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
 | `/api/pack/config` | DELETE | Erase it; the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
+| `/api/can/status` | GET | The CAN bridge: mode, which cell is battery and which inverter, bitrate, the frame source, the override list, per-direction forward/suppress/drop counters, and both cells' health (rx/tx, overruns, errors, bus-off, ESR REC/TEC, TX queue depth) |
+| `/api/can/traffic?bus=N` | GET | The identifier register of one bus: per ID the counts, last payload, age, **observed period band** and how often the payload actually changed — which is how a live measurement is told from a constant |
+| `/api/can/trace` | GET | The newest N frames of the trace ring, oldest first (`?n=`, default 32) |
+| `/api/can/trace/on` \| `/off` | POST | Arm / disarm the ring. Off by default — it costs an ISR-context copy per frame |
+| `/api/can/mode` | POST | `?mode=off\|monitor\|bridge\|bms[&bitrate=B]`. One route for start, stop and the **live break**: `off` stops the cells, anything else starts them if down and changes policy in place if up, so becoming the inverter's BMS never drops its link. Replies with the full status |
+| `/api/can/send` | POST | `?bus=N&id=HEX&data=HEX` — put one frame on a bus. How an inverter's reaction to a single frame is tried from a laptop over the tunnel, without the board pretending to be a battery first |
+| `/api/can/reset` | POST | Zero every CAN counter; the wire stays up |
 | `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base |
 | `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
 | `/api/wg/config` | DELETE | Erase the stored config **including the private key** — the board becomes unprovisioned and the tunnel stops |
@@ -920,4 +957,7 @@ what the switch is for during bring-up.
 - **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. **This now includes any bulk buffer handed to the flash driver**: `w25q128.c` checks the address and silently drops to polling for anything outside main SRAM / internal flash, and FreeRTOS task stacks are `pvPortMalloc`'d from `.ccmheap`, so a **stack local is CCM too**. A new bulk flash buffer must be static/`.bss` or it quietly loses DMA (`docs/task_flash_wait_and_ota_cost.md`). It holds **two** NOLOAD sections with different lifecycles:
   - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
+- **One file owns the bxCAN cells, and CMake enforces it** — no `HAL_CAN_*` name and no CAN handle anywhere in `App/` except `App/Can/can_bus.c`. The HAL offers ONE weak RX-FIFO-pending callback for both cells, so whoever defines it takes a link-level monopoly: that is how `bms_reader.c` came to block `pack_pylontech` outright. Consumers subscribe by `(bus, id, mask)`, and **every subscriber callback runs in the RX ISR** — copy, count, enqueue, return
+- **The CAN bridge is store-and-forward, not a wire** — each side is its own collision domain and the board ACKs on both, arbitration is per side (the TX FIFO is chronological so a burst is not re-sorted by identifier), error frames do not cross, one frame time of latency is added, and **both sides must run the same bitrate**; a rate that does not divide PCLK1/14 exactly is refused rather than rounded. Free for the 1 Hz one-way Pylontech dialect, and stated in [docs/design_can_bridge.md](docs/design_can_bridge.md) §3 because none of it is academic for a different protocol
+- **There is no persisted CAN configuration** — mode, bitrate and bus roles are compile-time defaults, so a change made over the tunnel lasts until the next reset. Adding one means a new nvDb user, which means moving the layout that is still pinned to the bootloader
 - **MQTT publishes happen on `mqttTask` only** — the bridge's Modbus callback copies and posts, so `LOCK_TCPIP_CORE` is off the Modbus sequence path entirely (docs/modbus.md §4.10); never call the raw lwIP MQTT API from app tasks without the core lock

@@ -182,7 +182,13 @@ static void test_areas_never_share_an_erasable_unit(void)
             TEST_ASSERT(a >= (b + m) || b >= (a + n));
         }
     }
-    TEST_ASSERT(info.freeSpace_bytes > 0x600000u);
+    /* Was "> 0x600000" (6 MB) when the medium held only the small fixed-size
+     * users.  App/Can/can_log.c's 4 MB ring (nvdbUser_canLog) is the biggest
+     * single user on the board by a wide margin, and dropped actual free
+     * space to ~0x2F0000 (~2.94 MB) — still comfortably free, just no longer
+     * "basically everything".  The bound stays a sanity check against a
+     * runaway size, not a tight budget. */
+    TEST_ASSERT(info.freeSpace_bytes > 0x280000u);
 }
 
 /* ==========================================================================
