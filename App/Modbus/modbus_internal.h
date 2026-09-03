@@ -110,6 +110,11 @@ int  ModbusPort_IsRegistered(uint8_t portId);
 void ModbusPort_SetMonitor(int enable);
 int  ModbusPort_GetMonitor(void);
 
+/* Line occupancy.  Accumulated in port_submit(), the one choke point every
+ * frame passes through, so it covers plan traffic and API requests alike. */
+int  ModbusPort_GetBusy(uint8_t portId, sModbusBusStats *out);
+void ModbusPort_ResetBusy(uint8_t portId);
+
 /**
  * @brief  Rebuild the resident plan-header table from the ACTIVE region.
  *

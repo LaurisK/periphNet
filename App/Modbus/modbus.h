@@ -615,6 +615,37 @@ int Modbus_ScheduleStats(sModbusScheduleStats *out);
 
 int Modbus_Stats(sModbusStats *out);
 
+/* Line occupancy, per PORT rather than per device or per plan (§5.1).
+ *
+ * The question it answers is "how much of this pair is already spoken for",
+ * which is a property of the wire: every device, every plan and every API
+ * request share one line, so anything keyed on one of them cannot be added up
+ * into a budget.  `winPermille` is the figure to read -- lifetime duty flattens
+ * a burst that a 60 s window still shows.
+ *
+ * A TIMEOUT COUNTS AS BUSY, because the line is: a slave that does not answer
+ * holds the bus for its whole response timeout and yields nothing.  `max_ms`
+ * near the response timeout is that, and it is the first thing to look at when
+ * a period starts slipping. */
+typedef struct {
+    uint32_t txns;            /* frames the port carried since reset        */
+    uint32_t busy_ms;         /* line-occupied time since reset             */
+    uint32_t elapsed_ms;      /* wall time since reset                      */
+    uint16_t duty_permille;   /* busy_ms over elapsed_ms                    */
+    uint16_t win_permille;    /* over the last window_sec seconds           */
+    uint16_t window_sec;      /* what the windowed figure covers; <60 only
+                                 while less than that has elapsed           */
+    uint16_t last_ms;         /* the frame most recently carried            */
+    uint16_t max_ms;          /* longest single frame since reset           */
+    uint8_t  registered;      /* a driver holds the slot (else nothing runs)*/
+} sModbusBusStats;
+
+/** @param portId  eModbusPortId; @return 0, or -1 on a bad slot */
+int  Modbus_BusStats(uint8_t portId, sModbusBusStats *out);
+
+/** @brief  Zero one port's counters and restart its window. */
+void Modbus_BusStatsReset(uint8_t portId);
+
 /** @brief  Trice dump of engine + config + per-device state (`modbus status`). */
 void Modbus_LogStatus(void);
 

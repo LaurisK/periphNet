@@ -48,6 +48,160 @@ static osSemaphoreId_t s_doneSem[MB_PORT_COUNT];
 static volatile int s_monitor;
 
 /* --------------------------------------------------------------------------
+ * Line occupancy
+ *
+ * port_submit() is the ONE place every frame on every port passes through --
+ * engine sequences and API requests alike -- so it is the only place that can
+ * say how much of a line's time is already spoken for.  What is measured is
+ * the whole transaction as the wire sees it: the driver's pre-transmit
+ * silence, the frame out, the slave's think time, the frame back, and the
+ * end-of-frame idle.  That is what has to fit inside a period, and it is the
+ * number to look at before putting another device on the pair.
+ *
+ * A TIMEOUT IS BUSY TIME, and it is the reading that matters most.  A slave
+ * that does not answer costs the line its full response timeout and returns
+ * nothing; a mis-addressed device on a wrong baud is therefore not a quiet
+ * failure but the most expensive traffic on the bus, and it starves
+ * everything scheduled behind it.  Averaging it away would hide exactly the
+ * case this exists to catch.
+ *
+ * The window is a ring of one uint16 per second.  A frame is charged in full
+ * to the second it ENDED in, which mis-attributes at most one straddling
+ * frame per second -- accepted deliberately: splitting a transaction across
+ * slots buys precision nobody needs from an occupancy figure.
+ * -------------------------------------------------------------------------- */
+
+#define MB_BUSY_WINDOW_SEC  60u
+
+typedef struct {
+    uint32_t txns;
+    uint32_t busy_ms;
+    uint32_t startTick;
+    uint32_t winSec;                    /* second index of the newest slot */
+    uint16_t last_ms;
+    uint16_t max_ms;
+    uint16_t win[MB_BUSY_WINDOW_SEC];
+} sPortBusy;
+
+static sPortBusy s_busy[MB_PORT_COUNT];
+
+/* Advanced LAZILY, by whoever touches the ring next.  An idle port posts no
+ * completions, so a window that only moved on a frame would keep reporting
+ * the traffic that stopped a minute ago -- the one reading a busyness meter
+ * must never give. */
+static void busy_advance(sPortBusy *b, uint32_t sec)
+{
+    uint32_t behind = sec - b->winSec;   /* unsigned: tick wrap is fine */
+
+    if (behind == 0u) {
+        return;
+    }
+    if (behind >= MB_BUSY_WINDOW_SEC) {
+        memset(b->win, 0, sizeof(b->win));
+    } else {
+        for (uint32_t i = 1u; i <= behind; i++) {
+            b->win[(b->winSec + i) % MB_BUSY_WINDOW_SEC] = 0u;
+        }
+    }
+    b->winSec = sec;
+}
+
+/* The accumulator is written on the modbus task and read on the http task, and
+ * the ring advance is not one store -- hence the PRIMASK save/restore rather
+ * than a mutex: it is a handful of instructions and it must be callable from
+ * either. */
+static void busy_charge(uint8_t portId, uint32_t t0, uint32_t t1)
+{
+    sPortBusy *b  = &s_busy[portId];
+    uint32_t   ms = t1 - t0;
+    uint32_t   pm;
+
+    if (ms > 0xFFFFu) {
+        ms = 0xFFFFu;
+    }
+
+    pm = __get_PRIMASK();
+    __disable_irq();
+
+    busy_advance(b, t1 / 1000u);
+
+    b->txns++;
+    b->busy_ms += ms;
+    b->last_ms  = (uint16_t)ms;
+    if ((uint16_t)ms > b->max_ms) {
+        b->max_ms = (uint16_t)ms;
+    }
+    {
+        uint32_t idx = (t1 / 1000u) % MB_BUSY_WINDOW_SEC;
+        uint32_t sum = (uint32_t)b->win[idx] + ms;
+        b->win[idx] = (sum > 0xFFFFu) ? 0xFFFFu : (uint16_t)sum;
+    }
+
+    __set_PRIMASK(pm);
+}
+
+int ModbusPort_GetBusy(uint8_t portId, sModbusBusStats *out)
+{
+    sPortBusy *b;
+    uint32_t   now = HAL_GetTick();
+    uint32_t   winSum = 0u, winSec, pm;
+
+    if (portId >= MB_PORT_COUNT || out == NULL) {
+        return -1;
+    }
+    b = &s_busy[portId];
+
+    pm = __get_PRIMASK();
+    __disable_irq();
+    busy_advance(b, now / 1000u);
+    for (uint32_t i = 0u; i < MB_BUSY_WINDOW_SEC; i++) {
+        winSum += b->win[i];
+    }
+    out->txns       = b->txns;
+    out->busy_ms    = b->busy_ms;
+    out->elapsed_ms = now - b->startTick;
+    out->last_ms    = b->last_ms;
+    out->max_ms     = b->max_ms;
+    __set_PRIMASK(pm);
+
+    /* The window cannot report on time that has not passed yet: right after a
+     * reset or a boot its denominator is the elapsed time, not 60 s, and the
+     * reply says which it used. */
+    winSec = out->elapsed_ms / 1000u;
+    if (winSec > MB_BUSY_WINDOW_SEC) {
+        winSec = MB_BUSY_WINDOW_SEC;
+    }
+    out->window_sec    = (uint16_t)winSec;
+    out->win_permille  = (winSec == 0u) ? 0u : (uint16_t)(winSum / winSec);
+    if (out->win_permille > 1000u) {
+        out->win_permille = 1000u;      /* a straddling frame, charged whole */
+    }
+    out->duty_permille = (out->elapsed_ms == 0u) ? 0u
+                       : (uint16_t)(((uint64_t)out->busy_ms * 1000u)
+                                    / out->elapsed_ms);
+    out->registered    = s_ports[portId].inUse;
+    return 0;
+}
+
+void ModbusPort_ResetBusy(uint8_t portId)
+{
+    sPortBusy *b;
+    uint32_t   pm;
+
+    if (portId >= MB_PORT_COUNT) {
+        return;
+    }
+    b = &s_busy[portId];
+
+    pm = __get_PRIMASK();
+    __disable_irq();
+    memset(b, 0, sizeof(*b));
+    b->startTick = HAL_GetTick();
+    b->winSec    = b->startTick / 1000u;
+    __set_PRIMASK(pm);
+}
+
+/* --------------------------------------------------------------------------
  * Registration and completion — the two calls the contract is made of
  * -------------------------------------------------------------------------- */
 
@@ -165,11 +319,16 @@ static int port_submit(uint8_t portId, uint16_t txLen,
                        const sModbusPortParams *params,
                        eModbusPortDone *howOut, uint16_t *rxLenOut)
 {
-    sPort *p = &s_ports[portId];
+    sPort   *p = &s_ports[portId];
+    uint32_t t0;
 
     if (!p->inUse) {
         return -1;                 /* a port with no driver is disabled */
     }
+
+    /* The line is occupied from here: the driver's pre-transmit silence is
+     * inside submit, and it is real time on the wire like any other. */
+    t0 = HAL_GetTick();
 
     p->done  = 0u;
     p->rxLen = 0u;
@@ -195,12 +354,14 @@ static int port_submit(uint8_t portId, uint16_t txLen,
         p->busy = 0u;
         *howOut = mbPortDone_timeout;
         *rxLenOut = 0u;
+        busy_charge(portId, t0, HAL_GetTick());
         return 0;
     }
 
     *howOut   = (eModbusPortDone)p->how;
     *rxLenOut = p->rxLen;
     p->busy   = 0u;
+    busy_charge(portId, t0, HAL_GetTick());
 
     if (s_monitor && *howOut == mbPortDone_frame) {
         TRice("Modbus RX[%u]: ", *rxLenOut);

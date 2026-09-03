@@ -1363,6 +1363,22 @@ int Modbus_Stats(sModbusStats *out)
     return 0;
 }
 
+/* The port table is module-internal (§2.2): a consumer asks the module about a
+ * line, never the port layer directly. */
+int Modbus_BusStats(uint8_t portId, sModbusBusStats *out)
+{
+    if (out == NULL) {
+        return mbErr_badArg;
+    }
+    memset(out, 0, sizeof(*out));
+    return (ModbusPort_GetBusy(portId, out) == 0) ? 0 : mbErr_badArg;
+}
+
+void Modbus_BusStatsReset(uint8_t portId)
+{
+    ModbusPort_ResetBusy(portId);
+}
+
 int Modbus_ScheduleStats(sModbusScheduleStats *out)
 {
     if (out == NULL) {
