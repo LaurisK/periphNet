@@ -120,7 +120,9 @@ curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
 curl -X POST http://10.42.0.203/api/fwu/install        # arms FWU + reboots
 # ...device reboots, BL installs, new FW comes up UNCONFIRMED...
 curl http://10.42.0.203/api/fwu/status                 # check health/version
-curl -X POST http://10.42.0.203/api/fwu/confirm        # REQUIRED within 3 boots,
+curl -X POST http://10.42.0.203/api/fwu/kick           # "still testing" — reloads the
+                                                       # self-reboot countdown (?window_sec=N)
+curl -X POST http://10.42.0.203/api/fwu/confirm        # REQUIRED — stops the countdown,
                                                        # also promotes stored→golden
 
 # Download stored blob / verify round-trip
@@ -137,8 +139,12 @@ missed a deadline, but treat OTA as a "board is busy" window until
 is done.
 
 **IMPORTANT:** without `confirm`, the bootloader rolls back to the golden
-image after 3 unconfirmed boots. Local-target (`'l'`) builds are exempt from
-attempt counting, so JLink dev flashing is unaffected.
+image after 3 unconfirmed boots — and since an unconfirmed image now **reboots
+itself every 15 minutes unless kicked**, those 3 boots happen on their own in
+about 45 minutes rather than waiting for someone to power-cycle the board.
+That is deliberate: it is the only thing that recovers a firmware which boots
+fine but cannot be reached. Local-target (`'l'`) builds are exempt from both,
+so JLink dev flashing is unaffected.
 
 **Trice UART output** (USART3 PD8/TX, 460800 baud) — **off by default**;
 set `TRICE_UART_OUTPUT` to 1 in `App/triceConfig.h` first (interrupt-driven,
@@ -642,6 +648,27 @@ The app never self-confirms — `POST /api/fwu/confirm` is the outside
 actor's job. Local-target (`'l'`) builds skip attempt counting entirely
 (developer owns the device; JLink flashing stays friction-free).
 
+**AN UNCONFIRMED IMAGE NOW REBOOTS ITSELF UNLESS IT IS KICKED**, and that is
+what makes the rollback above reachable from the failure that actually
+happens on this board. The attempt counter is only spent by a reset, so an
+image that **boots fine and cannot be reached** — a broken WireGuard config,
+a wedged HTTP task — used to sit there unconfirmed forever and the rollback
+never fired. Now `FwuCtl_Init()` arms a countdown
+(`FWU_CONFIRM_WINDOW_DEFAULT_SEC`, 900 s), `defaultTask` resets the board
+when it expires, each expiry spends one attempt, and three unattended
+expiries end with the golden image back — **≈45 minutes, unattended**.
+The procedure is upload → install → `POST /api/fwu/kick` while you test →
+`confirm` when satisfied. A kick is the ONLY thing that reloads it (an
+implicit "traffic counts" rule would let the subsystem under test hold the
+deadline open forever); the single bounded exception is an upload in flight,
+which cannot outlive the HTTP recv timeout. **Not armed** for local (`'l'`)
+builds, for a confirmed image, or — the non-obvious one — when there is **no
+golden image**, since a virgin board's erased boot-status flags read as
+unconfirmed and rebooting toward a rollback that must fail helps nobody.
+**The cost is a false rollback if the WAN is down longer than the window ×3**;
+that is the one way this violates the autonomy requirement, and the window is
+the knob. [docs/task_fwu_confirm_deadline.md](docs/task_fwu_confirm_deadline.md)
+
 ## Bootloader API (sBootloaderApi at 0x08007F00)
 
 Function pointer table placed in `.bl_api` linker section. API version 3.
@@ -687,7 +714,7 @@ Shared code compiled into both bootloader and application.
 
 | Task | Stack | Priority | Role |
 |------|-------|----------|------|
-| defaultTask | 1024 words | osPriorityNormal (24) | Init, heartbeat (1s), IWDG kick (100ms), reboot/promotion jobs, button faults |
+| defaultTask | 1024 words | osPriorityNormal (24) | Init, heartbeat (1s), IWDG kick (100ms), reboot/promotion jobs, **the FWU confirmation deadline** (an unconfirmed image that is not kicked resets here), button faults |
 | http | 1024 words | osPriorityNormal (24) | HTTP server (netconn API, sequential connections) |
 | trice | 256 words | osPriorityNormal+1 (25) | TriceTransfer() every 10ms |
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
@@ -757,9 +784,10 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/image/download` | GET | Download stored blob (still encrypted), original filename |
 | `/api/image` | DELETE | Erase stored image (manifest + metadata) |
 | `/api/fwu/install` | POST | Arm FWU flag + reboot (needs valid stored image) |
-| `/api/fwu/confirm` | POST | Outside actor confirms running FW; promotes stored→golden |
+| `/api/fwu/confirm` | POST | Outside actor confirms running FW; promotes stored→golden. Also **stops the confirmation countdown** |
+| `/api/fwu/kick` | POST | Reload the confirmation countdown (`?window_sec=N`, clamped 30..3600). **The new FWU procedure**: an unconfirmed image reboots itself unless kicked, so an updater that loses its tunnel to a bad build recovers the board by doing nothing. 409 when nothing is counting down, saying whether that is `exempt` (local build) or already `confirmed` |
 | `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
-| `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause |
+| `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause, plus **`confirm_guard`** (armed/exempt/window_sec/remaining_sec/kicks) — the countdown to a self-reboot |
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
 | `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag) |
 | `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |

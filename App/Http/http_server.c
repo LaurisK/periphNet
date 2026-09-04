@@ -125,10 +125,12 @@ static const char index_html[] =
     "</div></div>"
     "<div class=card><h3>Firmware Update</h3>"
     "<div id=finst class=info></div><div id=finfo class=info></div>"
+    "<div id=fguard class=info></div>"
     "<div id=fmsg class=msg></div>"
     "<div style='margin-top:8px'>"
     "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
     "<button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button>"
+    "<button class=btn-up onclick=kickFw() id=bkick disabled>Kick</button>"
     "</div></div>"
     "<div class=card><h3>System</h3>"
     "<div id=sysinfo class=info>Loading...</div><div id=systasks></div>"
@@ -193,7 +195,12 @@ static const char index_html[] =
     "if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;"
     "if(j.promote_pending)t+=(t?' | ':'')+'promoting to golden...';"
     "document.getElementById('finfo').textContent=t;"
+    "var g=j.confirm_guard||{};"
+    "document.getElementById('fguard').textContent=g.armed?"
+    "'Auto-reboot in '+g.remaining_sec+'s unless kicked or confirmed'"
+    "+' (kicks: '+g.kicks+')':'';"
     "document.getElementById('bconf').disabled=j.confirmed;"
+    "document.getElementById('bkick').disabled=!g.armed;"
     "}).catch(()=>{})}"
     "function pct(p){return (p/10).toFixed(1)+'%'}"
     "function pollSys(){fetch(B+'/api/system/status').then(r=>r.json()).then(j=>{"
@@ -324,6 +331,9 @@ static const char index_html[] =
     "function canLogWipe(){if(!confirm('Erase the whole flash trace?'))return;"
     "fetch(B+'/api/can/log/wipe',{method:'POST'}).then(()=>pollCanLog()).catch(()=>{})}"
     "function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats();pollCan();pollCanLog()}"
+    "function kickFw(){fetch(B+'/api/fwu/kick',{method:'POST'})"
+    ".then(r=>r.json()).then(j=>{show('fmsg','Kicked, '+j.window_sec+'s',1);poll()})"
+    ".catch(e=>show('fmsg',e,0))}"
     "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
     ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
     ".catch(e=>show('fmsg',e,0))}"
@@ -872,6 +882,13 @@ static void handle_fwu_status(struct netconn *conn)
 
     uint32_t uptime = HAL_GetTick() / 1000U;
 
+    /* `confirm_guard` is what tells an operator the board will recover on its
+     * own: `remaining_sec` counting down means a lost tunnel ends in a
+     * reboot, and `attempts_remaining` says how many are left before the
+     * bootloader puts the golden image back. */
+    sFwuConfirmGuard g;
+    FwuCtl_GetConfirmGuard(&g);
+
     snprintf(resp_buf, sizeof(resp_buf),
         "{\"running_version\":\"%s\","
         "\"confirmed\":%s,"
@@ -880,6 +897,8 @@ static void handle_fwu_status(struct netconn *conn)
         "\"uptime\":%lu,"
         "\"golden_version\":%s,"
         "\"promote_pending\":%s,"
+        "\"confirm_guard\":{\"armed\":%s,\"exempt\":%s,"
+        "\"window_sec\":%lu,\"remaining_sec\":%lu,\"kicks\":%lu},"
         "\"reset_cause\":\"0x%08lX\"}",
         running_ver,
         unconfirmed ? "false" : "true",
@@ -888,6 +907,11 @@ static void handle_fwu_status(struct netconn *conn)
         (unsigned long)uptime,
         golden_field,
         FwuCtl_PromotePending() ? "true" : "false",
+        g.armed ? "true" : "false",
+        g.exempt ? "true" : "false",
+        (unsigned long)g.window_sec,
+        (unsigned long)g.remaining_sec,
+        (unsigned long)g.kickCnt,
         (unsigned long)System_GetResetCause());
 
     send_json(conn, "200 OK", resp_buf);
@@ -1181,6 +1205,41 @@ static void handle_fwu_confirm(struct netconn *conn)
                   "{\"error\":\"failed to write boot status\"}");
         break;
     }
+}
+
+/* POST /api/fwu/kick[?window_sec=N] — reload the confirmation countdown.
+ *
+ * THE PROCEDURE this exists for: install, wait for the board to come back,
+ * then kick while you check the new image over, and confirm when satisfied.
+ * Stop kicking and the board reboots itself; do that three times and the
+ * bootloader puts the golden image back.  An updater that loses its tunnel
+ * to a bad build therefore recovers the board by doing nothing at all. */
+static void handle_fwu_kick(struct netconn *conn)
+{
+    const int        want = query_int("window_sec", 0);
+    sFwuConfirmGuard g;
+
+    if (FwuCtl_KickConfirm((want > 0) ? (uint32_t)want : 0U) !=
+        fwuCtlRes_ok) {
+        FwuCtl_GetConfirmGuard(&g);
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"error\":\"nothing is counting down\",\"exempt\":%s,"
+                 "\"confirmed\":%s}",
+                 g.exempt ? "true" : "false",
+                 BootStatus_IsUnconfirmed() ? "false" : "true");
+        send_json(conn, "409 Conflict", resp_buf);
+        return;
+    }
+
+    FwuCtl_GetConfirmGuard(&g);
+    TRice("FWU: kicked, %u s\n", (unsigned)g.window_sec);
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"status\":\"kicked\",\"window_sec\":%lu,"
+             "\"remaining_sec\":%lu,\"kicks\":%lu,"
+             "\"attempts_remaining\":%u}",
+             (unsigned long)g.window_sec, (unsigned long)g.remaining_sec,
+             (unsigned long)g.kickCnt, (unsigned)g.attemptsLeft);
+    send_json(conn, "200 OK", resp_buf);
 }
 
 static void handle_fwu_verify(struct netconn *conn)
@@ -3710,6 +3769,8 @@ static void handle_connection(struct netconn *conn)
         handle_image_delete(conn);
     } else if (route_is("POST /api/fwu/install")) {
         handle_fwu_install(conn);
+    } else if (route_is("POST /api/fwu/kick")) {
+        handle_fwu_kick(conn);
     } else if (route_is("POST /api/fwu/confirm")) {
         handle_fwu_confirm(conn);
     } else if (route_is("GET /api/fwu/verify")) {
@@ -3901,8 +3962,21 @@ static void http_task(void *arg)
 
 void http_server_init(void)
 {
+    sFwuConfirmGuard g;
+
     ImgStore_Init();
     FwuCtl_Init();
+
+    /* Say so ONCE at boot.  An operator who finds a board that rebooted on
+     * its own needs this line in the trace to tell the confirmation deadline
+     * apart from a crash or an IWDG reset. */
+    FwuCtl_GetConfirmGuard(&g);
+    if (g.armed) {
+        /* Trice needs the whole format in ONE literal -- the ID inserter
+         * matches specifiers against arguments and cannot see a split. */
+        TRice("FWU: UNCONFIRMED, auto-reboot in %u s unless kicked, %u attempts left\n",
+              (unsigned)g.window_sec, (unsigned)g.attemptsLeft);
+    }
 
     osThreadNew(http_task, NULL, &s_httpAttr);
 }

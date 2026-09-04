@@ -412,6 +412,18 @@ void App_DefaultTaskEntry(void)
             NVIC_SystemReset();
         }
 
+        /* The unconfirmed image was not kicked in time.  Reboot: that spends
+         * one of the bootloader's three attempts, and when they are gone the
+         * BL installs the golden image by itself.  This is the automatic
+         * rollback for a firmware that BOOTS but cannot be reached -- the
+         * case the attempt counter alone can never reach, because nothing
+         * spends an attempt but a reset (App/Fwu/fwu_control.h). */
+        if (FwuCtl_ConfirmDeadlineDue()) {
+            TRice("FWU: not confirmed and not kicked -- rebooting\n");
+            vTaskDelay(pdMS_TO_TICKS(2000U));  /* let Trice flush + TCP close */
+            NVIC_SystemReset();
+        }
+
         /* Copy staged blob → golden after a confirm (a few seconds of
          * SPI traffic; runs here so tcpip_thread stays responsive) */
         if (FwuCtl_PromotePending()) {

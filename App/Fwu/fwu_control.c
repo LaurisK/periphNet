@@ -13,6 +13,7 @@
 
 #include "App/Fwu/fwu_control.h"
 #include "App/system.h"
+#include "main.h"
 #include "nvdb.h"
 #include "nvdb_exceptions.h"
 #include "boot_status.h"
@@ -27,6 +28,16 @@ static bool      bl_contract_ok;
 static volatile bool reboot_pending  = false;
 static volatile bool promote_pending = false;
 static volatile bool promoting       = false;
+
+/* The confirmation deadline (fwu_control.h).  All of it is RAM: each boot
+ * gets a fresh window, and each expiry spends one of the bootloader's three
+ * attempts, so the state that has to survive a reset already lives in the
+ * boot status. */
+static volatile bool     guard_armed       = false;
+static volatile bool     guard_exempt      = false;
+static volatile uint32_t guard_window_sec  = FWU_CONFIRM_WINDOW_DEFAULT_SEC;
+static volatile uint32_t guard_deadline_ms = 0U;
+static volatile uint32_t guard_kickCnt     = 0U;
 
 /**
  * @brief Does nvDb still put the BL-visible areas where the BL looks?
@@ -46,9 +57,42 @@ static bool bl_area_agrees(eNvDbUser user, uint32_t addr, uint32_t size)
     return (a == addr) && (n >= size);
 }
 
+/** @return true if the RUNNING image is a local ('l') build. */
+static bool running_is_local(void)
+{
+    const sAppInfo *app = (const sAppInfo *)APP_INFO_HEADER_ADDR;
+
+    return (app->magic == APP_INFO_MAGIC) &&
+           (app->fw_version.ver.target == (uint8_t)fwTarget_local);
+}
+
+/** Restart the countdown.  window_sec is already clamped. */
+static void guard_reload(uint32_t window_sec)
+{
+    guard_window_sec  = window_sec;
+    guard_deadline_ms = HAL_GetTick() + (window_sec * 1000U);
+}
+
 void FwuCtl_Init(void)
 {
     ImgStore_ScanArea(nvdbUser_fwuGolden, &golden);
+
+    /* Arm the confirmation deadline HERE rather than at the first HTTP
+     * request: the failure it exists for is an image whose network never
+     * comes up, so nothing on the network may be a precondition for it.
+     *
+     * THREE conditions, and the third is not obvious.  Without a golden
+     * image there is nothing to roll back TO, so a self-reboot would spend
+     * the bootloader's attempts to reach a rollback that must fail -- and on
+     * a virgin board the erased boot-status flags read as "unconfirmed", so
+     * that is not a hypothetical: it is what a factory J-Link write looks
+     * like.  No target, no countdown. */
+    guard_exempt = running_is_local();
+    if (!guard_exempt && golden.valid && BootStatus_IsUnconfirmed()) {
+        guard_armed   = true;
+        guard_kickCnt = 0U;
+        guard_reload(FWU_CONFIRM_WINDOW_DEFAULT_SEC);
+    }
 
     bl_contract_ok =
         bl_area_agrees(nvdbUser_bootStatus, EXT_FLASH_FWU_STATUS_ADDR,
@@ -104,6 +148,7 @@ eFwuCtlRes FwuCtl_Confirm(bool *promote)
     if (BootStatus_ConfirmApp() != 0) {
         return fwuCtlRes_flashErr;
     }
+    guard_armed = false;              /* confirmed: nothing left to count */
 
     /* Promote stored → golden only if the stored blob is what is actually
      * running (a newer, not-yet-installed upload must not become golden).
@@ -142,6 +187,76 @@ eFwuRes FwuCtl_VerifyRunning(void)
 
     return bl->verify_image_hmac(APPLICATION_START_ADDR, false,
                                  app->image_size, app->image_hmac);
+}
+
+/* --------------------------------------------------------------------------
+ * The confirmation deadline
+ * -------------------------------------------------------------------------- */
+
+eFwuCtlRes FwuCtl_KickConfirm(uint32_t window_sec)
+{
+    if (!guard_armed) {
+        return fwuCtlRes_notArmed;
+    }
+    if (window_sec == 0U) {
+        window_sec = guard_window_sec;      /* keep the window in force */
+    }
+    if (window_sec < FWU_CONFIRM_WINDOW_MIN_SEC) {
+        window_sec = FWU_CONFIRM_WINDOW_MIN_SEC;
+    }
+    if (window_sec > FWU_CONFIRM_WINDOW_MAX_SEC) {
+        window_sec = FWU_CONFIRM_WINDOW_MAX_SEC;
+    }
+    guard_reload(window_sec);
+    guard_kickCnt++;
+
+    return fwuCtlRes_ok;
+}
+
+bool FwuCtl_ConfirmDeadlineDue(void)
+{
+    if (!guard_armed) {
+        return false;
+    }
+    /* Signed difference: the deadline may sit the far side of a tick wrap. */
+    if ((int32_t)(HAL_GetTick() - guard_deadline_ms) < 0) {
+        return false;
+    }
+
+    /* Only now, once, is the flash flag worth reading: something may have
+     * confirmed by a route this module did not see. */
+    if (!BootStatus_IsUnconfirmed()) {
+        guard_armed = false;
+        return false;
+    }
+
+    /* THE ONE IMPLICIT REPRIEVE, and it is bounded: an upload in flight is
+     * the operator pushing a fix, and the HTTP server's own recv timeout
+     * ends a stalled one -- so this cannot be held open by the subsystem
+     * under test the way a general "traffic counts" rule could. */
+    if (ImgStore_GetState()->status == imgStore_uploading) {
+        guard_reload(guard_window_sec);
+        return false;
+    }
+
+    return true;
+}
+
+void FwuCtl_GetConfirmGuard(sFwuConfirmGuard *out)
+{
+    uint32_t left = 0U;
+
+    if (guard_armed) {
+        const int32_t d = (int32_t)(guard_deadline_ms - HAL_GetTick());
+
+        left = (d > 0) ? ((uint32_t)d / 1000U) : 0U;
+    }
+    out->window_sec    = guard_window_sec;
+    out->remaining_sec = left;
+    out->kickCnt       = guard_kickCnt;
+    out->attemptsLeft  = BootStatus_AttemptsRemaining();
+    out->armed         = guard_armed;
+    out->exempt        = guard_exempt;
 }
 
 /* --------------------------------------------------------------------------

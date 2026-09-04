@@ -25,6 +25,8 @@
 #include "App/Net/wg_time.h"
 #include "App/Pack/pack.h"
 #include "App/Func/func.h"
+#include "App/Fwu/fwu_control.h"
+#include "boot_status.h"
 #include "json.h"
 #include "nvdb.h"
 #include "nvdb_config.h"
@@ -86,6 +88,7 @@ static void cmd_wg(const char *args);
 static void cmd_nvdb(const char *args);
 static void cmd_pack(const char *args);
 static void cmd_sysmon(const char *args);
+static void cmd_fwu(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
@@ -97,6 +100,7 @@ static const sCmdEntry s_commands[] = {
     { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
     { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|stats|balance|cmd|config|erase)" },
     { "sysmon",      cmd_sysmon,      "System monitor (tasks|heap|reset)" },
+    { "fwu",         cmd_fwu,         "Firmware update (status|kick [sec]|confirm)" },
     { "reboot",      cmd_reboot,      "Reboot the board"        },
     { "dfu",         cmd_dfu,         "Enter USB DFU bootloader"},
     { "help",        cmd_help,        "List available commands"  },
@@ -1469,6 +1473,63 @@ static void cmd_nvdb(const char *args)
  *   sysmon heap     — heap and watchdog margin only
  *   sysmon reset    — clear peak CPU, the IWDG gap maximum and stale counts
  */
+/**
+ * FWU command: the confirmation deadline, from a console.
+ *
+ *   fwu status        — running version, confirm state, countdown
+ *   fwu kick [sec]    — reload the countdown (no argument keeps the window)
+ *   fwu confirm       — confirm the running image and stop the countdown
+ *
+ * The countdown is why this is worth having on the console at all: a board
+ * whose network is the broken thing cannot be kicked over the network.
+ */
+static void cmd_fwu(const char *args)
+{
+    sFwuConfirmGuard g;
+    char             buf[112];
+
+    if (strncmp(args, "kick", 4) == 0) {
+        unsigned sec = 0U;
+
+        (void)sscanf(args + 4, "%u", &sec);
+        if (FwuCtl_KickConfirm(sec) != fwuCtlRes_ok) {
+            TRice("FWU: nothing is counting down\n");
+            return;
+        }
+        FwuCtl_GetConfirmGuard(&g);
+        TRice("FWU: kicked, %u s (kick %u)\n",
+              (unsigned)g.window_sec, (unsigned)g.kickCnt);
+        return;
+    }
+    if (strncmp(args, "confirm", 7) == 0) {
+        bool promote = false;
+
+        switch (FwuCtl_Confirm(&promote)) {
+        case fwuCtlRes_ok:
+            TRice("FWU: confirmed (promote=%u)\n", (unsigned)promote);
+            break;
+        case fwuCtlRes_already:
+            TRice("FWU: already confirmed\n");
+            break;
+        default:
+            TRice("FWU: could not write the boot status\n");
+            break;
+        }
+        return;
+    }
+
+    FwuCtl_GetConfirmGuard(&g);
+    (void)snprintf(buf, sizeof(buf),
+                   "%s attempts=%u guard=%s%s window=%us left=%us kicks=%u",
+                   BootStatus_IsUnconfirmed() ? "UNCONFIRMED" : "confirmed",
+                   (unsigned)g.attemptsLeft,
+                   g.armed ? "armed" : "off",
+                   g.exempt ? " (local build, exempt)" : "",
+                   (unsigned)g.window_sec, (unsigned)g.remaining_sec,
+                   (unsigned)g.kickCnt);
+    TRiceS("FWU: %s\n", buf);
+}
+
 static void cmd_sysmon(const char *args)
 {
     if (strncmp(args, "reset", 5) == 0) {
