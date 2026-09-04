@@ -675,3 +675,38 @@ void Crash_ClearFlash(void)
                      sizeof(magic));
     (void)NvDb_Wipe(nvdbUser_crashLog, NULL);
 }
+
+/* --------------------------------------------------------------------------
+ * Type names
+ *
+ * The eight words used to live in http_server.c as a private array, where the
+ * bound was hand-maintained and had already fallen two enumerators behind --
+ * a StackOverflow read back as "Unknown", indistinguishable from a corrupt
+ * record exactly when the type is the thing you need.  The names belong to
+ * the enum, so they live with it.
+ *
+ * FAULT CONTEXT SAFE, and it must stay that way -- a future crash-time
+ * summary is the obvious caller.  Pure switch over a compile-time constant:
+ * no lock, no tick, no TRice, no HAL, no RTOS call.  crash.c is NOT covered
+ * by the SHARED_FAULT_SOURCES CMake guard that enforces those bans on
+ * w25q_fault.c, so this comment is the only thing holding the constraint.
+ *
+ * Fallback after the switch, not in a `default:` -- see PackCfg_CondName for
+ * why (-Werror=switch is scoped to this file too).
+ * -------------------------------------------------------------------------- */
+
+const char *Crash_TypeName(uint8_t type)
+{
+    switch ((eCrashType)type) {
+    case crashType_hardFault:     return "HardFault";
+    case crashType_nmi:           return "NMI";
+    case crashType_busFault:      return "BusFault";
+    case crashType_usageFault:    return "UsageFault";
+    case crashType_memManage:     return "MemManage";
+    case crashType_swWatchdog:    return "SwWatchdog";
+    case crashType_stackOverflow: return "StackOverflow";
+    case crashType_assert:        return "Assert";
+    case crashType_last:          break;
+    }
+    return "Unknown";
+}

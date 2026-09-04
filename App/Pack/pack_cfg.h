@@ -218,6 +218,35 @@ int PackCfg_CmdIdFromName(const char *name, ePackCmdId *out);
  */
 const char *PackCfg_CmdName(ePackCmdId cmd);
 
+/**
+ * @brief  The word for an ePackCondition ("absent", "stale", "online").
+ * @param  cond - ePackCondition, e.g. sPackState.cond
+ * @retval the word, or "?" out of range -- NEVER NULL, so a caller may pass
+ *         the result straight into %s.  (PackCfg_TypeName's NULL convention
+ *         is the older one and is deliberately not copied.)
+ * @note   Pure.  Any task.
+ */
+const char *PackCfg_CondName(uint8_t cond);
+
+/**
+ * @brief  The sentence for an ePackAbsentReason -- why a pack is not online.
+ * @param  why - ePackAbsentReason, e.g. sPackState.why
+ * @retval the sentence, or "?" out of range.  Never NULL.
+ * @note   Pure.  Any task.  Safe to emit into JSON unescaped: no entry
+ *         contains a '"' or a '\\' (see the table's comment).
+ */
+const char *PackCfg_WhyName(uint8_t why);
+
+/**
+ * @brief  The word for an ePackSwitch ("?", "open", "closed").
+ * @param  sw - ePackSwitch, e.g. sPackState.chargeSwitch
+ * @retval the word, or "?" out of range.  Never NULL.  "?" is also the
+ *         legitimate answer for packSwitch_unknown -- a type that cannot
+ *         report the switch is not an error.
+ * @note   Pure.  Any task.
+ */
+const char *PackCfg_SwitchName(uint8_t sw);
+
 #ifdef __cplusplus
 }
 #endif

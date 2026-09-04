@@ -969,7 +969,7 @@ void ModbusEngine_LogStatus(void)
             snprintf(buf, sizeof(buf), "%u %s slave=%u cap=%u %lu %s %s x%u",
                      devOrd, dev.topicPrefix, dev.slaveAddr, dev.capId,
                      (unsigned long)MbRecords_BaudFromCode(dev.baudCode),
-                     (dev.portId == mbPort_test) ? "test" : "rs485",
+                     Modbus_PortName(dev.portId),
                      ModbusPort_IsRegistered(dev.portId) ? "up" : "NO-DRIVER",
                      polled);
             TRiceS(" device: %s\n", buf);

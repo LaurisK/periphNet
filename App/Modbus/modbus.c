@@ -1379,6 +1379,25 @@ void Modbus_BusStatsReset(uint8_t portId)
     ModbusPort_ResetBusy(portId);
 }
 
+/* One spelling of the port slot names, for the consumers that display them.
+ * The config compiler and exporter keep their own pair (Shared/Modbus): those
+ * two ARE the persisted format's name<->code table and must not start
+ * following a display accessor's wording.  This one exists so an adapter does
+ * not write `(id == mbPort_test) ? "test" : "rs485"` -- which http_server.c
+ * did twice in one file, and pack_jkbms.c a third time.
+ *
+ * Fallback after the switch, not in a `default:`, so -Werror=switch (scoped
+ * to this file) makes a new port slot without a name a build failure. */
+const char *Modbus_PortName(uint8_t portId)
+{
+    switch ((eModbusPortId)portId) {
+    case mbPort_rs485: return "rs485";
+    case mbPort_test:  return "test";
+    case mbPort_last:  break;
+    }
+    return "?";
+}
+
 int Modbus_ScheduleStats(sModbusScheduleStats *out)
 {
     if (out == NULL) {

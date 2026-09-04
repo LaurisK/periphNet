@@ -684,6 +684,36 @@ add_executable(application.elf
 
 add_dependencies(application.elf trice-insert)
 
+# ------------------------------------------------------------------------------
+# -Werror=switch, SCOPED to the files that carry an enum->string accessor
+#
+# Each of these files answers "what is this enumerator called" with a switch
+# whose fallback sits AFTER the switch rather than in a `default:` -- a
+# `default:` satisfies -Wswitch and so defeats the whole mechanism.  With the
+# error scoped here, adding an enumerator without giving it a name FAILS THE
+# BUILD instead of shipping a "?" that an operator finds in the field, which
+# is precisely how http_server.c's private crash-type table came to report
+# StackOverflow as "Unknown" (docs/task_http_server_restructure.md §7.1).
+#
+# NEVER GLOBAL.  lwIP, FreeRTOS, the HAL, trice and wireguard-lwip share
+# CMAKE_C_FLAGS and are not ours to fix; a global -Werror=switch would fail
+# the build on vendor code.  Measured 2026-09-04: these six files produce
+# zero -Wswitch warnings today, so this costs nothing until it fires.
+#
+# This is a deliberate, documented departure from `C coding standard.md`'s
+# "every switch has a default" -- the standard's intent is that an unhandled
+# case must not pass silently, and a compile-time failure serves that intent
+# better than a runtime placeholder.
+set(ENUM_NAME_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_cfg.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Log/crash.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Modbus/modbus.c
+)
+set_source_files_properties(${ENUM_NAME_SOURCES}
+    TARGET_DIRECTORY application.elf
+    PROPERTIES COMPILE_OPTIONS "-Werror=switch"
+)
+
 target_include_directories(application.elf PRIVATE ${APP_INCLUDES})
 
 # ------------------------------------------------------------------------------

@@ -528,6 +528,91 @@ static void test_name_tables_round_trip(void)
 }
 
 /* ==========================================================================
+ * Runtime enum names (docs/task_http_server_restructure.md §5.2)
+ *
+ * These live in pack_cfg.c for exactly one reason: this file links pack_cfg.c
+ * and NOT pack.c, so this is the only placement that lets a host test walk
+ * every enumerator.  -Werror=switch already fails the BUILD when an
+ * enumerator is added without a name; this catches the remaining case a
+ * switch cannot -- a name that is present but empty, NULL, or still the "?"
+ * placeholder.
+ * ========================================================================== */
+
+/** @param qmarkOk  the ONE enumerator legitimately spelled "?", or -1 for
+ *                   none.  Passed per enum rather than assumed, so the
+ *                   exemption cannot silently cover another enum's value 0. */
+static void check_every_name(const char *(*name)(uint8_t), unsigned last,
+                             int qmarkOk, const char *what)
+{
+    unsigned v;
+
+    for (v = 0u; v < last; v++) {
+        const char *s = name((uint8_t)v);
+
+        TEST_ASSERT(s != NULL);
+        if (s == NULL) {
+            printf("  %s[%u] is NULL\n", what, v);
+            continue;
+        }
+        TEST_ASSERT(s[0] != '\0');
+        /* "?" is the out-of-range answer, so a real enumerator wearing it
+         * means the accessor forgot a case -- unless it is the one value
+         * that means "cannot be reported". */
+        TEST_ASSERT((strcmp(s, "?") != 0) || ((int)v == qmarkOk));
+    }
+    /* The sentinel itself, and one value well past it, are out of range. */
+    TEST_ASSERT(strcmp(name((uint8_t)last), "?") == 0);
+    TEST_ASSERT(strcmp(name(0xFFu), "?") == 0);
+}
+
+static void test_runtime_enum_names(void)
+{
+    check_every_name(PackCfg_CondName, (unsigned)packCond_last, -1, "cond");
+    check_every_name(PackCfg_WhyName, (unsigned)packWhy_last, -1, "why");
+    check_every_name(PackCfg_SwitchName, (unsigned)packSwitch_last,
+                     (int)packSwitch_unknown, "switch");
+
+    /* The words the CLI and /api/pack/status both print: one spelling, so a
+     * change here is a change in both by construction. */
+    TEST_ASSERT(strcmp(PackCfg_CondName(packCond_online), "online") == 0);
+    TEST_ASSERT(strcmp(PackCfg_CondName(packCond_stale), "stale") == 0);
+    TEST_ASSERT(strcmp(PackCfg_CondName(packCond_absent), "absent") == 0);
+
+    /* packWhy_none is "online", NOT the CLI's old "-": a dash is column
+     * filler and means nothing in the JSON this now feeds. */
+    TEST_ASSERT(strcmp(PackCfg_WhyName(packWhy_none), "online") == 0);
+
+    /* packSwitch_unknown deliberately shares "?" with out-of-range: a type
+     * that cannot report the switch is not an error. */
+    TEST_ASSERT(strcmp(PackCfg_SwitchName(packSwitch_unknown), "?") == 0);
+    TEST_ASSERT(strcmp(PackCfg_SwitchName(packSwitch_closed), "closed") == 0);
+}
+
+/** These strings are interpolated into /api/pack/status unescaped, which is
+ *  only safe while none of them contains a '"' or a '\\'.  Nothing else would
+ *  catch a later wording like `bind key "x" matched nothing` -- it would
+ *  produce malformed JSON on a live endpoint. */
+static void test_names_need_no_json_escaping(void)
+{
+    unsigned v;
+
+    for (v = 0u; v < (unsigned)packWhy_last; v++) {
+        const char *s = PackCfg_WhyName((uint8_t)v);
+
+        TEST_ASSERT(strchr(s, '"') == NULL);
+        TEST_ASSERT(strchr(s, '\\') == NULL);
+    }
+    for (v = 0u; v < (unsigned)packCond_last; v++) {
+        TEST_ASSERT(strchr(PackCfg_CondName((uint8_t)v), '"') == NULL);
+        TEST_ASSERT(strchr(PackCfg_CondName((uint8_t)v), '\\') == NULL);
+    }
+    for (v = 0u; v < (unsigned)packSwitch_last; v++) {
+        TEST_ASSERT(strchr(PackCfg_SwitchName((uint8_t)v), '"') == NULL);
+        TEST_ASSERT(strchr(PackCfg_SwitchName((uint8_t)v), '\\') == NULL);
+    }
+}
+
+/* ==========================================================================
  * Regression tests for the review findings (2026-08-26).
  *
  * Each of these was ACCEPTED by the parser before the fix, and the first two
@@ -647,6 +732,8 @@ int main(void)
     RUN_TEST(test_empty_pack_list_is_valid);
 
     RUN_TEST(test_name_tables_round_trip);
+    RUN_TEST(test_runtime_enum_names);
+    RUN_TEST(test_names_need_no_json_escaping);
 
     /* review regressions */
     RUN_TEST(test_rejects_the_original_overflow_input);

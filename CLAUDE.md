@@ -810,7 +810,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/plans` | POST | Create a plan (201 + `{"id":N}`); body is one element of the config's `plans[]`, so one schema, one validator |
 | `/api/modbus/plans/N` | PUT | Modify a plan — **409 if a subscription named it** (`MB_PLAN_ALL` subscribers do not lock a plan) |
 | `/api/modbus/plans/N` | DELETE | Free a slot; 409 likewise. Deleting moves no other plan — that is what makes a slot a slot |
-| `/api/pack/status` | GET | Every battery pack: condition + `why`, caps/cmds/flags, V/A, SOC/SOH with **confidence**, amp-hours (remaining / capacity / nameplate), per-direction switch state, current **and voltage** limits, alarms, and a **per-group age array** — a pack is not one clock (on a JK the cell group runs 4–5 s behind). Also **how it is anchoring**: `dcRes_uOhm`/`dcResSteps` (the fitted power-path resistance) and `anchorSamples`/`anchorIrSamples`. A pack whose baseline load never falls below C/50 cannot anchor from rest and its SOC free-runs — `anchorSamples` stuck at 0 is that, and it is why zaliakalnis read 82 % with its cells at 3235 mV |
+| `/api/pack/status` | GET | Every battery pack: condition + `why` **and `whyText`** — the numeric reason AND the sentence for it (*"bind key matched no device, or more than one"*), which used to exist only on the CLI and so needed physical access on a tunnel-only board. Plus caps/cmds/flags, V/A, SOC/SOH with **confidence**, amp-hours (remaining / capacity / nameplate), per-direction switch state (`chargeSwitch` + `chargeSwitchText`), current **and voltage** limits, alarms, and a **per-group age array** — a pack is not one clock (on a JK the cell group runs 4–5 s behind). Also **how it is anchoring**: `dcRes_uOhm`/`dcResSteps` (the fitted power-path resistance) and `anchorSamples`/`anchorIrSamples`. A pack whose baseline load never falls below C/50 cannot anchor from rest and its SOC free-runs — `anchorSamples` stuck at 0 is that, and it is why zaliakalnis read 82 % with its cells at 3235 mV |
 | `/api/pack/cells` | GET | `?idx=N` — per-cell mV and balance-lead mΩ, plus balancer state. **404 when the type reports no cell detail** (a Pylontech-speaking pack never will) — an absent capability, not an error |
 | `/api/pack/config` | GET | The active configuration, re-serialised (data-faithful, not byte-identical) |
 | `/api/pack/config` | POST | Upload + apply a pack configuration. 422 names the offending **pack index and key**; 409 while another parse holds the shared scratch |
@@ -983,6 +983,37 @@ status, `eModbusDecodeType` in the Modbus LUT records, and `eCrashType` in the
 crash log — so a `_undefined = 0` prepended to any of them would silently
 reinterpret flash written by an older image. That is why none of them has one,
 despite the standard recommending it: appending is safe, prepending is not.
+
+**An enum's NAME belongs to the module that owns the enum, never to an
+adapter.** `http_server.c` and `cmd_parser.c` had each grown their own
+spelling of `ePackCondition`, and the HTTP side emitted `ePackAbsentReason`
+as a bare integer while the CLI rendered it as a sentence — so the most
+diagnostic field the pack module has was reachable only from a console
+needing physical access, which on a tunnel-only board is backwards. The rule
+now has fourteen instances: `Pack_CondName` / `Pack_WhyName` /
+`Pack_SwitchName` (→ `pack_cfg.c`, which is what `tests/test_pack_cfg` links),
+`Crash_TypeName`, `Modbus_PortName`, `SysMon_StateName`, `CanBridge_ModeName`,
+`CanLog_ModeName`, `CanLog_StateName`, `NvDbCfg_ModeName`, `NvDb_UserName`,
+`Pack_TypeName`, `PackCfg_ChemName`, `PackCfg_CmdName`. Adding one is a day's
+work and it is where the fix goes.
+
+**Write those accessors as a `switch` whose fallback sits AFTER the switch,
+never in a `default:`** — a `default:` satisfies `-Wswitch` and defeats the
+whole mechanism. `-Werror=switch` is then **scoped per-source** in
+`CMakeLists.txt` (`ENUM_NAME_SOURCES`: `pack_cfg.c`, `crash.c`, `modbus.c`;
+`tests/CMakeLists.txt` scopes it onto its copy of `pack_cfg.c` too), so
+**adding an enumerator without a name fails the build** instead of shipping a
+`"?"` for someone to find in the field — which is exactly how the old private
+`crash_type_names[]` came to report a StackOverflow as `Unknown`. **Never
+global**: lwIP, FreeRTOS, the HAL, trice and wireguard-lwip share
+`CMAKE_C_FLAGS`. This is a deliberate departure from `C coding standard.md`'s
+"every switch has a default": the standard's intent is that an unhandled case
+must not pass silently, and a compile-time failure serves that intent better
+than a runtime placeholder. Range-check and return `"?"`, never `NULL` — the
+older `PackCfg_TypeName` NULL convention is not to be copied, since both
+adapters pass its result straight into `%s`. Names that reach JSON must
+contain no `"` or `\`, or be escaped where they are emitted; the host test
+asserts it. [docs/task_http_server_restructure.md](docs/task_http_server_restructure.md) §8
 
 ### Trice Usage
 

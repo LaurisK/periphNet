@@ -864,3 +864,68 @@ const char *PackCfg_CmdName(ePackCmdId cmd)
     }
     return s_cmdNames[cmd];
 }
+
+/* --- runtime enum names -------------------------------------------------
+ *
+ * ePackCondition, ePackAbsentReason and ePackSwitch are RUNTIME state, not
+ * configuration -- none of them is persisted or parsed back, so unlike the
+ * three tables above these have no *FromName() half and their wording is free
+ * to improve.  They live here anyway for one reason: this file is linked into
+ * tests/test_pack_cfg while pack.c is not, so this is the only placement that
+ * lets a host test assert every enumerator has a name.  pack.c re-exports
+ * them as Pack_*Name() so a consumer never includes the config parser to ask
+ * what a condition is called.
+ *
+ * WRITTEN AS A SWITCH WITH THE FALLBACK *AFTER* IT, not in a `default:`.
+ * `C coding standard.md` asks for a default in every switch; its intent is
+ * that an unhandled case must not pass silently, and -Werror=switch (scoped
+ * to this file in CMakeLists.txt) serves that intent better -- it makes a new
+ * enumerator without a name a BUILD FAILURE rather than a "?" discovered in
+ * the field.  A `default:` would defeat -Wswitch entirely, which is exactly
+ * why NvDbCfg_ModeName is unprotected today.
+ *
+ * THESE STRINGS ARE EMITTED INTO JSON by /api/pack/status.  None contains a
+ * '"' or a '\', so none needs escaping at the call site.  A future wording
+ * that quotes an operator-supplied token -- `bind key "x" matched nothing` --
+ * would produce malformed JSON on a live endpoint with no test to catch it;
+ * keep them plain, or escape them where they are emitted.
+ */
+
+const char *PackCfg_CondName(uint8_t cond)
+{
+    switch ((ePackCondition)cond) {
+    case packCond_absent: return "absent";
+    case packCond_stale:  return "stale";
+    case packCond_online: return "online";
+    case packCond_last:   break;
+    }
+    return "?";
+}
+
+const char *PackCfg_WhyName(uint8_t why)
+{
+    switch ((ePackAbsentReason)why) {
+    case packWhy_none:            return "online";
+    case packWhy_noType:          return "no such type in this firmware";
+    case packWhy_typeUnavailable: return "type present but not usable in this build";
+    case packWhy_noBinding:       return "bind key matched no device, or more than one";
+    case packWhy_notPolled:       return "resolved, but no live plan reads it";
+    case packWhy_noReply:         return "never answered";
+    case packWhy_last:            break;
+    }
+    return "?";
+}
+
+const char *PackCfg_SwitchName(uint8_t sw)
+{
+    switch ((ePackSwitch)sw) {
+    /* "?" and not "unknown": the type cannot report it, which is the same
+     * answer an out-of-range value gets, and the CLI has spelled it this way
+     * since before these were public. */
+    case packSwitch_unknown: return "?";
+    case packSwitch_open:    return "open";
+    case packSwitch_closed:  return "closed";
+    case packSwitch_last:    break;
+    }
+    return "?";
+}

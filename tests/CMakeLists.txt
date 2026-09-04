@@ -235,6 +235,14 @@ target_include_directories(test_pack_cfg PRIVATE
     ${UNIT_INCLUDES}
     ${PROJECT_ROOT}
 )
+# The same -Werror=switch the firmware build scopes to pack_cfg.c, so a new
+# ePackCondition / ePackAbsentReason / ePackSwitch enumerator without a name
+# fails HERE too -- host tests are what a developer runs first, and finding it
+# there beats finding it after a cross-compile.
+set_source_files_properties(${PROJECT_ROOT}/App/Pack/pack_cfg.c
+    TARGET_DIRECTORY test_pack_cfg
+    PROPERTIES COMPILE_OPTIONS "-Werror=switch"
+)
 add_test(NAME pack_cfg COMMAND test_pack_cfg)
 
 # ==============================================================================

@@ -238,7 +238,14 @@ static const char index_html[] =
      * cannot tell them apart will trust the wrong one. */
     "var est=(p.flags&1)?' <span class=dim>(estimated)</span>':' <span class=dim>(BMS)</span>';"
     "var cls=p.cond=='online'?'':' class=warn';"
-    "h.innerHTML='<b'+cls+'>'+p.cond+'</b> &middot; '+p.name+' &middot; '+"
+    /* WHY, not just THAT.  "absent" alone sends an operator to the site; the
+     * reason distinguishes a config error from a silent battery, and until
+     * whyText existed it was reachable only from a console needing physical
+     * access.  The wording comes from a fixed table in pack_cfg.c -- no
+     * operator input reaches it, so innerHTML is safe here. */
+    "var why=(p.cond=='online'||!p.whyText)?'':"
+    "' <span class=dim>('+p.whyText+')</span>';"
+    "h.innerHTML='<b'+cls+'>'+p.cond+'</b>'+why+' &middot; '+p.name+' &middot; '+"
     "(p.voltage_mV/1000).toFixed(3)+' V &middot; '+(p.current_mA/1000).toFixed(2)+' A &middot; '+"
     "((p.voltage_mV*p.current_mA)/1e6).toFixed(0)+' W<br>'+"
     "'SOC '+(p.soc_pm/10).toFixed(1)+'%'+est+' conf '+(p.socConf_pm/10).toFixed(0)+'%'+"
@@ -1270,18 +1277,6 @@ static void handle_fwu_verify(struct netconn *conn)
  * Crash log endpoints
  * -------------------------------------------------------------------------- */
 
-/* All EIGHT of eCrashType.  It used to stop at SwWatchdog with a hard-coded
- * `< 6` bound, so a StackOverflow or an Assert report — the two the enum
- * gained later — read back as "Unknown", which is indistinguishable from a
- * corrupt record exactly when the type is the thing you need. */
-static const char * const crash_type_names[] = {
-    "HardFault", "NMI", "BusFault", "UsageFault",
-    "MemManage", "SwWatchdog", "StackOverflow", "Assert"
-};
-static const char * const task_state_names[] = {
-    "Run", "Rdy", "Blk", "Sus", "Del"
-};
-
 /* The crash report outgrew resp_buf once CRASH_LOG_MAX_TASKS went to 16 (~1.6 kB
  * of JSON), so it is built in a transient heap block instead of enlarging a CCM
  * buffer -- the same trade /api/system/status makes, and CCM is the scarce
@@ -1319,9 +1314,11 @@ static void handle_crash_get(struct netconn *conn)
         return;
     }
 
-    const char *type_str =
-        (log->crash_type < (sizeof(crash_type_names) / sizeof(crash_type_names[0])))
-            ? crash_type_names[log->crash_type] : "Unknown";
+    /* The names belong to the enum, not to this adapter: Crash_TypeName()
+     * is range-checked against crashType_last, which the private table here
+     * was not -- its hand-maintained bound had already fallen two enumerators
+     * behind and reported StackOverflow/Assert as "Unknown". */
+    const char *type_str = Crash_TypeName(log->crash_type);
 
     pos = Json_Cat(js, CRASH_JSON_CAP, pos,
         "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
@@ -1345,8 +1342,11 @@ static void handle_crash_get(struct netconn *conn)
 
     pos = Json_Cat(js, CRASH_JSON_CAP, pos, "],\"tasks\":[");
     for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
-        const char *st = (log->tasks[i].state < 5)
-            ? task_state_names[log->tasks[i].state] : "???";
+        /* The same accessor the live task view uses (SysMon_StateName).  The
+         * private five-entry copy this replaced could never disagree with it
+         * -- uxTaskGetSystemState() never stamps eInvalid, so its `< 5` bound
+         * was a dead branch -- so this is maintenance, not a bug fix. */
+        const char *st = SysMon_StateName(log->tasks[i].state);
         pos = Json_Cat(js, CRASH_JSON_CAP, pos,
             "%s{\"name\":\"%s\",\"state\":\"%s\","
             "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
@@ -1574,7 +1574,7 @@ static void handle_modbus_bus(struct netconn *conn)
                      "\"duty_permille\":%u,\"win_permille\":%u,"
                      "\"window_sec\":%u,\"last_ms\":%u,\"max_ms\":%u}",
                      (id == 0u) ? "" : ",",
-                     (id == (uint8_t)mbPort_test) ? "test" : "rs485",
+                     Modbus_PortName(id),
                      st.registered ? "true" : "false",
                      (unsigned long)st.txns,
                      (unsigned long)st.busy_ms,
@@ -2026,7 +2026,7 @@ static void handle_modbus_cfg_status(struct netconn *conn)
                 "\"baud\":%lu,\"plans\":%u,\"polled\":%s}",
                 i ? "," : "", devs[i].devOrd, prefixEsc,
                 devs[i].slaveAddr, devs[i].capId,
-                (devs[i].portId == mbPort_test) ? "test" : "rs485",
+                Modbus_PortName(devs[i].portId),
                 devs[i].portUp ? "true" : "false",
                 (unsigned long)devs[i].baud, devs[i].coveringPlans,
                 devs[i].polled ? "true" : "false");
@@ -2531,7 +2531,7 @@ static void handle_pack_status(struct netconn *conn)
 
         pos = Json_Cat(js, bodyCap, pos,
             "%s{\"idx\":%u,\"name\":\"%s\",\"type\":\"%s\","
-            "\"cond\":\"%s\",\"why\":%u,"
+            "\"cond\":\"%s\",\"why\":%u,\"whyText\":\"%s\","
             "\"caps\":%u,\"cmds\":%u,\"flags\":%u,"
             "\"voltage_mV\":%u,\"current_mA\":%d,"
             "\"soc_pm\":%u,\"soh_pm\":%u,"
@@ -2542,6 +2542,7 @@ static void handle_pack_status(struct netconn *conn)
             "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
             "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
             "\"chargeSwitch\":%u,\"dischargeSwitch\":%u,"
+            "\"chargeSwitchText\":\"%s\",\"dischargeSwitchText\":\"%s\","
             "\"tempMin_dC\":%d,\"tempMax_dC\":%d,"
             "\"cellMin_mV\":%u,\"cellMax_mV\":%u,"
             "\"cellMinIdx\":%u,\"cellMaxIdx\":%u,"
@@ -2549,9 +2550,14 @@ static void handle_pack_status(struct netconn *conn)
             "\"age_ms\":[",
             firstPack ? "" : ",",
             (unsigned)st.idx, nameEsc, Pack_TypeName(st.typeId),
-            (st.cond == (uint8_t)packCond_online) ? "online" :
-            (st.cond == (uint8_t)packCond_stale)  ? "stale" : "absent",
-            (unsigned)st.why,
+            Pack_CondName(st.cond),
+            /* The numeric `why` stays for compatibility; `whyText` is the
+             * field that makes a pack diagnosable over the tunnel.  Until
+             * now the explanation existed only on the CLI, which needs
+             * physical access -- backwards on a tunnel-only board.  Emitted
+             * unescaped: Pack_WhyName's wording contains no '"' or '\\'
+             * (pack_cfg.c states that as a constraint on the table). */
+            (unsigned)st.why, Pack_WhyName(st.why),
             (unsigned)st.caps, (unsigned)st.cmds, (unsigned)st.flags,
             (unsigned)st.voltage_mV, (int)st.current_mA,
             (unsigned)st.soc_pm, (unsigned)st.soh_pm,
@@ -2567,6 +2573,8 @@ static void handle_pack_status(struct netconn *conn)
             (unsigned)st.chargeVoltLimit_mV,
             (unsigned)st.dischargeVoltLimit_mV,
             (unsigned)st.chargeSwitch, (unsigned)st.dischargeSwitch,
+            Pack_SwitchName(st.chargeSwitch),
+            Pack_SwitchName(st.dischargeSwitch),
             (int)st.tempMin_dC, (int)st.tempMax_dC,
             (unsigned)st.cellMin_mV, (unsigned)st.cellMax_mV,
             (unsigned)st.cellMinIdx, (unsigned)st.cellMaxIdx,

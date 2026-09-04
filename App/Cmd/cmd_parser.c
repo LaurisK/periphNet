@@ -1080,39 +1080,6 @@ static int pack_cli_sink(void *ctx, const char *data, uint32_t len)
     return (int)len;
 }
 
-static const char *pack_cond_name(uint8_t c)
-{
-    switch ((ePackCondition)c) {
-    case packCond_absent: return "absent";
-    case packCond_stale:  return "stale";
-    case packCond_online: return "online";
-    default:              return "?";
-    }
-}
-
-static const char *pack_why_name(uint8_t w)
-{
-    switch ((ePackAbsentReason)w) {
-    case packWhy_none:            return "-";
-    case packWhy_noType:          return "no such type in this firmware";
-    case packWhy_typeUnavailable: return "type present, transport missing";
-    case packWhy_noBinding:       return "bind token did not resolve";
-    case packWhy_notPolled:       return "resolved, but no live plan reads it";
-    case packWhy_noReply:         return "never answered";
-    default:                      return "?";
-    }
-}
-
-static const char *pack_sw_name(uint8_t sw)
-{
-    switch ((ePackSwitch)sw) {
-    case packSwitch_unknown: return "?";
-    case packSwitch_open:    return "open";
-    case packSwitch_closed:  return "closed";
-    default:                 return "?";
-    }
-}
-
 /** One line per pack: what an operator wants first. */
 static void pack_print_line(uint8_t i)
 {
@@ -1127,7 +1094,7 @@ static void pack_print_line(uint8_t i)
           (unsigned)(st.voltage_mV / 1000u), (unsigned)(st.voltage_mV % 1000u),
           (int)st.current_mA,
           (unsigned)(st.soc_pm / 10u), (unsigned)(st.soc_pm % 10u));
-    TRiceS("%s\n", pack_cond_name(st.cond));
+    TRiceS("%s\n", Pack_CondName(st.cond));
 }
 
 static void cmd_pack(const char *args)
@@ -1186,8 +1153,8 @@ static void cmd_pack(const char *args)
         }
         TRiceS("pack '%s'", st.name);
         TRiceS(" type=%s", Pack_TypeName(st.typeId));
-        TRiceS(" cond=%s", pack_cond_name(st.cond));
-        TRiceS(" why=%s\n", pack_why_name(st.why));
+        TRiceS(" cond=%s", Pack_CondName(st.cond));
+        TRiceS(" why=%s\n", Pack_WhyName(st.why));
         /* socDrift is the estimator's disagreement with its own coulomb
          * count at the last anchor -- the bound on how wrong SOC can be. */
         TRice("  soc drift=%d per-mille  estimated=%u\n",
@@ -1208,8 +1175,8 @@ static void cmd_pack(const char *args)
               (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,
               (unsigned)st.chargeVoltLimit_mV,
               (unsigned)st.dischargeVoltLimit_mV);
-        TRiceS("  charge switch=%s", pack_sw_name(st.chargeSwitch));
-        TRiceS(" discharge switch=%s\n", pack_sw_name(st.dischargeSwitch));
+        TRiceS("  charge switch=%s", Pack_SwitchName(st.chargeSwitch));
+        TRiceS(" discharge switch=%s\n", Pack_SwitchName(st.dischargeSwitch));
         TRice("  temp %d..%d dC  cells %u..%u mV (idx %u/%u)\n",
               (int)st.tempMin_dC, (int)st.tempMax_dC,
               (unsigned)st.cellMin_mV, (unsigned)st.cellMax_mV,

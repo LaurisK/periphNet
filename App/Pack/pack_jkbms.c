@@ -279,9 +279,12 @@ static int resolve_dev(const char *bindKey, uint8_t *devOrd,
 
     n = Modbus_DeviceList(dev, MB_MAX_DEVICES);
     for (i = 0; i < n; i++) {
-        const char *pname = (dev[i].portId == (uint8_t)mbPort_rs485) ? "rs485"
-                          : (dev[i].portId == (uint8_t)mbPort_test)  ? "test"
-                          : "";
+        /* Modbus_PortName answers "?" out of range, and a bind token is only
+         * length/charset-validated -- "?:2" is an acceptable token.  So keep
+         * the never-match sentinel explicit rather than lean on portId being
+         * in range by construction. */
+        const char *pname = (dev[i].portId < (uint8_t)mbPort_last)
+                          ? Modbus_PortName(dev[i].portId) : "";
 
         if ((dev[i].slaveAddr == (uint8_t)slave) &&
             (strcmp(pname, port) == 0)) {

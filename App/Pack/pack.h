@@ -952,6 +952,35 @@ int Pack_CmdIdFromName(const char *name, ePackCmdId *out);
 const char *Pack_CmdName(ePackCmdId cmd);
 
 /**
+ * @brief  The word for an ePackCondition ("absent", "stale", "online").
+ * @param  cond - ePackCondition, e.g. sPackState.cond
+ * @retval the word, or "?" out of range.  Never NULL.
+ * @note   Pure.  Any task.  One spelling for every adapter -- the CLI and
+ *         /api/pack/status report the same word for the same pack by
+ *         construction, not by review.
+ */
+const char *Pack_CondName(uint8_t cond);
+
+/**
+ * @brief  Why a pack is not online, as a sentence an operator can act on.
+ * @param  why - ePackAbsentReason, e.g. sPackState.why
+ * @retval the sentence, or "?" out of range.  Never NULL.  packWhy_none
+ *         answers "online".
+ * @note   Pure.  Any task.  Contains no '"' or '\\', so it may be emitted
+ *         into JSON unescaped.
+ */
+const char *Pack_WhyName(uint8_t why);
+
+/**
+ * @brief  The word for an ePackSwitch ("?", "open", "closed").
+ * @param  sw - ePackSwitch, e.g. sPackState.chargeSwitch
+ * @retval the word, or "?" out of range.  Never NULL; "?" is also the honest
+ *         answer for a type that cannot report the switch.
+ * @note   Pure.  Any task.
+ */
+const char *Pack_SwitchName(uint8_t sw);
+
+/**
  * @brief  Log one line per instance plus the counters — `pack status` on the
  *         CLI.
  * @note   Any task; uses Trice, so NEVER from an lwIP callback.  May block on

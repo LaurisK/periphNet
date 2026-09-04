@@ -646,6 +646,16 @@ int  Modbus_BusStats(uint8_t portId, sModbusBusStats *out);
 /** @brief  Zero one port's counters and restart its window. */
 void Modbus_BusStatsReset(uint8_t portId);
 
+/**
+ * @brief  The name of a port slot ("rs485", "test").
+ * @param  portId - eModbusPortId
+ * @retval the name, or "?" out of range.  Never NULL.
+ * @note   Pure.  Any task.  The same word the config JSON uses, and the only
+ *         spelling of it outside the config compiler/exporter -- four call
+ *         sites, two of them in one file, each wrote their own ternary.
+ */
+const char *Modbus_PortName(uint8_t portId);
+
 /** @brief  Trice dump of engine + config + per-device state (`modbus status`). */
 void Modbus_LogStatus(void);
 

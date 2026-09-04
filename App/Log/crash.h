@@ -122,4 +122,14 @@ bool Crash_ReadFromFlash(sCrashLog *log);
  */
 void Crash_ClearFlash(void);
 
+/**
+ * @brief  The word for an eCrashType ("HardFault", "Assert", ...).
+ * @param  type - eCrashType, e.g. sCrashLog.crash_type
+ * @retval the word, or "Unknown" out of range.  Never NULL.
+ * @note   Pure table lookup.  FAULT CONTEXT SAFE: no lock, no tick, no Trice,
+ *         no RTOS call -- keep it that way, a crash-time summary is the
+ *         obvious next caller.
+ */
+const char *Crash_TypeName(uint8_t type);
+
 #endif /* APP_LOG_CRASH_H_ */

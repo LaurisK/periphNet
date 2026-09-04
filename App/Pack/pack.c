@@ -1419,6 +1419,27 @@ const char *Pack_CmdName(ePackCmdId cmd)
     return PackCfg_CmdName(cmd);
 }
 
+/* The condition, the reason and the switch words.  Thin re-exports of the
+ * pack_cfg.c tables for the same reason Pack_TypeName is one: an adapter
+ * asking what a condition is called has no business including the config
+ * parser's header.  This is what stops http_server.c and cmd_parser.c from
+ * each spelling ePackCondition their own way, which is what they did. */
+
+const char *Pack_CondName(uint8_t cond)
+{
+    return PackCfg_CondName(cond);
+}
+
+const char *Pack_WhyName(uint8_t why)
+{
+    return PackCfg_WhyName(why);
+}
+
+const char *Pack_SwitchName(uint8_t sw)
+{
+    return PackCfg_SwitchName(sw);
+}
+
 int Pack_StatCount(uint8_t idx)
 {
     if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u)) {
