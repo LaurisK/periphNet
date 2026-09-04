@@ -148,7 +148,9 @@ not DMA — DMA1 S3/S4 belong to the flash now):
 ```
 
 **Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
-gate, boot_status flag lifecycle, the Modbus config machinery — record
+gate, boot_status flag lifecycle, the JSON module — the writer against a
+guard-banded buffer, the reader's escape decode and reject matrix, and the
+round trip that only closes if both halves agree — the Modbus config machinery — record
 store/selector, JSON compiler accept+reject matrix, export round-trip,
 decode/format vectors — and all of `nvDb`: bounds at every edge, the erased
 fast path asserted against an erase counter, delete/collector semantics,
@@ -417,6 +419,17 @@ PeriphNet/
                                   #   (depends only on HAL + libc, no RTOS/lwIP)
     Crypto/                       # sha256, hmac_sha256, aes128, aes_gcm
                                   #   (NIST-vector-tested, see tests/)
+    Json/                         # THE JSON module: json.h (the only consumer
+                                  #   header), json_write.c (Json_Cat -- the
+                                  #   CLAMPED append; the `n += snprintf(&buf[n],
+                                  #   CAP - n, ...)` idiom it replaced underflows
+                                  #   CAP - n into a ~4 GB size limit past the
+                                  #   end of the buffer -- plus Json_Escape),
+                                  #   json_read.c (ONE streaming tokenizer over
+                                  #   a byte source, replacing three private
+                                  #   ones; it is the only one that ever handled
+                                  #   backslash escapes). APPLICATION-ONLY
+                                  #   Shared code (SHARED_JSON_SOURCES)
     Fwu/                          # bl_app_contract.h, dfu_types.h,
                                   #   version.c/h, boot_status.c/h, image_mgmt.c/h
                                   #   boot_status_medium.h — boot_status.c is
@@ -980,6 +993,21 @@ what the switch is for during bring-up.
 - **OTA accepts only .pnfw blobs** — plaintext binaries are rejected at upload (manifest check); plaintext exists only in `build/` and internal flash
 - **Confirm or roll back** — non-local builds must be confirmed via `POST /api/fwu/confirm` within 3 boots of an install, otherwise the BL restores the golden image
 - **No raw lwIP callbacks for app code** — the HTTP server uses the netconn API in its own task; if raw callbacks are ever needed again, remember the recv-callback contract (return ERR_OK after consuming a pbuf, or tcp_abort + ERR_ABRT — anything else makes lwIP re-deliver a freed pbuf)
+- **JSON goes through `Shared/Json` and nowhere else.** `Json_Cat` saturates
+  at the cap and `pos == cap` is the "did not fit" signal, which is what lets
+  a loop emit whole objects or none — the roll-back idiom in `http_server.c`,
+  which replaced hand-maintained byte reserves that were smaller than the
+  object they reserved for (`/api/pack/status`: 512 reserved, 773 needed).
+  **Never reintroduce `n += snprintf(...)`**; a truncated field turns the next
+  append into an overflowing write. Operator-supplied strings — pack and point
+  names, topic prefixes, an error `field` echoed out of an uploaded document —
+  are escaped with `Json_Escape` on the way out and decoded on the way in, so
+  a name containing `"` or `\` round-trips. `sanitize_filename()` in
+  `http_server.c` is a deliberate exception and stays as it is. Like
+  `Shared/Modbus` and `Shared/NvDb` this is application-only Shared code
+  (`SHARED_JSON_SOURCES`), and CMake fails the build if a bootloader source
+  includes a `json*` header. Details, measurements and the escape-vs-reject
+  decision: [docs/task_json_module.md](docs/task_json_module.md) §7
 - **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
 - **`Shared/NvDb/` is application-only Shared code too** (`SHARED_NVDB_SOURCES`), and CMake **fails the build if any bootloader source includes an `nvdb*` header**. The BL has no knowledge of `nvDb` by design — it learns where the firmware blobs are from the FWU module, which is what leaves the directory format free to evolve without a bootloader in lockstep
 - **`nvDb` is the only authority over the medium, and CMake enforces that too** — no `W25Q128_*` call and no `EXT_FLASH_*_ADDR` anywhere in `App/` or `Shared/` outside the driver, `Shared/NvDb/`, and the three exempt files listed in the External Flash section

@@ -15,6 +15,7 @@
 
 #include "App/Http/http_server.h"
 #include "App/Img/image_store.h"
+#include "json.h"
 #include "nvdb.h"
 #include "nvdb_config.h"
 #include "nvdb_layout.h"
@@ -68,6 +69,25 @@ static void wg_status_json(char *buf, size_t sz);
 /* Single-task server: static buffers are safe and cheap */
 static char req_buf[REQ_BUF_SIZE] CCMRAM_BSS;
 static char resp_buf[1280] CCMRAM_BSS;
+
+/* Body cap for the handlers that build resp_buf incrementally: appends stop
+ * here so the closing fragment, which is appended against the full size,
+ * always fits.  Truncated content is acceptable; unparseable content is not.
+ * The reserve covers the longest tail any of them appends -- the Trice
+ * destination replies' ",\"port\":65535}" at 14 bytes, not just "]}". */
+#define RESP_BODY_CAP       (sizeof(resp_buf) - 24u)
+
+/* Escaped worst case is six bytes out per byte in (\u00XX).  These names come
+ * from an uploaded config and are re-emitted on every status response, so
+ * they are escaped rather than trusted (docs/task_json_module.md §1.3). */
+#define MB_POINT_NAME_ESC_LEN   (((MB_POINT_NAME_LEN - 1u) * 6u) + 1u)
+#define MB_PREFIX_ESC_LEN       (((MB_NAME_LEN - 1u) * 6u) + 1u)
+#define MB_CFG_ERR_ESC_LEN      ((sizeof(((sModbusCompileResult *)0)->field) - 1u) * 6u + 1u)
+
+/* One size for every short, document-derived key or name echoed back in an
+ * error.  The longest of them is nvDb's 48-byte field; six bytes out per
+ * byte in is the \u00XX worst case. */
+#define ESC_FIELD_LEN           (((48u - 1u) * 6u) + 1u)
 
 static const char index_html[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
@@ -939,9 +959,14 @@ static void handle_nvdb_layout_post(struct netconn *conn, sConnStream *s)
     body[got] = '\0';
 
     if (NvDbCfg_Parse(body, got, &cfg, &err) != 0) {
+        char fieldEsc[ESC_FIELD_LEN];
+
+        /* `field` is a key copied out of the uploaded document; `reason` is
+         * always one of this code's own literals. */
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), err.field);
         snprintf(resp_buf, sizeof(resp_buf),
                  "{\"error\":\"%s\",\"field\":\"%s\",\"offset\":%u}",
-                 err.reason, err.field, (unsigned)err.offset_bytes);
+                 err.reason, fieldEsc, (unsigned)err.offset_bytes);
         send_json(conn, "422 Unprocessable Entity", resp_buf);
         return;
     }
@@ -961,14 +986,20 @@ static void handle_nvdb_layout_post(struct netconn *conn, sConnStream *s)
         return;
     }
 
-    TRiceS("nvDb: layout '%s' taken aboard, applies at next boot\n", cfg.name);
-    snprintf(resp_buf, sizeof(resp_buf),
-             "{\"status\":\"onboard\",\"name\":\"%s\",\"version\":%u,"
-             "\"operation\":\"%s\","
-             "\"note\":\"applied at the next boot; check "
-             "lastApplyResult afterwards\"}",
-             cfg.name, (unsigned)cfg.version,
-             NvDbCfg_ModeName(cfg.operation));
+    {
+        char nameEsc[ESC_FIELD_LEN];
+
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), cfg.name);
+        TRiceS("nvDb: layout '%s' taken aboard, applies at next boot\n",
+               cfg.name);
+        snprintf(resp_buf, sizeof(resp_buf),
+                 "{\"status\":\"onboard\",\"name\":\"%s\",\"version\":%u,"
+                 "\"operation\":\"%s\","
+                 "\"note\":\"applied at the next boot; check "
+                 "lastApplyResult afterwards\"}",
+                 nameEsc, (unsigned)cfg.version,
+                 NvDbCfg_ModeName(cfg.operation));
+    }
     send_json(conn, "202 Accepted", resp_buf);
 }
 
@@ -1197,30 +1228,13 @@ static const char * const task_state_names[] = {
  * buffer -- the same trade /api/system/status makes, and CCM is the scarce
  * region here.
  *
- * The old builder also accumulated snprintf()'s return, which is the length it
- * WOULD have written.  Past the end that makes `pos` exceed the buffer and
- * `cap - pos` underflow to a huge size_t -- i.e. the first truncated field
- * turned into an overflowing write.  Every append below clamps instead. */
+ * Every append in this file goes through Json_Cat() (Shared/Json).  The idiom
+ * it replaced accumulated snprintf()'s return, which is the length it WOULD
+ * have written: past the end that makes `pos` exceed the buffer and
+ * `cap - pos` underflow to a huge size_t, i.e. the first truncated field
+ * turned into an overflowing write.  Json_Cat() saturates at `cap` instead,
+ * and `pos == cap` is the "it did not fit" signal a loop rolls back on. */
 #define CRASH_JSON_CAP  2560u
-
-static size_t json_cat(char *buf, size_t cap, size_t pos, const char *fmt, ...)
-{
-    va_list ap;
-    int     n;
-
-    if (pos >= cap) {
-        return cap;          /* full: swallow, never wrap */
-    }
-    va_start(ap, fmt);
-    n = vsnprintf(buf + pos, cap - pos, fmt, ap);
-    va_end(ap);
-
-    if (n < 0) {
-        return pos;
-    }
-    pos += (size_t)n;
-    return (pos > cap) ? cap : pos;   /* truncated is fine; overrunning is not */
-}
 
 static void handle_crash_get(struct netconn *conn)
 {
@@ -1250,7 +1264,7 @@ static void handle_crash_get(struct netconn *conn)
         (log->crash_type < (sizeof(crash_type_names) / sizeof(crash_type_names[0])))
             ? crash_type_names[log->crash_type] : "Unknown";
 
-    pos = json_cat(js, CRASH_JSON_CAP, pos,
+    pos = Json_Cat(js, CRASH_JSON_CAP, pos,
         "{\"valid\":true,\"type\":\"%s\",\"tick\":%lu,"
         "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"sp\":\"%08lX\","
         "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
@@ -1266,15 +1280,15 @@ static void handle_crash_get(struct netconn *conn)
         log->task_name, (unsigned)log->task_count);
 
     for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
-        pos = json_cat(js, CRASH_JSON_CAP, pos, "%s\"%08lX\"",
+        pos = Json_Cat(js, CRASH_JSON_CAP, pos, "%s\"%08lX\"",
                        (i > 0) ? "," : "", (unsigned long)log->bt_addr[i]);
     }
 
-    pos = json_cat(js, CRASH_JSON_CAP, pos, "],\"tasks\":[");
+    pos = Json_Cat(js, CRASH_JSON_CAP, pos, "],\"tasks\":[");
     for (int i = 0; i < log->task_count && i < CRASH_LOG_MAX_TASKS; i++) {
         const char *st = (log->tasks[i].state < 5)
             ? task_state_names[log->tasks[i].state] : "???";
-        pos = json_cat(js, CRASH_JSON_CAP, pos,
+        pos = Json_Cat(js, CRASH_JSON_CAP, pos,
             "%s{\"name\":\"%s\",\"state\":\"%s\","
             "\"pc\":\"%08lX\",\"lr\":\"%08lX\",\"free_stack\":%u}",
             (i > 0) ? "," : "",
@@ -1283,7 +1297,7 @@ static void handle_crash_get(struct netconn *conn)
             (unsigned long)log->tasks[i].lr,
             log->tasks[i].free_stack);
     }
-    (void)json_cat(js, CRASH_JSON_CAP, pos, "]}");
+    (void)Json_Cat(js, CRASH_JSON_CAP, pos, "]}");
 
     vPortFree(log);
     send_json(conn, "200 OK", js);
@@ -1306,8 +1320,13 @@ static void handle_crash_delete(struct netconn *conn)
 
 #define SYS_STATUS_BUF_SIZE 3072u
 
+/* Body cap: appends stop here so the closing "]}" -- appended against the
+ * full size -- always fits.  See RESP_BODY_CAP. */
+#define SYS_STATUS_BODY_CAP (SYS_STATUS_BUF_SIZE - 8u)
+
 static void handle_system_status(struct netconn *conn)
 {
+    const size_t    bodyCap = SYS_STATUS_BODY_CAP;
     sSysMonTaskInfo tasks[SYSMON_MAX_TASKS];
     sSysMonSummary  sum;
     char           *buf;
@@ -1323,7 +1342,7 @@ static void handle_system_status(struct netconn *conn)
     SysMon_GetSummary(&sum);
     n = SysMon_GetTasks(tasks, SYSMON_MAX_TASKS);
 
-    off = (size_t)snprintf(buf, SYS_STATUS_BUF_SIZE,
+    off = Json_Cat(buf, bodyCap, 0u,
         "{\"uptime_sec\":%lu,"
         "\"cpu_load_permille\":%u,"
         "\"cpu_peak_permille\":%u,"
@@ -1353,13 +1372,11 @@ static void handle_system_status(struct netconn *conn)
         (unsigned)sum.taskCnt, (unsigned)sum.staleCnt,
         (unsigned)sum.stackWarnCnt, (unsigned)SYSMON_STACK_WARN_WORDS);
 
-    if (off >= SYS_STATUS_BUF_SIZE) {
-        off = SYS_STATUS_BUF_SIZE - 1u;
-    }
-
     for (uint8_t i = 0u; i < n; i++) {
         const sSysMonTaskInfo *t = &tasks[i];
-        int w = snprintf(buf + off, SYS_STATUS_BUF_SIZE - off,
+        const size_t           mark = off;
+
+        off = Json_Cat(buf, bodyCap, off,
             "%s{\"name\":\"%s\",\"state\":\"%s\",\"prio\":%u,"
             "\"stack_free_min_words\":%u,\"stack_size_words\":%u,"
             "\"cpu_permille\":%u,\"cpu_peak_permille\":%u,\"run_ms\":%lu,"
@@ -1377,15 +1394,16 @@ static void handle_system_status(struct netconn *conn)
             (unsigned long)t->staleCnt,
             t->present ? "true" : "false");
 
-        /* Truncating mid-object would emit invalid JSON — stop on the last
-         * entry that fits instead. */
-        if (w < 0 || (size_t)w >= (SYS_STATUS_BUF_SIZE - off)) {
+        /* Truncating mid-object would emit invalid JSON — roll the whole
+         * entry back and stop on the last one that fits instead. */
+        if (off >= bodyCap) {
+            off = mark;
+            buf[off] = '\0';
             break;
         }
-        off += (size_t)w;
     }
 
-    snprintf(buf + off, SYS_STATUS_BUF_SIZE - off, "]}");
+    (void)Json_Cat(buf, SYS_STATUS_BUF_SIZE, off, "]}");
     send_json(conn, "200 OK", buf);
     vPortFree(buf);
 }
@@ -1482,16 +1500,16 @@ static void handle_modbus_bus(struct netconn *conn)
 {
     size_t off = 0u;
 
-    off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"ports\":[");
+    off = Json_Cat(resp_buf, RESP_BODY_CAP, off, "{\"ports\":[");
 
     for (uint8_t id = 0u; id < (uint8_t)mbPort_last; id++) {
         sModbusBusStats st;
-        int             w;
+        const size_t    mark = off;
 
         if (Modbus_BusStats(id, &st) != 0) {
             continue;
         }
-        w = snprintf(resp_buf + off, sizeof(resp_buf) - off,
+        off = Json_Cat(resp_buf, RESP_BODY_CAP, off,
                      "%s{\"port\":\"%s\",\"registered\":%s,\"txns\":%lu,"
                      "\"busy_ms\":%lu,\"elapsed_ms\":%lu,"
                      "\"duty_permille\":%u,\"win_permille\":%u,"
@@ -1507,13 +1525,14 @@ static void handle_modbus_bus(struct netconn *conn)
                      (unsigned)st.window_sec,
                      (unsigned)st.last_ms,
                      (unsigned)st.max_ms);
-        if (w < 0 || (size_t)w >= (sizeof(resp_buf) - off)) {
+        if (off >= RESP_BODY_CAP) {
+            off = mark;
+            resp_buf[off] = '\0';
             break;              /* never truncate mid-object */
         }
-        off += (size_t)w;
     }
 
-    snprintf(resp_buf + off, sizeof(resp_buf) - off, "]}");
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), off, "]}");
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -1693,10 +1712,13 @@ static void handle_modbus_write(struct netconn *conn, sConnStream *s)
         if ((meta.flags & MB_PT_WRITE) == 0u) {
             /* The whole point of the endpoint: say no, name it, and do not
              * let a read masquerade as a write. */
+            char nameEsc[MB_POINT_NAME_ESC_LEN];
+
+            (void)Json_Escape(nameEsc, sizeof(nameEsc), meta.name);
             snprintf(resp_buf, sizeof(resp_buf),
                      "{\"error\":\"point is read-only\",\"device\":%u,"
                      "\"id\":%d,\"name\":\"%s\"}",
-                     (unsigned)device, (int)id, meta.name);
+                     (unsigned)device, (int)id, nameEsc);
             send_json(conn, "422 Unprocessable Entity", resp_buf);
             return;
         }
@@ -1748,24 +1770,31 @@ static void handle_modbus_write(struct netconn *conn, sConnStream *s)
         return;
     }
 
-    off = (size_t)snprintf(resp_buf, sizeof(resp_buf),
-                           "{\"device\":%u,\"count\":%u,\"items\":[",
-                           (unsigned)device, (unsigned)count);
+    off = Json_Cat(resp_buf, RESP_BODY_CAP, 0u,
+                   "{\"device\":%u,\"count\":%u,\"items\":[",
+                   (unsigned)device, (unsigned)count);
     for (uint16_t i = 0; i < count; i++) {
         sModbusPointMeta meta;
+        char             nameEsc[MB_POINT_NAME_ESC_LEN];
+        const size_t     mark = off;
         const char *nm = (Modbus_PointInfo((uint8_t)device, s_wrItems[i].id,
                                            &meta) == 0) ? meta.name : "";
 
-        if (off + 96u >= sizeof(resp_buf)) break;
-        off += (size_t)snprintf(resp_buf + off, sizeof(resp_buf) - off,
-                                "%s{\"id\":%u,\"name\":\"%s\",\"value\":%ld,"
-                                "\"result\":%d}",
-                                (i == 0u) ? "" : ",",
-                                (unsigned)s_wrItems[i].id, nm,
-                                (long)s_wrItems[i].value,
-                                (int)s_wrItems[i].result);
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), nm);
+        off = Json_Cat(resp_buf, RESP_BODY_CAP, off,
+                       "%s{\"id\":%u,\"name\":\"%s\",\"value\":%ld,"
+                       "\"result\":%d}",
+                       (i == 0u) ? "" : ",",
+                       (unsigned)s_wrItems[i].id, nameEsc,
+                       (long)s_wrItems[i].value,
+                       (int)s_wrItems[i].result);
+        if (off >= RESP_BODY_CAP) {
+            off = mark;
+            resp_buf[off] = '\0';
+            break;
+        }
     }
-    snprintf(resp_buf + off, sizeof(resp_buf) - off, "]}");
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), off, "]}");
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -1817,11 +1846,14 @@ static void send_compile_result(struct netconn *conn,
                  res->counts.plans, res->counts.points);
         send_json(conn, "200 OK", resp_buf);
     } else {
+        char fieldEsc[MB_CFG_ERR_ESC_LEN];
+
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), res->field);
         snprintf(resp_buf, sizeof(resp_buf),
                  "{\"error\":\"%s\",\"field\":\"%s\","
                  "\"capability\":%d,\"device\":%d,\"plan\":%d,"
                  "\"index\":%d}",
-                 res->reason, res->field,
+                 res->reason, fieldEsc,
                  res->capIdx, res->devIdx, res->planIdx, res->subIdx);
         send_json(conn, "422 Unprocessable Entity", resp_buf);
     }
@@ -1884,7 +1916,7 @@ static void handle_modbus_cfg_status(struct netconn *conn)
     sModbusConfigCounts counts = st.counts;
     bool                valid  = (st.valid != 0u);
 
-    int n = snprintf(resp_buf, sizeof(resp_buf),
+    size_t pos = Json_Cat(resp_buf, RESP_BODY_CAP, 0u,
         "{\"active_region\":%u,\"valid\":%s,\"state\":\"%s\","
         "\"capabilities\":%u,\"devices\":%u,\"plans\":%u,\"points\":%u,"
         "\"staged_valid\":%s,\"swap_pending\":%s",
@@ -1903,9 +1935,8 @@ static void handle_modbus_cfg_status(struct netconn *conn)
     {
         sModbusScheduleStats sc;
 
-        if (Modbus_ScheduleStats(&sc) == 0 && n > 0 &&
-            n < (int)sizeof(resp_buf)) {
-            n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+        if (Modbus_ScheduleStats(&sc) == 0) {
+            pos = Json_Cat(resp_buf, RESP_BODY_CAP, pos,
                 ",\"scheduler\":{\"sequences\":%u,\"ticks_live\":%u,"
                 "\"ticks_armed\":%u,\"arm_failures\":%lu,"
                 "\"dropped_pokes\":%lu,\"healthy\":%s}",
@@ -1924,33 +1955,41 @@ static void handle_modbus_cfg_status(struct netconn *conn)
         sModbusDeviceInfo devs[MB_MAX_DEVICES];
         int               dn = Modbus_DeviceList(devs, MB_MAX_DEVICES);
 
-        n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
-                      ",\"devices_state\":[");
+        pos = Json_Cat(resp_buf, RESP_BODY_CAP, pos, ",\"devices_state\":[");
         for (int i = 0; i < dn; i++) {
-            n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+            char prefixEsc[MB_PREFIX_ESC_LEN];
+
+            (void)Json_Escape(prefixEsc, sizeof(prefixEsc),
+                              devs[i].topicPrefix);
+            pos = Json_Cat(resp_buf, RESP_BODY_CAP, pos,
                 "%s{\"id\":%u,\"prefix\":\"%s\",\"slave\":%u,"
                 "\"capability\":%u,\"port\":\"%s\",\"port_up\":%s,"
                 "\"baud\":%lu,\"plans\":%u,\"polled\":%s}",
-                i ? "," : "", devs[i].devOrd, devs[i].topicPrefix,
+                i ? "," : "", devs[i].devOrd, prefixEsc,
                 devs[i].slaveAddr, devs[i].capId,
                 (devs[i].portId == mbPort_test) ? "test" : "rs485",
                 devs[i].portUp ? "true" : "false",
                 (unsigned long)devs[i].baud, devs[i].coveringPlans,
                 devs[i].polled ? "true" : "false");
         }
-        n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n, "]");
+        pos = Json_Cat(resp_buf, RESP_BODY_CAP, pos, "]");
     }
 
     if (s_haveCompile) {
-        n += snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n,
+        /* The compiler's `field` is copied out of the uploaded document, so
+         * it carries whatever the author wrote there. */
+        char fieldEsc[MB_CFG_ERR_ESC_LEN];
+
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), s_lastCompile.field);
+        pos = Json_Cat(resp_buf, RESP_BODY_CAP, pos,
             ",\"last_upload\":{\"ok\":%s,\"error\":\"%s\",\"field\":\"%s\","
             "\"capability\":%d,\"device\":%d,\"plan\":%d,\"index\":%d}",
             s_lastCompile.ok ? "true" : "false",
-            s_lastCompile.reason, s_lastCompile.field,
+            s_lastCompile.reason, fieldEsc,
             s_lastCompile.capIdx, s_lastCompile.devIdx,
             s_lastCompile.planIdx, s_lastCompile.subIdx);
     }
-    snprintf(resp_buf + n, sizeof(resp_buf) - (size_t)n, "}");
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), pos, "}");
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -2029,7 +2068,7 @@ static void handle_modbus_plans_list(struct netconn *conn)
 {
     sModbusPlanInfo plans[MB_MAX_PLANS];
     int             n = Modbus_PlanList(plans, MB_MAX_PLANS);
-    int             at;
+    size_t          at;
 
     if (n < 0) {
         send_json(conn, "500 Internal Server Error",
@@ -2037,15 +2076,18 @@ static void handle_modbus_plans_list(struct netconn *conn)
         return;
     }
 
-    at = snprintf(resp_buf, sizeof(resp_buf), "{\"plans\":[");
+    at = Json_Cat(resp_buf, RESP_BODY_CAP, 0u, "{\"plans\":[");
     for (int i = 0; i < n; i++) {
-        at += snprintf(resp_buf + at, sizeof(resp_buf) - (size_t)at,
+        char nameEsc[MB_PREFIX_ESC_LEN];
+
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), plans[i].name);
+        at = Json_Cat(resp_buf, RESP_BODY_CAP, at,
             "%s{\"id\":%u,\"name\":\"%s\",\"capability\":%u,"
             "\"devices\":%u,\"timeTables\":%u,\"subscribers\":%u}",
-            i ? "," : "", plans[i].planId, plans[i].name, plans[i].capId,
+            i ? "," : "", plans[i].planId, nameEsc, plans[i].capId,
             plans[i].devices, plans[i].timeTables, plans[i].subscribers);
     }
-    snprintf(resp_buf + at, sizeof(resp_buf) - (size_t)at, "]}");
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), at, "]}");
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -2264,7 +2306,7 @@ static void wg_status_json(char *buf, size_t sz)
     char pubKey[WG_KEY_B64_SIZE]  = "";
     char peerKey[WG_KEY_B64_SIZE] = "";
     char allowed[64]              = "";
-    int  n = 0;
+    size_t n = 0u;
     uint8_t i;
 
     /* The public key is what the operator pastes into the hub.  The private
@@ -2272,9 +2314,8 @@ static void wg_status_json(char *buf, size_t sz)
     (void)WgLink_GetPublicKeyB64(pubKey, sizeof(pubKey));
     (void)WgLink_GetPeerKeyB64(peerKey, sizeof(peerKey));
 
-    for (i = 0u; i < cfg->allowedCount && n >= 0 &&
-                 n < (int)sizeof(allowed); i++) {
-        n += snprintf(allowed + n, sizeof(allowed) - (size_t)n,
+    for (i = 0u; i < cfg->allowedCount; i++) {
+        n = Json_Cat(allowed, sizeof(allowed), n,
                       "%s\"%u.%u.%u.%u/%u.%u.%u.%u\"", (i > 0u) ? "," : "",
                       cfg->allowed[i].ip[0], cfg->allowed[i].ip[1],
                       cfg->allowed[i].ip[2], cfg->allowed[i].ip[3],
@@ -2348,11 +2389,43 @@ static void wg_status_json(char *buf, size_t sz)
 #define PACK_STATUS_JSON_CAP    4096u
 #define PACK_CELLS_JSON_CAP     2048u
 
+/* Room for the closing "],\"truncated\":true}" and its NUL.  Every body
+ * append below is made against a cap that stops this short, so the tail
+ * always fits: what a client receives is well-formed JSON whether or not
+ * everything fitted, which is the property the old 512-byte reserve was
+ * reaching for and could not deliver (docs/task_json_module.md §2.1 -- the
+ * object it reserved for measured 519 bytes of format text alone).
+ *
+ * Truncation is REPORTED, not hidden.  "count":8 with four entries is a
+ * client-visible contradiction otherwise. */
+#define PACK_JSON_TAIL          24u
+
+/* /api/pack/cells closes with more than the others: the array (possibly with
+ * "truncated"), then the pack-level estimator summary, then "}".  ~55 bytes
+ * at worst, so it gets its own reserve rather than sharing the 24. */
+#define PACK_CELLS_JSON_TAIL    64u
+
+/* Worst case for an escaped name is six bytes out per byte in (\u00XX).
+ * Only a name written with \u escapes reaches it -- which is exactly the
+ * input that gets sent. */
+#define PACK_NAME_ESC_LEN       (((PACK_NAME_LEN - 1u) * 6u) + 1u)
+#define PACK_STAT_NAME_ESC_LEN  (((PACK_STAT_NAME_LEN - 1u) * 6u) + 1u)
+
+/** Close a pack document, saying so if a loop had to stop early. */
+static void pack_json_close(char *js, size_t cap, size_t pos, int truncated)
+{
+    (void)Json_Cat(js, cap, pos,
+                   truncated ? "],\"truncated\":true}" : "]}");
+}
+
 /** GET /api/pack/status — every pack, plus the module's own counters. */
 static void handle_pack_status(struct netconn *conn)
 {
+    const size_t bodyCap = PACK_STATUS_JSON_CAP - PACK_JSON_TAIL;
     char    *js;
-    uint32_t n = 0u;
+    size_t   pos = 0u;
+    int      truncated = 0;
+    int      firstPack = 1;
     uint8_t  i;
     sPackStats stats;
 
@@ -2363,7 +2436,7 @@ static void handle_pack_status(struct netconn *conn)
     }
     (void)Pack_Stats(&stats);
 
-    n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+    pos = Json_Cat(js, bodyCap, pos,
         "{\"provisioned\":%s,\"count\":%d,"
         "\"stats\":{\"updates\":%u,\"stale\":%u,\"bindFailures\":%u,"
         "\"cmdAccepted\":%u,\"cmdOk\":%u,\"cmdFailed\":%u,"
@@ -2379,6 +2452,8 @@ static void handle_pack_status(struct netconn *conn)
     for (i = 0u; i < PACK_MAX; i++) {
         sPackState   st;
         sPackSocDiag diag;
+        char       nameEsc[PACK_NAME_ESC_LEN];
+        size_t     mark = pos;
         uint32_t   g;
         int        first = 1;
 
@@ -2391,10 +2466,11 @@ static void handle_pack_status(struct netconn *conn)
         if (Pack_SocDiag(i, &diag) != packErr_ok) {
             (void)memset(&diag, 0, sizeof(diag));
         }
-        if (n > (PACK_STATUS_JSON_CAP - 512u)) {
-            break;                      /* never overrun; report what fits */
-        }
-        n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
+        /* The name is operator-supplied and reaches flash through the config
+         * parser, so it is not safe to interpolate raw. */
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), st.name);
+
+        pos = Json_Cat(js, bodyCap, pos,
             "%s{\"idx\":%u,\"name\":\"%s\",\"type\":\"%s\","
             "\"cond\":\"%s\",\"why\":%u,"
             "\"caps\":%u,\"cmds\":%u,\"flags\":%u,"
@@ -2412,8 +2488,8 @@ static void handle_pack_status(struct netconn *conn)
             "\"cellMinIdx\":%u,\"cellMaxIdx\":%u,"
             "\"alarms\":%u,\"vendorAlarms\":[%u,%u],"
             "\"age_ms\":[",
-            (i == 0u) ? "" : ",",
-            (unsigned)st.idx, st.name, Pack_TypeName(st.typeId),
+            firstPack ? "" : ",",
+            (unsigned)st.idx, nameEsc, Pack_TypeName(st.typeId),
             (st.cond == (uint8_t)packCond_online) ? "online" :
             (st.cond == (uint8_t)packCond_stale)  ? "stale" : "absent",
             (unsigned)st.why,
@@ -2443,19 +2519,30 @@ static void handle_pack_status(struct netconn *conn)
          * construction -- one age per pack would be a lie (§3). */
         for (g = 0u; g < (uint32_t)packGrp_last; g++) {
             if (st.age_ms[g] == PACK_AGE_NEVER) {
-                n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
-                                        "%snull", first ? "" : ",");
+                pos = Json_Cat(js, bodyCap, pos, "%snull", first ? "" : ",");
             } else {
-                n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n,
-                                        "%s%u", first ? "" : ",",
-                                        (unsigned)st.age_ms[g]);
+                pos = Json_Cat(js, bodyCap, pos, "%s%u", first ? "" : ",",
+                               (unsigned)st.age_ms[g]);
             }
             first = 0;
         }
-        n += (uint32_t)snprintf(&js[n], PACK_STATUS_JSON_CAP - n, "]}");
+        pos = Json_Cat(js, bodyCap, pos, "]}");
+
+        /* Whole object or none.  A pack half-written into a full buffer is
+         * unparseable for the client, which is worse than a missing pack. */
+        if (pos >= bodyCap) {
+            pos = mark;
+            js[pos] = '\0';
+            truncated = 1;
+            break;
+        }
+        /* The separator follows what was EMITTED, not the loop index: a pack
+         * index with no pack behind it used to put a bare comma at the head
+         * of the array. */
+        firstPack = 0;
     }
 
-    (void)snprintf(&js[n], PACK_STATUS_JSON_CAP - n, "]}");
+    pack_json_close(js, PACK_STATUS_JSON_CAP, pos, truncated);
     send_json(conn, "200 OK", js);
     vPortFree(js);
 }
@@ -2463,9 +2550,11 @@ static void handle_pack_status(struct netconn *conn)
 /** GET /api/pack/cells?idx=N — cell detail, where the type has it. */
 static void handle_pack_cells(struct netconn *conn, uint8_t idx)
 {
+    const size_t bodyCap = PACK_CELLS_JSON_CAP - PACK_CELLS_JSON_TAIL;
     sPackCells cl;
     char      *js;
-    uint32_t   n = 0u;
+    size_t     pos = 0u;
+    int        truncated = 0;
     uint8_t    c;
     int        r;
 
@@ -2488,7 +2577,7 @@ static void handle_pack_cells(struct netconn *conn, uint8_t idx)
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
     }
-    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+    pos = Json_Cat(js, bodyCap, pos,
         "{\"idx\":%u,\"cellCount\":%u,\"age_ms\":%u,"
         "\"balance\":{\"active\":%u,\"current_mA\":%d,\"duty_pm\":%u,"
         "\"srcIdx\":%d,\"sinkIdx\":%d},\"cells\":[",
@@ -2502,38 +2591,49 @@ static void handle_pack_cells(struct netconn *conn, uint8_t idx)
         sPackCellEstimate est;
         const int haveEst = (Pack_GetCellEstimate(idx, &est) == packErr_ok);
 
-        for (c = 0u; (c < cl.cellCount) && (n < (PACK_CELLS_JSON_CAP - 128u));
-             c++) {
-            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
-                                    "%s{\"mV\":%u,\"leadRes_mOhm\":%u",
-                                    (c == 0u) ? "" : ",",
-                                    (unsigned)cl.cell_mV[c],
-                                    (unsigned)cl.leadRes_mOhm[c]);
+        for (c = 0u; c < cl.cellCount; c++) {
+            const size_t mark = pos;
+
+            pos = Json_Cat(js, bodyCap, pos,
+                           "%s{\"mV\":%u,\"leadRes_mOhm\":%u",
+                           (c == 0u) ? "" : ",",
+                           (unsigned)cl.cell_mV[c],
+                           (unsigned)cl.leadRes_mOhm[c]);
             if (haveEst != 0) {
                 /* soc_pm -1 = not anchored; capacity 0 = not yet measured.
                  * Both are reported as-is rather than hidden, so a consumer
                  * can tell "unknown" from "zero". */
-                n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
-                                        ",\"soc_pm\":%d,\"capacity_mAh\":%d"
-                                        ",\"capConf_pm\":%u",
-                                        (int)est.soc_pm[c],
-                                        (int)est.capacity_mAh[c],
-                                        (unsigned)est.capConf_pm[c]);
+                pos = Json_Cat(js, bodyCap, pos,
+                               ",\"soc_pm\":%d,\"capacity_mAh\":%d"
+                               ",\"capConf_pm\":%u",
+                               (int)est.soc_pm[c],
+                               (int)est.capacity_mAh[c],
+                               (unsigned)est.capConf_pm[c]);
             }
-            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "}");
+            pos = Json_Cat(js, bodyCap, pos, "}");
+
+            if (pos >= bodyCap) {
+                pos = mark;
+                js[pos] = '\0';
+                truncated = 1;
+                break;
+            }
         }
         /* Close the cells array, then the pack-level estimator summary
          * alongside it -- not inside it, where it would be a property of
-         * cell 0. */
-        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]");
+         * cell 0.  These go against the FULL cap: after a roll-back `pos` can
+         * sit one byte below bodyCap, and a tail that got dropped would leave
+         * the array open. */
+        pos = Json_Cat(js, PACK_CELLS_JSON_CAP, pos,
+                       truncated ? "],\"truncated\":true" : "]");
         if (haveEst != 0) {
-            n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
-                                    ",\"weakestIdx\":%d,\"measuredCells\":%u",
-                                    (int)est.weakestIdx,
-                                    (unsigned)est.measuredCount);
+            pos = Json_Cat(js, PACK_CELLS_JSON_CAP, pos,
+                           ",\"weakestIdx\":%d,\"measuredCells\":%u",
+                           (int)est.weakestIdx,
+                           (unsigned)est.measuredCount);
         }
     }
-    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "}");
+    (void)Json_Cat(js, PACK_CELLS_JSON_CAP, pos, "}");
     send_json(conn, "200 OK", js);
     vPortFree(js);
 }
@@ -2543,8 +2643,11 @@ static void handle_pack_cells(struct netconn *conn, uint8_t idx)
  *  a JK and a Dyness expose different sets through one endpoint. */
 static void handle_pack_stats(struct netconn *conn, uint8_t idx)
 {
+    const size_t bodyCap = PACK_CELLS_JSON_CAP - PACK_JSON_TAIL;
     char    *js;
-    uint32_t n = 0u;
+    size_t   pos = 0u;
+    int      truncated = 0;
+    int      first = 1;
     int      cnt = Pack_StatCount(idx);
     int      i;
 
@@ -2557,22 +2660,34 @@ static void handle_pack_stats(struct netconn *conn, uint8_t idx)
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
     }
-    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
-                            "{\"idx\":%u,\"count\":%d,\"stats\":[",
-                            (unsigned)idx, cnt);
-    for (i = 0; (i < cnt) && (n < (PACK_CELLS_JSON_CAP - 128u)); i++) {
-        sPackStat st;
+    pos = Json_Cat(js, bodyCap, pos,
+                   "{\"idx\":%u,\"count\":%d,\"stats\":[",
+                   (unsigned)idx, cnt);
+    for (i = 0; i < cnt; i++) {
+        sPackStat    st;
+        char         nameEsc[PACK_STAT_NAME_ESC_LEN];
+        const size_t mark = pos;
 
         if (Pack_StatGet(idx, (uint8_t)i, &st) != packErr_ok) {
             continue;
         }
-        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), st.name);
+
+        pos = Json_Cat(js, bodyCap, pos,
             "%s{\"name\":\"%s\",\"value\":%d,\"unit\":%u,"
             "\"scale\":%d,\"flags\":%u}",
-            (i == 0) ? "" : ",", st.name, (int)st.value,
+            first ? "" : ",", nameEsc, (int)st.value,
             (unsigned)st.unit, (int)st.scale_pow10, (unsigned)st.flags);
+
+        if (pos >= bodyCap) {
+            pos = mark;
+            js[pos] = '\0';
+            truncated = 1;
+            break;
+        }
+        first = 0;
     }
-    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]}");
+    pack_json_close(js, PACK_CELLS_JSON_CAP, pos, truncated);
     send_json(conn, "200 OK", js);
     vPortFree(js);
 }
@@ -2580,9 +2695,11 @@ static void handle_pack_stats(struct netconn *conn, uint8_t idx)
 /** GET /api/pack/balance?idx=N -- integrated balance transfer per cell. */
 static void handle_pack_balance(struct netconn *conn, uint8_t idx)
 {
+    const size_t      bodyCap = PACK_CELLS_JSON_CAP - PACK_JSON_TAIL;
     sPackBalanceStats b;
     char             *js;
-    uint32_t          n = 0u;
+    size_t            pos = 0u;
+    int               truncated = 0;
     uint8_t           c;
     int               r = Pack_BalanceStats(idx, &b);
 
@@ -2600,20 +2717,29 @@ static void handle_pack_balance(struct netconn *conn, uint8_t idx)
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
     }
-    n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+    pos = Json_Cat(js, bodyCap, pos,
         "{\"idx\":%u,\"window_sec\":%u,\"activeSamples\":%u,"
         "\"cellCount\":%u,\"cells\":[",
         (unsigned)idx, (unsigned)b.window_sec,
         (unsigned)b.activeSamples, (unsigned)b.cellCount);
-    for (c = 0u; (c < b.cellCount) && (n < (PACK_CELLS_JSON_CAP - 96u)); c++) {
+    for (c = 0u; c < b.cellCount; c++) {
+        const size_t mark = pos;
+
         /* capacityDelta_mAh is RELATIVE TO THE PACK MEDIAN; negative means
          * the balancer keeps charging this cell, i.e. it holds less. */
-        n += (uint32_t)snprintf(&js[n], PACK_CELLS_JSON_CAP - n,
+        pos = Json_Cat(js, bodyCap, pos,
             "%s{\"in_mAs\":%d,\"out_mAs\":%d,\"capacityDelta_mAh\":%d}",
             (c == 0u) ? "" : ",", (int)b.in_mAs[c], (int)b.out_mAs[c],
             (int)b.capacityDelta_mAh[c]);
+
+        if (pos >= bodyCap) {
+            pos = mark;
+            js[pos] = '\0';
+            truncated = 1;
+            break;
+        }
     }
-    (void)snprintf(&js[n], PACK_CELLS_JSON_CAP - n, "]}");
+    pack_json_close(js, PACK_CELLS_JSON_CAP, pos, truncated);
     send_json(conn, "200 OK", js);
     vPortFree(js);
 }
@@ -2634,10 +2760,15 @@ static void send_pack_cfg_result(struct netconn *conn,
     }
     /* POINT AT THE OFFENDING PACK AND KEY, as the Modbus compiler does --
      * "invalid" is not a diagnosis an operator can act on. */
-    (void)snprintf(body, sizeof(body),
-                   "{\"ok\":false,\"pack\":%d,\"field\":\"%s\","
-                   "\"reason\":\"%s\"}",
-                   res->packIdx, res->field, res->reason);
+    {
+        char fieldEsc[ESC_FIELD_LEN];
+
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), res->field);
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":false,\"pack\":%d,\"field\":\"%s\","
+                       "\"reason\":\"%s\"}",
+                       res->packIdx, fieldEsc, res->reason);
+    }
     send_json(conn, "422 Unprocessable Entity", body);
 }
 
@@ -2753,6 +2884,11 @@ static void handle_pack_cfg_delete(struct netconn *conn)
  * -------------------------------------------------------------------------- */
 
 #define CAN_JSON_CAP        3072u
+
+/* Body cap, as everywhere else here: the tail is appended against the full
+ * size so it always fits.  The CAN tails carry counters, so this is wider
+ * than the plain "]}" reserve. */
+#define CAN_JSON_BODY_CAP   (CAN_JSON_CAP - 48u)
 #define CAN_TRACE_DEFAULT   32
 
 /** 8 payload bytes as hex, always DLC-long. */
@@ -2771,12 +2907,12 @@ static void can_hex(char *out, const uint8_t *data, uint8_t dlc)
 static size_t can_bus_json(char *buf, size_t cap, size_t off, eCanBus bus)
 {
     sCanBusStats st;
-    int          w;
+    const size_t mark = off;
 
     if (CanBus_GetStats(bus, &st) != 0) {
         return off;
     }
-    w = snprintf(buf + off, cap - off,
+    off = Json_Cat(buf, cap, off,
         "{\"bus\":%u,\"running\":%s,\"bitrate_bps\":%lu,"
         "\"rx\":%lu,\"tx_done\":%lu,\"tx_accepted\":%lu,\"tx_dropped\":%lu,"
         "\"rx_overrun\":%lu,\"errors\":%lu,\"last_error\":\"0x%08lX\","
@@ -2790,15 +2926,20 @@ static size_t can_bus_json(char *buf, size_t cap, size_t off, eCanBus bus)
         (unsigned long)st.lastError, (unsigned long)st.busOffCnt,
         st.busOff ? "true" : "false", st.rxErrorCnt, st.txErrorCnt,
         st.txQueueDepth, st.txQueuePeak);
-    if ((w < 0) || ((size_t)w >= (cap - off))) {
-        return cap - 1u;
+
+    /* Whole object or none: half a bus is not a smaller answer, it is an
+     * unparseable one. */
+    if (off >= cap) {
+        buf[mark] = '\0';
+        return mark;
     }
-    return off + (size_t)w;
+    return off;
 }
 
 /* GET /api/can/status — mode, roles, forwarding counters and both cells. */
 static void handle_can_status(struct netconn *conn)
 {
+    const size_t     canBodyCap = CAN_JSON_BODY_CAP;
     sCanBridgeStatus br;
     sCanMonStats     mon;
     char            *buf;
@@ -2817,7 +2958,7 @@ static void handle_can_status(struct netconn *conn)
         return;
     }
 
-    off = (size_t)snprintf(buf, CAN_JSON_CAP,
+    off = Json_Cat(buf, canBodyCap, 0u,
         "{\"mode\":\"%s\",\"battery_bus\":%u,\"inverter_bus\":%u,"
         "\"bitrate_bps\":%lu,"
         "\"source\":{\"bound\":%s,\"emits\":%lu,\"period_ms\":%lu},"
@@ -2828,21 +2969,13 @@ static void handle_can_status(struct netconn *conn)
         br.sourceBound ? "true" : "false",
         (unsigned long)br.sourceEmitCnt, (unsigned long)br.sourcePeriod_ms,
         br.overrideAll ? "true" : "false", br.overrideCnt);
-    if (off >= CAN_JSON_CAP) {
-        off = CAN_JSON_CAP - 1u;
-    }
-
     for (uint8_t i = 0u; i < br.overrideCnt; i++) {
-        int w = snprintf(buf + off, CAN_JSON_CAP - off, "%s\"0x%03lX\"",
-                         (i == 0u) ? "" : ",",
-                         (unsigned long)br.overrideId[i]);
-        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off))) {
-            break;
-        }
-        off += (size_t)w;
+        off = Json_Cat(buf, canBodyCap, off, "%s\"0x%03lX\"",
+                       (i == 0u) ? "" : ",",
+                       (unsigned long)br.overrideId[i]);
     }
 
-    off += (size_t)snprintf(buf + off, CAN_JSON_CAP - off,
+    off = Json_Cat(buf, canBodyCap, off,
         "]},\"forward\":{"
         "\"to_inverter\":{\"forwarded\":%lu,\"suppressed\":%lu,\"dropped\":%lu},"
         "\"to_battery\":{\"forwarded\":%lu,\"suppressed\":%lu,\"dropped\":%lu}},"
@@ -2857,17 +2990,11 @@ static void handle_can_status(struct netconn *conn)
         (unsigned long)mon.recordedCnt, (unsigned long)mon.idOverflowCnt,
         mon.tracing ? "true" : "false",
         (unsigned long)mon.traceDroppedCnt);
-    if (off >= CAN_JSON_CAP) {
-        off = CAN_JSON_CAP - 1u;
-    }
 
-    off = can_bus_json(buf, CAN_JSON_CAP, off, canBus_1);
-    if ((off + 2u) < CAN_JSON_CAP) {
-        buf[off] = ',';
-        off++;
-    }
-    off = can_bus_json(buf, CAN_JSON_CAP, off, canBus_2);
-    snprintf(buf + off, CAN_JSON_CAP - off, "]}");
+    off = can_bus_json(buf, canBodyCap, off, canBus_1);
+    off = Json_Cat(buf, canBodyCap, off, ",");
+    off = can_bus_json(buf, canBodyCap, off, canBus_2);
+    (void)Json_Cat(buf, CAN_JSON_CAP, off, "]}");
 
     send_json(conn, "200 OK", buf);
     vPortFree(buf);
@@ -2876,6 +3003,7 @@ static void handle_can_status(struct netconn *conn)
 /* GET /api/can/traffic?bus=N — the identifier register of one bus. */
 static void handle_can_traffic(struct netconn *conn, eCanBus bus)
 {
+    const size_t canBodyCap = CAN_JSON_BODY_CAP;
     uint32_t now_ms = HAL_GetTick();
     uint8_t  count  = CanMon_IdCount(bus);
     char    *buf;
@@ -2888,20 +3016,20 @@ static void handle_can_traffic(struct netconn *conn, eCanBus bus)
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
     }
-    off = (size_t)snprintf(buf, CAN_JSON_CAP,
-                           "{\"bus\":%u,\"count\":%u,\"ids\":[",
-                           (unsigned)bus + 1u, count);
+    off = Json_Cat(buf, canBodyCap, 0u,
+                   "{\"bus\":%u,\"count\":%u,\"ids\":[",
+                   (unsigned)bus + 1u, count);
 
     for (uint8_t i = 0u; i < count; i++) {
-        sCanMonId r;
-        char      hex[17];
-        int       w;
+        sCanMonId    r;
+        char         hex[17];
+        const size_t mark = off;
 
         if (CanMon_GetIdAt(bus, i, &r) != 0) {
             break;
         }
         can_hex(hex, r.data, r.dlc);
-        w = snprintf(buf + off, CAN_JSON_CAP - off,
+        off = Json_Cat(buf, canBodyCap, off,
             "%s{\"id\":\"0x%03lX\",\"ext\":%s,\"rtr\":%s,\"dlc\":%u,"
             "\"rx\":%lu,\"tx\":%lu,\"changes\":%lu,\"age_ms\":%lu,"
             "\"min_gap_ms\":%lu,\"max_gap_ms\":%lu,\"data\":\"%s\"}",
@@ -2911,16 +3039,18 @@ static void handle_can_traffic(struct netconn *conn, eCanBus bus)
             (unsigned long)r.changeCnt,
             (unsigned long)(now_ms - r.lastStamp_ms),
             (unsigned long)r.minGap_ms, (unsigned long)r.maxGap_ms, hex);
-        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off - 32u))) {
+        if (off >= canBodyCap) {
+            off = mark;
+            buf[off] = '\0';
             truncated = true;
             break;
         }
-        off += (size_t)w;
         written++;
     }
 
-    snprintf(buf + off, CAN_JSON_CAP - off, "],\"returned\":%u,"
-             "\"truncated\":%s}", written, truncated ? "true" : "false");
+    (void)Json_Cat(buf, CAN_JSON_CAP, off, "],\"returned\":%u,"
+                   "\"truncated\":%s}", written,
+                   truncated ? "true" : "false");
     send_json(conn, "200 OK", buf);
     vPortFree(buf);
 }
@@ -2928,6 +3058,7 @@ static void handle_can_traffic(struct netconn *conn, eCanBus bus)
 /* GET /api/can/trace?n=N — the newest N frames of the ring, oldest first. */
 static void handle_can_trace(struct netconn *conn)
 {
+    const size_t canBodyCap = CAN_JSON_BODY_CAP;
     sCanMonStats mon;
     uint16_t     total = CanMon_TraceCount();
     int          want  = query_int("n", CAN_TRACE_DEFAULT);
@@ -2946,7 +3077,7 @@ static void handle_can_trace(struct netconn *conn)
         send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
         return;
     }
-    off = (size_t)snprintf(buf, CAN_JSON_CAP,
+    off = Json_Cat(buf, canBodyCap, 0u,
         "{\"tracing\":%s,\"held\":%u,\"dropped\":%lu,\"frames\":[",
         mon.tracing ? "true" : "false", total,
         (unsigned long)mon.traceDroppedCnt);
@@ -2954,27 +3085,28 @@ static void handle_can_trace(struct netconn *conn)
     for (uint16_t i = first; i < total; i++) {
         sCanMonTrace t;
         char         hex[17];
-        int          w;
+        const size_t mark = off;
 
         if (CanMon_GetTraceAt(i, &t) != 0) {
             break;
         }
         can_hex(hex, t.data, t.dlc);
-        w = snprintf(buf + off, CAN_JSON_CAP - off,
+        off = Json_Cat(buf, canBodyCap, off,
             "%s{\"t_ms\":%lu,\"bus\":%u,\"dir\":\"%s\",\"id\":\"0x%03lX\","
             "\"dlc\":%u,\"data\":\"%s\"}",
             (written == 0u) ? "" : ",", (unsigned long)t.stamp_ms,
             (unsigned)t.bus + 1u,
             (t.dir == (uint8_t)canDir_rx) ? "rx" : "tx",
             (unsigned long)t.id, t.dlc, hex);
-        if ((w < 0) || ((size_t)w >= (CAN_JSON_CAP - off - 32u))) {
+        if (off >= canBodyCap) {
+            off = mark;
+            buf[off] = '\0';
             break;
         }
-        off += (size_t)w;
         written++;
     }
 
-    snprintf(buf + off, CAN_JSON_CAP - off, "],\"returned\":%u}", written);
+    (void)Json_Cat(buf, CAN_JSON_CAP, off, "],\"returned\":%u}", written);
     send_json(conn, "200 OK", buf);
     vPortFree(buf);
 }
@@ -3322,7 +3454,7 @@ static void handle_wg_config_reset(struct netconn *conn)
  * ready.  So a stuck UART state silences every sink at once, and that is
  * indistinguishable from "nothing is being logged" unless the counters are
  * exposed somewhere that does not itself depend on Trice. */
-static size_t trice_dests_array(char *buf, size_t size);
+static size_t trice_dests_array(char *buf, size_t cap, size_t pos);
 
 static void handle_trice_status(struct netconn *conn)
 {
@@ -3361,47 +3493,32 @@ static void handle_trice_status(struct netconn *conn)
         (unsigned)TriceDeferredOverflowCount,
         (unsigned)TriceHalfBufferDepthMax);
 
-    /* snprintf reports what it *would* have written, so clamp before using it
-     * as a cursor — otherwise a future field could walk this past the end. */
-    if (off >= sizeof(resp_buf)) {
-        off = sizeof(resp_buf) - 1u;
-    }
-    off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
-    snprintf(resp_buf + off, sizeof(resp_buf) - off, "}");
+    off = trice_dests_array(resp_buf, RESP_BODY_CAP, off);
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), off, "}");
     send_json(conn, "200 OK", resp_buf);
 }
 
-/* Render the Trice destination list as a JSON array: ["a.b.c.d",...] */
-static size_t trice_dests_array(char *buf, size_t size)
+/* Render the Trice destination list as a JSON array: ["a.b.c.d",...] into
+ * `buf` at `pos`, the Json_Cat shape so it composes with its callers. */
+static size_t trice_dests_array(char *buf, size_t cap, size_t pos)
 {
     ip_addr_t list[TRICE_UDP_MAX_DEST];
-    uint32_t  n   = Trice_UdpGetDests(list, TRICE_UDP_MAX_DEST);
-    size_t    off = 0u;
+    uint32_t  n = Trice_UdpGetDests(list, TRICE_UDP_MAX_DEST);
+    uint32_t  i;
 
-    if (size == 0u) {
-        return 0u;
+    /* One byte of the cap is held back for the ']' so the array always
+     * closes -- an unterminated one is not a shorter list, it is a broken
+     * document. */
+    pos = Json_Cat(buf, cap - 1u, pos, "[");
+    for (i = 0u; i < n; i++) {
+        pos = Json_Cat(buf, cap - 1u, pos, "%s\"%u.%u.%u.%u\"",
+                       (i == 0u) ? "" : ",",
+                       (unsigned)ip4_addr1(&list[i]),
+                       (unsigned)ip4_addr2(&list[i]),
+                       (unsigned)ip4_addr3(&list[i]),
+                       (unsigned)ip4_addr4(&list[i]));
     }
-    buf[off++] = '[';
-
-    for (uint32_t i = 0u; i < n && off < (size - 1u); i++) {
-        int w = snprintf(buf + off, size - off, "%s\"%u.%u.%u.%u\"",
-                         (i == 0u) ? "" : ",",
-                         (unsigned)ip4_addr1(&list[i]),
-                         (unsigned)ip4_addr2(&list[i]),
-                         (unsigned)ip4_addr3(&list[i]),
-                         (unsigned)ip4_addr4(&list[i]));
-        if (w < 0 || (size_t)w >= (size - off)) {
-            off = size - 1u;
-            break;
-        }
-        off += (size_t)w;
-    }
-
-    if (off < (size - 1u)) {
-        buf[off++] = ']';
-    }
-    buf[off] = '\0';
-    return off;
+    return Json_Cat(buf, cap, pos, "]");
 }
 
 /* Manage the Trice UDP destination list explicitly.
@@ -3427,10 +3544,10 @@ static void handle_trice_dest(struct netconn *conn, sConnStream *s, int add)
         Trice_UdpResetDests();
         (void)Trice_UdpForgetDests();
         TRice("Trice UDP destinations reset to broadcast\n");
-        size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
-        off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
-        snprintf(resp_buf + off, sizeof(resp_buf) - off,
-                 ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
+        size_t off = Json_Cat(resp_buf, RESP_BODY_CAP, 0u, "{\"dests\":");
+        off = trice_dests_array(resp_buf, RESP_BODY_CAP, off);
+        (void)Json_Cat(resp_buf, sizeof(resp_buf), off,
+                       ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
         send_json(conn, "200 OK", resp_buf);
         return;
     }
@@ -3486,10 +3603,10 @@ static void handle_trice_dest(struct netconn *conn, sConnStream *s, int add)
     (void)Trice_UdpSaveDests();
 
     {
-        size_t off = (size_t)snprintf(resp_buf, sizeof(resp_buf), "{\"dests\":");
-        off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
-        snprintf(resp_buf + off, sizeof(resp_buf) - off,
-                 ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
+        size_t off = Json_Cat(resp_buf, RESP_BODY_CAP, 0u, "{\"dests\":");
+        off = trice_dests_array(resp_buf, RESP_BODY_CAP, off);
+        (void)Json_Cat(resp_buf, sizeof(resp_buf), off,
+                       ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
     }
     send_json(conn, "200 OK", resp_buf);
 }
@@ -3538,16 +3655,13 @@ static void handle_trice_subscribe(struct netconn *conn, int add)
               (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
     }
 
-    off = (size_t)snprintf(resp_buf, sizeof(resp_buf),
-                           "{\"you\":\"%u.%u.%u.%u\",\"dests\":",
-                           (unsigned)ip4_addr1(&peer), (unsigned)ip4_addr2(&peer),
-                           (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
-    if (off >= sizeof(resp_buf)) {
-        off = sizeof(resp_buf) - 1u;
-    }
-    off += trice_dests_array(resp_buf + off, sizeof(resp_buf) - off);
-    snprintf(resp_buf + off, sizeof(resp_buf) - off,
-             ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
+    off = Json_Cat(resp_buf, RESP_BODY_CAP, 0u,
+                   "{\"you\":\"%u.%u.%u.%u\",\"dests\":",
+                   (unsigned)ip4_addr1(&peer), (unsigned)ip4_addr2(&peer),
+                   (unsigned)ip4_addr3(&peer), (unsigned)ip4_addr4(&peer));
+    off = trice_dests_array(resp_buf, RESP_BODY_CAP, off);
+    (void)Json_Cat(resp_buf, sizeof(resp_buf), off,
+                   ",\"port\":%u}", (unsigned)TRICE_UDP_PORT);
     send_json(conn, "200 OK", resp_buf);
 }
 

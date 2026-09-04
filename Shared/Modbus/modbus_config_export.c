@@ -2,13 +2,31 @@
 #include "modbus_config_store.h"
 #include "modbus_units.h"
 
+#include "json.h"
+
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
-/* Runs on the HTTP task (4 KB stack) — keep the format buffer static. */
+/* Runs on the HTTP task (4 KB stack) — keep the format buffer static.
+ *
+ * Names are authored, so they are ESCAPED on the way out.  Since a compiled
+ * config can now hold a name containing a quote or a backslash (the reader
+ * decodes escapes, docs/task_json_module.md §3.2), emitting one raw would
+ * produce a document that will not re-upload -- the round trip §9 checks is
+ * exactly what that breaks.
+ *
+ * The buffer is NOT widened for the worst-case escape expansion (six bytes
+ * out per byte in): a name of 23 control characters would want ~260 bytes
+ * here, and .bss is the region this image cannot spare.  emit() is bounded
+ * and returns -1 rather than truncating, so such a config exports as an
+ * error instead of as a document that will not parse -- which is what it
+ * used to do. */
 static char s_line[192];
+
+/* Escaped worst case is six bytes out per byte in (\u00XX). */
+#define NAME_ESC_LEN        (((MB_POINT_NAME_LEN - 1u) * 6u) + 1u)
 
 static int emit(fModbusByteSink sink, void *ctx, const char *fmt, ...)
 {
@@ -87,11 +105,13 @@ static int export_point(fModbusByteSink sink, void *ctx,
 {
     const sMbUnitInfo *unit = MbUnits_FromCode(pt->unit);
     char scale[12];
+    char nameEsc[NAME_ESC_LEN];
 
     if (!unit) {
         return -1;
     }
     scale_str(pt->scalePow10, scale, sizeof(scale));
+    (void)Json_Escape(nameEsc, sizeof(nameEsc), pt->name);
 
     if (emit(sink, ctx,
              "%s{\"id\":%u,\"addr\":%u,\"fc\":\"%s\",\"decodeType\":\"%s\","
@@ -99,7 +119,7 @@ static int export_point(fModbusByteSink sink, void *ctx,
              (id == 0u) ? "" : ",",
              id, pt->addr, fc_str(pt->functionCode),
              decode_type_str(pt->decodeType), scale,
-             unit->str, pt->name) != 0) {
+             unit->str, nameEsc) != 0) {
         return -1;
     }
 
@@ -132,6 +152,7 @@ static int export_capability(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
 {
     sModbusBlockRecord blocks[MB_MAX_BLOCKS_PER_CAP];
     sModbusPointRecord pt;
+    char               nameEsc[NAME_ESC_LEN];
     uint16_t           ptId = 0;
     int                rp;
 
@@ -140,11 +161,12 @@ static int export_capability(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
         return -1;
     }
 
+    (void)Json_Escape(nameEsc, sizeof(nameEsc), cap->name);
     if (emit(sink, ctx,
              "%s{\"id\":%u,\"name\":\"%s\",\"addrStride\":%u,\"writeFc\":%u,"
              "\"maxReadRegs\":%u,\"blocks\":[",
              (id == 0u) ? "" : ",",
-             id, cap->name, MbRecords_Stride(cap), cap->writeFc,
+             id, nameEsc, MbRecords_Stride(cap), cap->writeFc,
              MbRecords_MaxReadRegs(cap)) != 0) {
         return -1;
     }
@@ -177,13 +199,15 @@ static int export_plan(fModbusByteSink sink, void *ctx, sMbCfgCursor *c,
 {
     sModbusTimeTableRecord tt;
     uint16_t               ids[MB_MAX_TT_ENTRIES_PER_TABLE];
+    char                   nameEsc[NAME_ESC_LEN];
     int                    ttId = 0;
     int                    rt;
     int                    firstDev = 1;
 
+    (void)Json_Escape(nameEsc, sizeof(nameEsc), plan->name);
     if (emit(sink, ctx,
              "%s{\"id\":%u,\"name\":\"%s\",\"capability\":%u,\"devices\":[",
-             first ? "" : ",", plan->planId, plan->name, plan->capId) != 0) {
+             first ? "" : ",", plan->planId, nameEsc, plan->capId) != 0) {
         return -1;
     }
     for (uint8_t d = 0; d < MB_MAX_DEVICES; d++) {
@@ -255,6 +279,9 @@ int MbCfgExport(eNvDbUser region, fModbusByteSink sink, void *ctx)
     }
 
     while ((r = MbCfg_NextDevice(&c, &dev)) == 1) {
+        char prefixEsc[NAME_ESC_LEN];
+
+        (void)Json_Escape(prefixEsc, sizeof(prefixEsc), dev.topicPrefix);
         if (emit(sink, ctx,
                  "%s{\"id\":%u,\"slaveAddr\":%u,\"capability\":%u,"
                  "\"baud\":%lu,\"format\":\"%s\",\"port\":\"%s\","
@@ -263,7 +290,7 @@ int MbCfgExport(eNvDbUser region, fModbusByteSink sink, void *ctx)
                  devId, dev.slaveAddr, dev.capId,
                  (unsigned long)MbRecords_BaudFromCode(dev.baudCode),
                  format_str(dev.format), port_str(dev.portId),
-                 dev.topicPrefix) != 0) {
+                 prefixEsc) != 0) {
             return -1;
         }
         firstDev = 0;

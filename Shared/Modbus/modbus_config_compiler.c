@@ -19,6 +19,7 @@
  */
 
 #include "modbus_config_compiler.h"
+#include "json.h"
 #include "modbus_blocks.h"
 #include "modbus_units.h"
 #include "image_mgmt.h"
@@ -33,7 +34,6 @@
  * big may live on the stack. Not reentrant by design (see header).
  * ========================================================================== */
 
-#define LEX_WINDOW      128u   /* refill window over the byte source */
 #define TOK_MAX         32u    /* longest key/value token + NUL      */
 
 /* How much compiled stream is buffered before it is handed to nvDb.  A
@@ -45,22 +45,10 @@
 
 #define PT_BITMAP_BYTES ((MB_MAX_POINTS_TOTAL + 7u) / 8u)
 
-typedef enum {
-    tok_lBrace, tok_rBrace, tok_lBracket, tok_rBracket,
-    tok_colon, tok_comma, tok_string, tok_number,
-    tok_true, tok_false, tok_eof, tok_err,
-    tok_last                       /* sentinel */
-} eTok;
-
 typedef struct {
-    /* lexer */
-    fModbusByteSource src;
-    void         *srcCtx;
-    uint8_t       window[LEX_WINDOW];
-    uint32_t      winLen;
-    uint32_t      winPos;
-    int           eof;
-    int           ioErr;
+    /* lexer — Shared/Json owns the tokenizer; what stays here is the mapping
+     * from a syntax failure onto this module's field/reason reporting. */
+    sJsonReader   rd;
 
     /* writer — everything goes to nvDb at region offsets, the stream
      * starting at MODBUS_LUT_HEADER_SIZE.  There is no erase bookkeeping
@@ -143,135 +131,27 @@ static inline int bit_get(const uint8_t *bits, uint16_t i)
  * Lexer
  * ========================================================================== */
 
-static int lex_peek(void)
+/* The tokenizer is Shared/Json (docs/task_json_module.md §3.2).  These two
+ * wrappers exist for one reason: a failure there has to arrive in this
+ * module's failure record, which names the offending device/txn/point.  They
+ * are not a second parser. */
+static eJsonTok next_token(char *text, uint32_t textSize)
 {
-    if (s_c.winPos >= s_c.winLen) {
-        if (s_c.eof || s_c.ioErr) {
-            return -1;
-        }
-        int n = s_c.src(s_c.srcCtx, s_c.window, LEX_WINDOW);
-        if (n < 0) {
-            s_c.ioErr = 1;
-            return -1;
-        }
-        if (n == 0) {
-            s_c.eof = 1;
-            return -1;
-        }
-        s_c.winLen = (uint32_t)n;
-        s_c.winPos = 0;
+    const eJsonTok t = Json_Next(&s_c.rd, text, textSize);
+
+    if (t == jsonTok_err) {
+        (void)fail("json", (s_c.rd.reason != NULL) ? s_c.rd.reason
+                                                   : "syntax error");
     }
-    return s_c.window[s_c.winPos];
+    return t;
 }
 
-static int lex_get(void)
+static int expect(eJsonTok want, const char *what)
 {
-    int ch = lex_peek();
-    if (ch >= 0) {
-        s_c.winPos++;
-    }
-    return ch;
-}
+    char           text[TOK_MAX];
+    const eJsonTok t = next_token(text, sizeof(text));
 
-static void lex_skip_ws(void)
-{
-    int ch;
-    while ((ch = lex_peek()) == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
-        s_c.winPos++;
-    }
-}
-
-/* Read the next token; string/number text lands NUL-terminated in `text`. */
-static eTok next_token(char *text, uint32_t textSize)
-{
-    lex_skip_ws();
-
-    int ch = lex_get();
-    if (ch < 0) {
-        if (s_c.ioErr) {
-            fail("json", "read error");
-            return tok_err;
-        }
-        return tok_eof;
-    }
-
-    switch (ch) {
-    case '{': return tok_lBrace;
-    case '}': return tok_rBrace;
-    case '[': return tok_lBracket;
-    case ']': return tok_rBracket;
-    case ':': return tok_colon;
-    case ',': return tok_comma;
-    default: break;
-    }
-
-    if (ch == '"') {
-        uint32_t n = 0;
-        for (;;) {
-            ch = lex_get();
-            if (ch < 0) {
-                fail("json", "unterminated string");
-                return tok_err;
-            }
-            if (ch == '"') {
-                break;
-            }
-            if (ch == '\\') {
-                fail("json", "string escapes not supported");
-                return tok_err;
-            }
-            if (n + 1 >= textSize) {
-                fail("json", "string too long");
-                return tok_err;
-            }
-            text[n++] = (char)ch;
-        }
-        text[n] = '\0';
-        return tok_string;
-    }
-
-    if (ch == '-' || (ch >= '0' && ch <= '9')) {
-        uint32_t n = 0;
-        text[n++] = (char)ch;
-        for (;;) {
-            ch = lex_peek();
-            if (ch == '.' || (ch >= '0' && ch <= '9')) {
-                if (n + 1 >= textSize) {
-                    fail("json", "number too long");
-                    return tok_err;
-                }
-                text[n++] = (char)lex_get();
-            } else if (ch == 'e' || ch == 'E') {
-                fail("json", "exponent notation not supported");
-                return tok_err;
-            } else {
-                break;
-            }
-        }
-        text[n] = '\0';
-        return tok_number;
-    }
-
-    if (ch == 't' || ch == 'f') {
-        const char *rest = (ch == 't') ? "rue" : "alse";
-        while (*rest) {
-            if (lex_get() != *rest++) {
-                fail("json", "bad literal");
-                return tok_err;
-            }
-        }
-        return (ch == 't') ? tok_true : tok_false;
-    }
-
-    fail("json", "unexpected character");
-    return tok_err;
-}
-
-static int expect(eTok want, const char *what)
-{
-    char text[TOK_MAX];
-    eTok t = next_token(text, sizeof(text));
-    if (t == tok_err) {
+    if (t == jsonTok_err) {
         return -1;
     }
     if (t != want) {
@@ -284,36 +164,10 @@ static int expect(eTok want, const char *what)
  * Number conversion (text -> integer domains; no floating point)
  * ========================================================================== */
 
-static int parse_i32(const char *text, int32_t *out)
-{
-    int32_t     v = 0;
-    int         neg = 0;
-    const char *p = text;
-
-    if (*p == '-') {
-        neg = 1;
-        p++;
-    }
-    if (*p == '\0' || strchr(p, '.') != NULL) {
-        return -1;                       /* integers only */
-    }
-    for (; *p; p++) {
-        if (*p < '0' || *p > '9') {
-            return -1;
-        }
-        if (v > (INT32_MAX - (*p - '0')) / 10) {
-            return -1;
-        }
-        v = v * 10 + (*p - '0');
-    }
-    *out = neg ? -v : v;
-    return 0;
-}
-
 static int parse_bounded(const char *text, int32_t lo, int32_t hi, int32_t *out)
 {
     int32_t v;
-    if (parse_i32(text, &v) != 0 || v < lo || v > hi) {
+    if (Json_ToI32(text, &v) != 0 || v < lo || v > hi) {
         return -1;
     }
     *out = v;
@@ -559,23 +413,23 @@ static int parse_point(const sModbusCapabilityRecord *cap,
     pc.rec.flags = MB_PT_READ;               /* access defaults to "r" */
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected point key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
 
         if (strcmp(key, "id") == 0) {
-            if (next_token(val, sizeof(val)) != tok_number ||
-                parse_i32(val, &v) != 0) {
+            if (next_token(val, sizeof(val)) != jsonTok_number ||
+                Json_ToI32(val, &v) != 0) {
                 return fail("id", "expected number");
             }
             /* Dense: an id that does not continue the run is where an
@@ -588,34 +442,34 @@ static int parse_point(const sModbusCapabilityRecord *cap,
         }
 
         t = next_token(val, sizeof(val));
-        if (t == tok_err) {
+        if (t == jsonTok_err) {
             return -1;
         }
 
         if (strcmp(key, "addr") == 0) {
-            if (t != tok_number || parse_bounded(val, 0, UINT16_MAX, &v) != 0) {
+            if (t != jsonTok_number || parse_bounded(val, 0, UINT16_MAX, &v) != 0) {
                 return fail("addr", "must be 0..65535");
             }
             pc.rec.addr = (uint16_t)v;
             pc.hasAddr = 1;
         } else if (strcmp(key, "fc") == 0) {
-            if (t != tok_string || fc_from_string(val, &pc.rec.functionCode) != 0) {
+            if (t != jsonTok_string || fc_from_string(val, &pc.rec.functionCode) != 0) {
                 return fail("fc", "must be \"holding\" or \"input\"");
             }
         } else if (strcmp(key, "decodeType") == 0) {
-            if (t != tok_string ||
+            if (t != jsonTok_string ||
                 decode_type_from_string(val, &pc.rec.decodeType) != 0) {
                 return fail("decodeType", "unknown decode type");
             }
             pc.hasDecode = 1;
         } else if (strcmp(key, "scale") == 0) {
-            if (t != tok_number ||
+            if (t != jsonTok_number ||
                 parse_scale_pow10(val, &pc.rec.scalePow10) != 0) {
                 return fail("scale", "must be an exact power of ten");
             }
             pc.hasScale = 1;
         } else if (strcmp(key, "unit") == 0) {
-            const sMbUnitInfo *u = (t == tok_string) ? MbUnits_FromString(val)
+            const sMbUnitInfo *u = (t == jsonTok_string) ? MbUnits_FromString(val)
                                                      : NULL;
             if (u == NULL) {
                 return fail("unit", "unknown unit");
@@ -623,31 +477,31 @@ static int parse_point(const sModbusCapabilityRecord *cap,
             pc.rec.unit = u->code;
             pc.hasUnit = 1;
         } else if (strcmp(key, "name") == 0) {
-            if (t != tok_string || val[0] == '\0' ||
+            if (t != jsonTok_string || val[0] == '\0' ||
                 strlen(val) >= MB_POINT_NAME_LEN || !name_chars_ok(val)) {
                 return fail("name", "1..23 chars of [A-Za-z0-9_-]");
             }
             snprintf(pc.rec.name, sizeof(pc.rec.name), "%s", val);
             pc.hasName = 1;
         } else if (strcmp(key, "length") == 0) {
-            if (t != tok_number || parse_bounded(val, 1, 64, &v) != 0) {
+            if (t != jsonTok_number || parse_bounded(val, 1, 64, &v) != 0) {
                 return fail("length", "must be 1..64 registers");
             }
             pc.rec.length = (uint8_t)v;
             pc.hasLength = 1;
         } else if (strcmp(key, "access") == 0) {
-            if (t != tok_string || access_from_string(val, &pc.rec.flags) != 0) {
+            if (t != jsonTok_string || access_from_string(val, &pc.rec.flags) != 0) {
                 return fail("access", "must be \"r\", \"w\" or \"rw\"");
             }
             pc.hasAccess = 1;
         } else if (strcmp(key, "writeMin") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("writeMin", "must be an int32 (scaled-int domain)");
             }
             pc.rec.writeMin = v;
             pc.hasWriteMin = 1;
         } else if (strcmp(key, "writeMax") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("writeMax", "must be an int32 (scaled-int domain)");
             }
             pc.rec.writeMax = v;
@@ -753,19 +607,19 @@ static int parse_blocks(sModbusCapabilityRecord *cap,
     char    val[TOK_MAX];
     int32_t v;
 
-    if (expect(tok_lBracket, "expected '[' for blocks") != 0) {
+    if (expect(jsonTok_lBracket, "expected '[' for blocks") != 0) {
         return -1;
     }
 
     for (;;) {
-        eTok t = next_token(val, sizeof(val));
-        if (t == tok_rBracket) {
+        eJsonTok t = next_token(val, sizeof(val));
+        if (t == jsonTok_rBracket) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_lBrace) {
+        if (t != jsonTok_lBrace) {
             return fail("blocks", "expected block object");
         }
         if (cap->blockCount >= MB_MAX_BLOCKS_PER_CAP) {
@@ -778,17 +632,17 @@ static int parse_blocks(sModbusCapabilityRecord *cap,
         for (;;) {
             char key[TOK_MAX];
             t = next_token(key, sizeof(key));
-            if (t == tok_rBrace) {
+            if (t == jsonTok_rBrace) {
                 break;
             }
-            if (t == tok_comma) {
+            if (t == jsonTok_comma) {
                 continue;
             }
-            if (t != tok_string ||
-                expect(tok_colon, "expected ':'") != 0) {
+            if (t != jsonTok_string ||
+                expect(jsonTok_colon, "expected ':'") != 0) {
                 return fail("blocks", "expected block key");
             }
-            if (next_token(val, sizeof(val)) != tok_number) {
+            if (next_token(val, sizeof(val)) != jsonTok_number) {
                 return fail("blocks", "expected number");
             }
             if (strcmp(key, "base") == 0) {
@@ -831,17 +685,17 @@ static int parse_capability(void)
     cap.maxReadRegs = MB_MAX_REGS_PER_READ;
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected capability key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
 
@@ -876,19 +730,19 @@ static int parse_capability(void)
                 return -1;
             }
 
-            if (expect(tok_lBracket, "expected '[' for points") != 0) {
+            if (expect(jsonTok_lBracket, "expected '[' for points") != 0) {
                 return -1;
             }
             s_c.subIdx = 0;
             for (;;) {
                 t = next_token(val, sizeof(val));
-                if (t == tok_rBracket) {
+                if (t == jsonTok_rBracket) {
                     break;
                 }
-                if (t == tok_comma) {
+                if (t == jsonTok_comma) {
                     continue;
                 }
-                if (t != tok_lBrace) {
+                if (t != jsonTok_lBrace) {
                     return fail("points", "expected point object");
                 }
                 if (s_c.counts.points >= MB_MAX_POINTS_TOTAL) {
@@ -923,12 +777,12 @@ static int parse_capability(void)
         }
 
         t = next_token(val, sizeof(val));
-        if (t == tok_err) {
+        if (t == jsonTok_err) {
             return -1;
         }
 
         if (strcmp(key, "id") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("id", "expected number");
             }
             if (v != s_c.capIdx) {
@@ -936,24 +790,24 @@ static int parse_capability(void)
             }
             idSeen = 1;
         } else if (strcmp(key, "name") == 0) {
-            if (t != tok_string || val[0] == '\0' ||
+            if (t != jsonTok_string || val[0] == '\0' ||
                 strlen(val) >= MB_NAME_LEN || !name_chars_ok(val)) {
                 return fail("name", "1..15 chars of [A-Za-z0-9_-]");
             }
             snprintf(cap.name, sizeof(cap.name), "%s", val);
         } else if (strcmp(key, "addrStride") == 0) {
-            if (t != tok_number || parse_bounded(val, 1, 255, &v) != 0) {
+            if (t != jsonTok_number || parse_bounded(val, 1, 255, &v) != 0) {
                 return fail("addrStride", "must be 1..255 address units/reg");
             }
             cap.addrStride = (uint8_t)v;
         } else if (strcmp(key, "writeFc") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0 ||
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                 (v != 6 && v != 16)) {
                 return fail("writeFc", "must be 6 or 16");
             }
             cap.writeFc = (uint8_t)v;
         } else if (strcmp(key, "maxReadRegs") == 0) {
-            if (t != tok_number ||
+            if (t != jsonTok_number ||
                 parse_bounded(val, 1, MB_MAX_REGS_PER_READ, &v) != 0) {
                 return fail("maxReadRegs", "must be 1..125");
             }
@@ -983,26 +837,26 @@ static int parse_device(void)
     memset(&dev, 0, sizeof(dev));
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected device key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
         t = next_token(val, sizeof(val));
-        if (t == tok_err) {
+        if (t == jsonTok_err) {
             return -1;
         }
 
         if (strcmp(key, "id") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("id", "expected number");
             }
             if (v != s_c.devIdx) {
@@ -1010,13 +864,13 @@ static int parse_device(void)
             }
             idSeen = 1;
         } else if (strcmp(key, "slaveAddr") == 0) {
-            if (t != tok_number || parse_bounded(val, 1, 247, &v) != 0) {
+            if (t != jsonTok_number || parse_bounded(val, 1, 247, &v) != 0) {
                 return fail("slaveAddr", "must be 1..247");
             }
             dev.slaveAddr = (uint8_t)v;
             haveSlave = 1;
         } else if (strcmp(key, "capability") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("capability", "expected number");
             }
             if (v < 0 || v >= (int32_t)s_c.counts.capabilities) {
@@ -1026,21 +880,21 @@ static int parse_device(void)
             haveCap = 1;
         } else if (strcmp(key, "baud") == 0) {
             int code;
-            if (t != tok_number || parse_i32(val, &v) != 0 ||
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                 (code = MbRecords_CodeFromBaud((uint32_t)v)) < 0) {
                 return fail("baud", "not one of the supported rates");
             }
             dev.baudCode = (uint8_t)code;
         } else if (strcmp(key, "format") == 0) {
-            if (t != tok_string || format_from_string(val, &dev.format) != 0) {
+            if (t != jsonTok_string || format_from_string(val, &dev.format) != 0) {
                 return fail("format", "must be 8N1, 8E1, 8O1 or 8N2");
             }
         } else if (strcmp(key, "port") == 0) {
-            if (t != tok_string || port_from_string(val, &dev.portId) != 0) {
+            if (t != jsonTok_string || port_from_string(val, &dev.portId) != 0) {
                 return fail("port", "this firmware has no such port");
             }
         } else if (strcmp(key, "topicPrefix") == 0) {
-            if (t != tok_string || val[0] == '\0' ||
+            if (t != jsonTok_string || val[0] == '\0' ||
                 strlen(val) >= MB_TOPIC_PREFIX_LEN || !name_chars_ok(val)) {
                 return fail("topicPrefix", "1..15 chars of [A-Za-z0-9_-]");
             }
@@ -1072,19 +926,19 @@ static int parse_time_tables(const sModbusPlanRecord *plan)
     uint16_t ptBase  = s_c.capPointBase[plan->capId];
     int      ttIdx   = 0;
 
-    if (expect(tok_lBracket, "expected '[' for timeTables") != 0) {
+    if (expect(jsonTok_lBracket, "expected '[' for timeTables") != 0) {
         return -1;
     }
 
     for (;;) {
-        eTok t = next_token(val, sizeof(val));
-        if (t == tok_rBracket) {
+        eJsonTok t = next_token(val, sizeof(val));
+        if (t == jsonTok_rBracket) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_lBrace) {
+        if (t != jsonTok_lBrace) {
             return fail("timeTables", "expected time table object");
         }
         if (ttIdx >= MB_MAX_TIME_TABLES_PER_PLAN) {
@@ -1102,32 +956,32 @@ static int parse_time_tables(const sModbusPlanRecord *plan)
         for (;;) {
             char key[TOK_MAX];
             t = next_token(key, sizeof(key));
-            if (t == tok_rBrace) {
+            if (t == jsonTok_rBrace) {
                 break;
             }
-            if (t == tok_comma) {
+            if (t == jsonTok_comma) {
                 continue;
             }
-            if (t != tok_string) {
+            if (t != jsonTok_string) {
                 return fail("timeTables", "expected key");
             }
-            if (expect(tok_colon, "expected ':'") != 0) {
+            if (expect(jsonTok_colon, "expected ':'") != 0) {
                 return -1;
             }
 
             if (strcmp(key, "points") == 0) {
-                if (expect(tok_lBracket, "expected '[' for points") != 0) {
+                if (expect(jsonTok_lBracket, "expected '[' for points") != 0) {
                     return -1;
                 }
                 for (;;) {
                     t = next_token(val, sizeof(val));
-                    if (t == tok_rBracket) {
+                    if (t == jsonTok_rBracket) {
                         break;
                     }
-                    if (t == tok_comma) {
+                    if (t == jsonTok_comma) {
                         continue;
                     }
-                    if (t != tok_number || parse_i32(val, &v) != 0) {
+                    if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                         return fail("points", "expected point id");
                     }
                     if (v < 0 || v >= (int32_t)ptCount) {
@@ -1157,11 +1011,11 @@ static int parse_time_tables(const sModbusPlanRecord *plan)
             }
 
             t = next_token(val, sizeof(val));
-            if (t == tok_err) {
+            if (t == jsonTok_err) {
                 return -1;
             }
             if (strcmp(key, "id") == 0) {
-                if (t != tok_number || parse_i32(val, &v) != 0) {
+                if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                     return fail("id", "expected number");
                 }
                 if (v != ttIdx) {
@@ -1169,7 +1023,7 @@ static int parse_time_tables(const sModbusPlanRecord *plan)
                 }
                 idSeen = 1;
             } else if (strcmp(key, "everySec") == 0) {
-                if (t != tok_number || parse_i32(val, &v) != 0 || v < 1) {
+                if (t != jsonTok_number || Json_ToI32(val, &v) != 0 || v < 1) {
                     return fail("everySec", "must be >= 1");
                 }
                 tt.period_sec = (uint32_t)v;
@@ -1212,17 +1066,17 @@ static int parse_plan(void)
     memset(s_c.ptSeen, 0, sizeof(s_c.ptSeen));
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected plan key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
 
@@ -1230,18 +1084,18 @@ static int parse_plan(void)
             if (!haveCap) {
                 return fail("devices", "capability must precede devices");
             }
-            if (expect(tok_lBracket, "expected '[' for devices") != 0) {
+            if (expect(jsonTok_lBracket, "expected '[' for devices") != 0) {
                 return -1;
             }
             for (;;) {
                 t = next_token(val, sizeof(val));
-                if (t == tok_rBracket) {
+                if (t == jsonTok_rBracket) {
                     break;
                 }
-                if (t == tok_comma) {
+                if (t == jsonTok_comma) {
                     continue;
                 }
-                if (t != tok_number || parse_i32(val, &v) != 0) {
+                if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                     return fail("devices", "expected device id");
                 }
                 if (v < 0 || v >= (int32_t)s_c.counts.devices) {
@@ -1270,12 +1124,12 @@ static int parse_plan(void)
         }
 
         t = next_token(val, sizeof(val));
-        if (t == tok_err) {
+        if (t == jsonTok_err) {
             return -1;
         }
 
         if (strcmp(key, "id") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("id", "expected number");
             }
             /* A plan id is a SLOT, not a position: unique, 0..7, gaps allowed
@@ -1295,13 +1149,13 @@ static int parse_plan(void)
             plan.planId       = (uint8_t)v;
             idSeen = 1;
         } else if (strcmp(key, "name") == 0) {
-            if (t != tok_string || val[0] == '\0' ||
+            if (t != jsonTok_string || val[0] == '\0' ||
                 strlen(val) >= MB_NAME_LEN || !name_chars_ok(val)) {
                 return fail("name", "1..15 chars of [A-Za-z0-9_-]");
             }
             snprintf(plan.name, sizeof(plan.name), "%s", val);
         } else if (strcmp(key, "capability") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0) {
                 return fail("capability", "expected number");
             }
             if (v < 0 || v >= (int32_t)s_c.counts.capabilities) {
@@ -1338,18 +1192,18 @@ static int parse_array_of(const char *what, int (*parseOne)(void), int *idx,
 {
     char val[TOK_MAX];
 
-    if (expect(tok_lBracket, "expected '[' for section") != 0) {
+    if (expect(jsonTok_lBracket, "expected '[' for section") != 0) {
         return -1;
     }
     for (;;) {
-        eTok t = next_token(val, sizeof(val));
-        if (t == tok_rBracket) {
+        eJsonTok t = next_token(val, sizeof(val));
+        if (t == jsonTok_rBracket) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_lBrace) {
+        if (t != jsonTok_lBrace) {
             return fail(what, "expected object");
         }
         if (*count >= max) {
@@ -1370,22 +1224,22 @@ static int parse_config(void)
     char key[TOK_MAX];
     int  seenCaps = 0, seenDevs = 0, seenPlans = 0;
 
-    if (expect(tok_lBrace, "expected '{'") != 0) {
+    if (expect(jsonTok_lBrace, "expected '{'") != 0) {
         return -1;
     }
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected section key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
 
@@ -1469,7 +1323,7 @@ static int parse_config(void)
         }
     }
 
-    if (next_token(key, sizeof(key)) != tok_eof) {
+    if (next_token(key, sizeof(key)) != jsonTok_eof) {
         return fail("json", "trailing data after config");
     }
     return 0;
@@ -1503,8 +1357,7 @@ static int compile_or_verify(fModbusByteSource src, void *srcCtx,
     res->subIdx  = -1;
 
     memset(&s_c, 0, sizeof(s_c));
-    s_c.src        = src;
-    s_c.srcCtx     = srcCtx;
+    Json_ReaderInit(&s_c.rd, src, srcCtx);
     s_c.region     = region;
     s_c.regionMax  = regionSize;
     s_c.kick       = kick;
@@ -1589,8 +1442,7 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
     res->subIdx = -1;
 
     memset(&s_c, 0, sizeof(s_c));
-    s_c.src    = src;
-    s_c.srcCtx = srcCtx;
+    Json_ReaderInit(&s_c.rd, src, srcCtx);
     s_c.res    = res;
     s_c.dryRun = 1;
     s_c.capIdx = -1;
@@ -1602,38 +1454,38 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
     memset(s_planName, 0, sizeof(s_planName));
     *outId = -1;
 
-    if (expect(tok_lBrace, "expected '{'") != 0) {
+    if (expect(jsonTok_lBrace, "expected '{'") != 0) {
         return -1;
     }
 
     for (;;) {
-        eTok t = next_token(key, sizeof(key));
-        if (t == tok_rBrace) {
+        eJsonTok t = next_token(key, sizeof(key));
+        if (t == jsonTok_rBrace) {
             break;
         }
-        if (t == tok_comma) {
+        if (t == jsonTok_comma) {
             continue;
         }
-        if (t != tok_string) {
+        if (t != jsonTok_string) {
             return fail("json", "expected plan key");
         }
-        if (expect(tok_colon, "expected ':'") != 0) {
+        if (expect(jsonTok_colon, "expected ':'") != 0) {
             return -1;
         }
 
         if (strcmp(key, "devices") == 0) {
-            if (expect(tok_lBracket, "expected '[' for devices") != 0) {
+            if (expect(jsonTok_lBracket, "expected '[' for devices") != 0) {
                 return -1;
             }
             for (;;) {
                 t = next_token(val, sizeof(val));
-                if (t == tok_rBracket) {
+                if (t == jsonTok_rBracket) {
                     break;
                 }
-                if (t == tok_comma) {
+                if (t == jsonTok_comma) {
                     continue;
                 }
-                if (t != tok_number || parse_i32(val, &v) != 0 ||
+                if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                     v < 0 || v >= MB_MAX_DEVICES) {
                     return fail("devices", "expected device id 0..7");
                 }
@@ -1643,18 +1495,18 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
         }
 
         if (strcmp(key, "timeTables") == 0) {
-            if (expect(tok_lBracket, "expected '[' for timeTables") != 0) {
+            if (expect(jsonTok_lBracket, "expected '[' for timeTables") != 0) {
                 return -1;
             }
             for (;;) {
                 t = next_token(val, sizeof(val));
-                if (t == tok_rBracket) {
+                if (t == jsonTok_rBracket) {
                     break;
                 }
-                if (t == tok_comma) {
+                if (t == jsonTok_comma) {
                     continue;
                 }
-                if (t != tok_lBrace) {
+                if (t != jsonTok_lBrace) {
                     return fail("timeTables", "expected time table object");
                 }
                 if (tableCount >= MB_MAX_TIME_TABLES_PER_PLAN) {
@@ -1667,29 +1519,29 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
                 for (;;) {
                     char k2[TOK_MAX];
                     t = next_token(k2, sizeof(k2));
-                    if (t == tok_rBrace) {
+                    if (t == jsonTok_rBrace) {
                         break;
                     }
-                    if (t == tok_comma) {
+                    if (t == jsonTok_comma) {
                         continue;
                     }
-                    if (t != tok_string ||
-                        expect(tok_colon, "expected ':'") != 0) {
+                    if (t != jsonTok_string ||
+                        expect(jsonTok_colon, "expected ':'") != 0) {
                         return fail("timeTables", "expected key");
                     }
                     if (strcmp(k2, "points") == 0) {
-                        if (expect(tok_lBracket, "expected '['") != 0) {
+                        if (expect(jsonTok_lBracket, "expected '['") != 0) {
                             return -1;
                         }
                         for (;;) {
                             t = next_token(val, sizeof(val));
-                            if (t == tok_rBracket) {
+                            if (t == jsonTok_rBracket) {
                                 break;
                             }
-                            if (t == tok_comma) {
+                            if (t == jsonTok_comma) {
                                 continue;
                             }
-                            if (t != tok_number || parse_i32(val, &v) != 0 ||
+                            if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                                 v < 0 || v > UINT16_MAX) {
                                 return fail("points", "expected point id");
                             }
@@ -1701,11 +1553,11 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
                         continue;
                     }
                     t = next_token(val, sizeof(val));
-                    if (t == tok_err) {
+                    if (t == jsonTok_err) {
                         return -1;
                     }
                     if (strcmp(k2, "everySec") == 0) {
-                        if (t != tok_number || parse_i32(val, &v) != 0 ||
+                        if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                             v < 1) {
                             return fail("everySec", "must be >= 1");
                         }
@@ -1724,25 +1576,25 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
         }
 
         t = next_token(val, sizeof(val));
-        if (t == tok_err) {
+        if (t == jsonTok_err) {
             return -1;
         }
 
         if (strcmp(key, "id") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0 ||
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0 ||
                 v < 0 || v >= MB_MAX_PLANS) {
                 return fail("id", "plan id must be 0..7");
             }
             *outId = (int)v;
             idSeen = 1;
         } else if (strcmp(key, "name") == 0) {
-            if (t != tok_string || val[0] == '\0' ||
+            if (t != jsonTok_string || val[0] == '\0' ||
                 strlen(val) >= MB_NAME_LEN || !name_chars_ok(val)) {
                 return fail("name", "1..15 chars of [A-Za-z0-9_-]");
             }
             snprintf(s_planName, sizeof(s_planName), "%s", val);
         } else if (strcmp(key, "capability") == 0) {
-            if (t != tok_number || parse_i32(val, &v) != 0 || v < 0) {
+            if (t != jsonTok_number || Json_ToI32(val, &v) != 0 || v < 0) {
                 return fail("capability", "expected number");
             }
             out->capId = (uint16_t)v;
@@ -1764,7 +1616,7 @@ int MbCfgParsePlan(fModbusByteSource src, void *srcCtx,
     out->tables     = s_planTables;
     out->tableCount = tableCount;
 
-    if (next_token(key, sizeof(key)) != tok_eof) {
+    if (next_token(key, sizeof(key)) != jsonTok_eof) {
         return fail("json", "trailing data after plan");
     }
 

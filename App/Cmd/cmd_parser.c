@@ -25,6 +25,7 @@
 #include "App/Net/wg_time.h"
 #include "App/Pack/pack.h"
 #include "App/Func/func.h"
+#include "json.h"
 #include "nvdb.h"
 #include "nvdb_config.h"
 #include "nvdb_layout.h"
@@ -692,13 +693,12 @@ static void cmd_modbus(const char *args)
                                       MB_MAX_TIME_TABLES_PER_PLAN,
                                       ids, MB_MAX_TT_ENTRIES_PER_PLAN);
             for (int t = 0; t < n; t++) {
-                char tb[100];
-                int  at = snprintf(tb, sizeof(tb), "%us:", 
-                                   (unsigned)tables[t].period_sec);
-                for (uint16_t k = 0; k < tables[t].count &&
-                                     at < (int)sizeof(tb) - 8; k++) {
-                    at += snprintf(tb + at, sizeof(tb) - (size_t)at, " %u",
-                                   tables[t].points[k]);
+                char   tb[100];
+                size_t at = Json_Cat(tb, sizeof(tb), 0u, "%us:",
+                                     (unsigned)tables[t].period_sec);
+                for (uint16_t k = 0; k < tables[t].count; k++) {
+                    at = Json_Cat(tb, sizeof(tb), at, " %u",
+                                  tables[t].points[k]);
                 }
                 TRiceS("  table: %s\n", tb);
             }
@@ -758,11 +758,10 @@ static void cmd_modbus(const char *args)
             TRice("Modbus lastreq: none\n");
             return;
         }
-        char hex[80];
-        int  at = 0;
-        for (uint16_t i = 0; i < n && at < (int)sizeof(hex) - 3; i++) {
-            at += snprintf(hex + at, sizeof(hex) - (size_t)at, "%02x",
-                           frame[i]);
+        char   hex[80];
+        size_t at = 0u;
+        for (uint16_t i = 0; i < n; i++) {
+            at = Json_Cat(hex, sizeof(hex), at, "%02x", frame[i]);
         }
         TRiceS("Modbus lastreq: %s\n", hex);
     } else if (strncmp(args, "silence", 7) == 0) {

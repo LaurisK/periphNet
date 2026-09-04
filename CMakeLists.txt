@@ -115,6 +115,17 @@ set(SHARED_MODBUS_SOURCES
     Shared/Modbus/modbus_units.c
 )
 
+# Application-only Shared/ code: THE JSON module (docs/task_json_module.md).
+# The clamped writer exists because the `n += snprintf(&buf[n], CAP - n, ...)`
+# idiom it replaces underflows CAP - n into a ~4 GB size limit at an address
+# already past the end of the buffer; the reader replaces three private
+# tokenizers, none of which handled escapes.  Kept out of SHARED_SOURCES for
+# the usual reason: the 32 KB bootloader parses no JSON and emits none.
+set(SHARED_JSON_SOURCES
+    Shared/Json/json_write.c
+    Shared/Json/json_read.c
+)
+
 # Application-only Shared/ code: the fault-context flash path.  It is a second,
 # minimal driver rather than a mode of w25q128.c — the two differ in their time
 # base, their error policy, their bus-recovery behaviour and whether they may
@@ -282,6 +293,16 @@ foreach(_f ${_bl_srcs})
     file(STRINGS "${_f}" _hits REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<]nvdb")
     if(_hits)
         message(FATAL_ERROR "nvDb reached the bootloader: ${_f}: ${_hits}")
+    endif()
+endforeach()
+
+# Same rule for the JSON module: the bootloader parses no JSON and emits none,
+# and the 32 KB budget has no room to discover otherwise by accident
+# (docs/task_json_module.md §3.3).
+foreach(_f ${_bl_srcs})
+    file(STRINGS "${_f}" _hits REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<]json")
+    if(_hits)
+        message(FATAL_ERROR "JSON reached the bootloader: ${_f}: ${_hits}")
     endif()
 endforeach()
 
@@ -595,6 +616,7 @@ target_include_directories(trice PUBLIC
 
 set(APP_INCLUDES
     ${BASE_INCLUDES}
+    Shared/Json
     Shared/Modbus
     Shared/NvDb
     Core/ThreadSafe
@@ -647,6 +669,7 @@ set(APP_LINK_FLAGS
 add_executable(application.elf
     ${APP_CORE_SOURCES}
     ${APP_MODULE_SOURCES}
+    ${SHARED_JSON_SOURCES}
     ${SHARED_MODBUS_SOURCES}
     ${SHARED_NVDB_SOURCES}
     ${SHARED_FAULT_SOURCES}

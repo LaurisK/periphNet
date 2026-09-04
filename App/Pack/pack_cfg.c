@@ -19,6 +19,9 @@
 
 #include "App/Pack/pack_cfg.h"
 
+#include "json.h"
+
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,19 +29,22 @@
 /* Private defines ----------------------------------------------------------*/
 
 #define CFG_TOK_MAX     32u     /* longest key/word we ever need to hold     */
-#define CFG_READ_CHUNK  64u
+/* Longest fragment the serialiser emits: the pack header, with `name` and
+ * `bind` at their worst-case escape expansion of six bytes per byte in.  A
+ * stack local inside emit(), not a static -- .bss is the tight region. */
+#define CFG_LINE_MAX    384u
+
+/* Escaped worst case is six bytes out per byte in (\u00XX). */
+#define PACK_NAME_ESC_LEN   (((PACK_NAME_LEN - 1u) * 6u) + 1u)
+#define PACK_BIND_ESC_LEN   (((PACK_BIND_LEN - 1u) * 6u) + 1u)
 
 /* Private types ------------------------------------------------------------*/
 
-typedef struct {
-    fPackByteSource src;
-    void           *ctx;
-    uint8_t         buf[CFG_READ_CHUNK];
-    uint32_t        len;
-    uint32_t        pos;
-    int             eof;
-    int             err;
-} sCfgReader;
+/* The tokenizer is Shared/Json (docs/task_json_module.md §3.2).  The rd_*
+ * wrappers below keep this file's 1-or-0 convention -- and its habit of
+ * peeking at the next structural character before deciding what to parse --
+ * without a second copy of a JSON reader behind them. */
+typedef sJsonReader sCfgReader;
 
 /* Private variables --------------------------------------------------------*/
 
@@ -126,59 +132,37 @@ static void SetFailure(sPackCfgResult *res, int packIdx, const char *field,
 
 /* --- the reader -------------------------------------------------------- */
 
-static int rd_fill(sCfgReader *r)
-{
-    int n;
-
-    if (r->eof || r->err) {
-        return 0;
-    }
-    n = r->src(r->ctx, r->buf, CFG_READ_CHUNK);
-    if (n < 0) {
-        r->err = 1;
-        return 0;
-    }
-    if (n == 0) {
-        r->eof = 1;
-        return 0;
-    }
-    r->len = (uint32_t)n;
-    r->pos = 0u;
-    return 1;
-}
-
 static int rd_peek(sCfgReader *r, char *out)
 {
-    if (r->pos >= r->len) {
-        if (!rd_fill(r)) {
-            return 0;
-        }
+    const int ch = Json_Peek(r);
+
+    if (ch < 0) {
+        return 0;
     }
-    *out = (char)r->buf[r->pos];
+    *out = (char)ch;
     return 1;
 }
 
 static int rd_bump(sCfgReader *r, char *out)
 {
-    if (!rd_peek(r, out)) {
+    const int ch = Json_Get(r);
+
+    if (ch < 0) {
         return 0;
     }
-    r->pos++;
+    *out = (char)ch;
     return 1;
+}
+
+/** Consume a byte rd_peek() has already looked at. */
+static void rd_take(sCfgReader *r)
+{
+    (void)Json_Get(r);
 }
 
 static int rd_skip_ws(sCfgReader *r)
 {
-    char c;
-
-    while (rd_peek(r, &c)) {
-        if ((c == ' ') || (c == '\t') || (c == '\n') || (c == '\r')) {
-            r->pos++;
-            continue;
-        }
-        return 1;
-    }
-    return 0;
+    return (Json_SkipWs(r) >= 0) ? 1 : 0;
 }
 
 static int rd_expect(sCfgReader *r, char want)
@@ -191,92 +175,25 @@ static int rd_expect(sCfgReader *r, char want)
     return (c == want) ? 1 : 0;
 }
 
-/* A JSON string, with no escape handling — the schema has no use for one and
- * accepting escapes would mean deciding what they mean. */
+/* A JSON string.  Escapes ARE handled now: this file used to accept `\` into
+ * the field, which then went to flash and came back out raw into every
+ * response that named the pack (docs/task_json_module.md §1.3). */
 static int rd_string(sCfgReader *r, char *out, uint32_t cap)
 {
-    uint32_t n = 0u;
-    char     c;
-
-    if (!rd_expect(r, '"')) {
-        return 0;
-    }
-    while (rd_bump(r, &c)) {
-        if (c == '"') {
-            out[n] = '\0';
-            return 1;
-        }
-        if (n + 1u >= cap) {
-            return 0;               /* too long for its field               */
-        }
-        out[n++] = c;
-    }
-    return 0;
+    return Json_ReadString(r, out, cap);
 }
 
+/* REJECTS rather than wraps.  Signed overflow is undefined behaviour, and a
+ * wrapped value is worse than a rejected one: a 14-digit nameplate_ah once
+ * wrapped into a small positive number and passed every downstream check. */
 static int rd_number(sCfgReader *r, int32_t *out)
 {
-    int32_t v   = 0;
-    int     neg = 0;
-    int     any = 0;
-    char    c;
-
-    if (!rd_skip_ws(r)) {
-        return 0;
-    }
-    if (rd_peek(r, &c) && (c == '-')) {
-        neg = 1;
-        r->pos++;
-    }
-    while (rd_peek(r, &c) && (c >= '0') && (c <= '9')) {
-        const int32_t d = (int32_t)(c - '0');
-
-        /* REJECT rather than wrap.  Signed overflow is undefined behaviour,
-         * and a wrapped value is worse than a rejected one: a 14-digit
-         * nameplate_ah once wrapped into a small positive number and passed
-         * every downstream check. */
-        if ((v > ((INT32_MAX - d) / 10))) {
-            return 0;
-        }
-        v = (v * 10) + d;
-        any = 1;
-        r->pos++;
-    }
-    if (!any) {
-        return 0;
-    }
-    *out = neg ? -v : v;
-    return 1;
+    return Json_ReadI32(r, out);
 }
 
-/* true / false, as a bare word. */
 static int rd_bool(sCfgReader *r, int *out)
 {
-    char word[8];
-    uint32_t n = 0u;
-    char c;
-
-    if (!rd_skip_ws(r)) {
-        return 0;
-    }
-    while (rd_peek(r, &c) && (c >= 'a') && (c <= 'z')) {
-        if (n + 1u >= sizeof(word)) {
-            return 0;
-        }
-        word[n++] = c;
-        r->pos++;
-    }
-    word[n] = '\0';
-
-    if (strcmp(word, "true") == 0) {
-        *out = 1;
-        return 1;
-    }
-    if (strcmp(word, "false") == 0) {
-        *out = 0;
-        return 1;
-    }
-    return 0;
+    return Json_ReadBool(r, out);
 }
 
 /* --- validators -------------------------------------------------------- */
@@ -343,7 +260,7 @@ static int parse_commands(sCfgReader *r, sPackCfgEntry *e, int idx,
         return 0;
     }
     if (c == '}') {
-        r->pos++;
+        rd_take(r);
         return 1;                       /* present and empty: allow nothing */
     }
 
@@ -378,7 +295,7 @@ static int parse_commands(sCfgReader *r, sPackCfgEntry *e, int idx,
             int  haveLo = 0;
             int  haveHi = 0;
 
-            r->pos++;
+            rd_take(r);
             for (;;) {
                 int32_t v;
 
@@ -655,9 +572,7 @@ int PackCfg_Parse(fPackByteSource src, void *srcCtx, sPackCfg *out,
         return packErr_badArg;
     }
 
-    memset(&r, 0, sizeof(r));
-    r.src = src;
-    r.ctx = srcCtx;
+    Json_ReaderInit(&r, src, srcCtx);
     memset(out, 0, sizeof(*out));
     if (res != NULL) {
         memset(res, 0, sizeof(*res));
@@ -703,7 +618,7 @@ int PackCfg_Parse(fPackByteSource src, void *srcCtx, sPackCfg *out,
                 return packErr_badArg;
             }
             if (c == ']') {
-                r.pos++;            /* an empty fleet is a valid statement  */
+                rd_take(&r);        /* an empty fleet is a valid statement  */
             } else {
                 for (;;) {
                     if (out->count >= PACK_MAX) {
@@ -750,7 +665,7 @@ int PackCfg_Parse(fPackByteSource src, void *srcCtx, sPackCfg *out,
         }
     }
 
-    if (r.err) {
+    if (r.ioErr != 0u) {
         SetFailure(res, -1, "json", "source error");
         return packErr_badArg;
     }
@@ -764,45 +679,62 @@ int PackCfg_Parse(fPackByteSource src, void *srcCtx, sPackCfg *out,
     return packErr_ok;
 }
 
+/**
+ * @brief Push one formatted fragment at the sink.
+ * @retval 0 on success, packErr_badArg if it did not fit or the sink refused
+ * @note Bounded, not clamped: a fragment that does not fit is a bug in this
+ *       function's buffer sizing, not something to truncate silently into a
+ *       document somebody will try to upload again.
+ */
+static int emit(fPackByteSink sink, void *ctx, const char *fmt, ...)
+{
+    char    line[CFG_LINE_MAX];
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+
+    if ((n < 0) || (n >= (int)sizeof(line))) {
+        return packErr_badArg;
+    }
+    return (sink(ctx, line, (uint32_t)n) < 0) ? packErr_badArg : packErr_ok;
+}
+
 int PackCfg_Serialize(const sPackCfg *cfg, fPackByteSink sink, void *ctx)
 {
-    char     line[192];
-    uint8_t  i;
-    int      n;
+    uint8_t i;
 
     if ((cfg == NULL) || (sink == NULL)) {
         return packErr_badArg;
     }
 
-    n = snprintf(line, sizeof(line), "{\"version\":%u,\"packs\":[",
-                 (unsigned)cfg->version);
-    if ((n < 0) || (n >= (int)sizeof(line))) {
-        return packErr_badArg;
-    }
-    if (sink(ctx, line, (uint32_t)n) < 0) {
+    if (emit(sink, ctx, "{\"version\":%u,\"packs\":[",
+             (unsigned)cfg->version) != packErr_ok) {
         return packErr_badArg;
     }
 
     for (i = 0u; i < cfg->count; i++) {
         const sPackCfgEntry *e = &cfg->pack[i];
-        uint8_t              b;
+        char                 nameEsc[PACK_NAME_ESC_LEN];
+        char                 bindEsc[PACK_BIND_ESC_LEN];
 
-        n = snprintf(line, sizeof(line),
-                     "%s{\"name\":\"%s\",\"type\":\"%s\",\"bind\":\"%s\","
-                     "\"nameplate_ah\":%lu,\"cells\":%u,\"chemistry\":\"%s\","
-                     "\"staleAfter_ms\":%lu",
-                     (i == 0u) ? "" : ",",
-                     e->name, PackCfg_TypeName(e->typeId), e->bind,
-                     (unsigned long)(e->nameplate_mAh / 1000u),
-                     (unsigned)e->cellCount, PackCfg_ChemName(e->chemistry),
-                     (unsigned long)e->staleAfter_ms);
-        if ((n < 0) || (n >= (int)sizeof(line))) {
-            return packErr_badArg;
-        }
-        if ((n < 0) || (n >= (int)sizeof(line))) {
-        return packErr_badArg;
-    }
-    if (sink(ctx, line, (uint32_t)n) < 0) {
+        /* `name` and `bind` are the operator's text and the parser now
+         * accepts escapes in both, so they are escaped on the way out or the
+         * document will not re-upload (docs/task_json_module.md §1.3). */
+        (void)Json_Escape(nameEsc, sizeof(nameEsc), e->name);
+        (void)Json_Escape(bindEsc, sizeof(bindEsc), e->bind);
+
+        if (emit(sink, ctx,
+                 "%s{\"name\":\"%s\",\"type\":\"%s\",\"bind\":\"%s\","
+                 "\"nameplate_ah\":%lu,\"cells\":%u,\"chemistry\":\"%s\","
+                 "\"staleAfter_ms\":%lu",
+                 (i == 0u) ? "" : ",",
+                 nameEsc, PackCfg_TypeName(e->typeId), bindEsc,
+                 (unsigned long)(e->nameplate_mAh / 1000u),
+                 (unsigned)e->cellCount, PackCfg_ChemName(e->chemistry),
+                 (unsigned long)e->staleAfter_ms) != packErr_ok) {
             return packErr_badArg;
         }
 
@@ -813,48 +745,34 @@ int PackCfg_Serialize(const sPackCfg *cfg, fPackByteSink sink, void *ctx)
             uint32_t cmd;
             int      first = 1;
 
-            n = snprintf(line, sizeof(line), ",\"commands\":{");
-            if ((n < 0) || (n >= (int)sizeof(line))) {
-            return packErr_badArg;
-        }
-        if ((n < 0) || (n >= (int)sizeof(line))) {
-        return packErr_badArg;
-    }
-    if (sink(ctx, line, (uint32_t)n) < 0) {
+            if (emit(sink, ctx, ",\"commands\":{") != packErr_ok) {
                 return packErr_badArg;
             }
             for (cmd = 1u; cmd < (uint32_t)packCmd_last; cmd++) {
                 const sPackCmdBound *bd;
+                int                  r;
 
                 if ((e->cmdAllow & PACK_CMD_BIT(cmd)) == 0u) {
                     continue;
                 }
-                bd = find_bound(e->bounds, e->boundCount,
-                                 (ePackCmdId)cmd);
+                bd = find_bound(e->bounds, e->boundCount, (ePackCmdId)cmd);
                 if (bd != NULL) {
-                    n = snprintf(line, sizeof(line),
-                                 "%s\"%s\":{\"min_a\":%ld,\"max_a\":%ld}",
-                                 first ? "" : ",",
-                                 PackCfg_CmdName((ePackCmdId)cmd),
-                                 (long)(bd->min_scaled / 1000),
-                                 (long)(bd->max_scaled / 1000));
+                    r = emit(sink, ctx,
+                             "%s\"%s\":{\"min_a\":%ld,\"max_a\":%ld}",
+                             first ? "" : ",",
+                             PackCfg_CmdName((ePackCmdId)cmd),
+                             (long)(bd->min_scaled / 1000),
+                             (long)(bd->max_scaled / 1000));
                 } else {
-                    n = snprintf(line, sizeof(line), "%s\"%s\":true",
-                                 first ? "" : ",",
-                                 PackCfg_CmdName((ePackCmdId)cmd));
+                    r = emit(sink, ctx, "%s\"%s\":true",
+                             first ? "" : ",",
+                             PackCfg_CmdName((ePackCmdId)cmd));
                 }
-                first = 0;
-                if ((n < 0) || (n >= (int)sizeof(line))) {
-            return packErr_badArg;
-        }
-        if ((n < 0) || (n >= (int)sizeof(line))) {
-        return packErr_badArg;
-    }
-    if (sink(ctx, line, (uint32_t)n) < 0) {
+                if (r != packErr_ok) {
                     return packErr_badArg;
                 }
+                first = 0;
             }
-            (void)b;
             if (sink(ctx, "}", 1u) < 0) {
                 return packErr_badArg;
             }

@@ -29,13 +29,29 @@ set(UNIT_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/mocks
     ${PROJECT_ROOT}/Shared/Crypto
     ${PROJECT_ROOT}/Shared/Fwu
+    ${PROJECT_ROOT}/Shared/Json
     ${PROJECT_ROOT}/Shared/Modbus
     ${PROJECT_ROOT}/Shared/NvDb
 )
 
+# THE JSON module — the clamped writer and the one tokenizer.  Everything that
+# parses or emits a configuration links it (docs/task_json_module.md).
+set(JSON_CORE
+    ${PROJECT_ROOT}/Shared/Json/json_write.c
+    ${PROJECT_ROOT}/Shared/Json/json_read.c
+)
+
+add_executable(test_json
+    test_json.c
+    ${JSON_CORE}
+)
+target_include_directories(test_json PRIVATE ${UNIT_INCLUDES})
+add_test(NAME json COMMAND test_json)
+
 # nvDb is now the only authority over the medium, so every test that touches
 # flash links it and drives it through its host port.
 set(NVDB_CORE
+    ${JSON_CORE}
     ${PROJECT_ROOT}/Shared/NvDb/nvdb.c
     ${PROJECT_ROOT}/Shared/NvDb/nvdb_layout.c
     ${PROJECT_ROOT}/Shared/NvDb/nvdb_config.c
@@ -120,6 +136,7 @@ add_test(NAME modbus_units COMMAND test_modbus_units)
 add_executable(test_modbus_compiler
     test_modbus_compiler.c
     ${NVDB_CORE}
+    ${JSON_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
@@ -138,7 +155,9 @@ add_test(NAME modbus_compiler COMMAND test_modbus_compiler)
 add_executable(test_modbus_export
     test_modbus_export.c
     ${NVDB_CORE}
+    ${JSON_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_export.c
+    ${JSON_CORE}
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_compiler.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_config_store.c
     ${PROJECT_ROOT}/Shared/Modbus/modbus_blocks.c
@@ -187,9 +206,6 @@ add_test(NAME wg_conf COMMAND test_wg_conf)
 # (previous condition, group ticks, now) or of the bytes of a config, so it is
 # testable here with no board, no RTOS and no flash.  §17: "defer the test
 # pack type; do not defer testability".
-#
-# THESE TESTS ARE EXPECTED TO FAIL: the module is scaffolding, and the suite
-# is the executable form of the contract it must grow into.
 add_executable(test_pack_fsm
     test_pack_fsm.c
     ${PROJECT_ROOT}/App/Pack/pack_fsm.c
@@ -212,6 +228,7 @@ add_test(NAME pack_soc COMMAND test_pack_soc)
 
 add_executable(test_pack_cfg
     test_pack_cfg.c
+    ${JSON_CORE}
     ${PROJECT_ROOT}/App/Pack/pack_cfg.c
 )
 target_include_directories(test_pack_cfg PRIVATE

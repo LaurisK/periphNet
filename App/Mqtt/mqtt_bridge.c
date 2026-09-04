@@ -21,6 +21,7 @@
  * and stays there for consumers to call (docs/modbus.md §5.3).  The flash
  * accessors (MbCfg_*, MbCfgStore_*) are gone from this file — everything the
  * bridge knows about the config now arrives as a catalogue. */
+#include "json.h"
 #include "modbus_decode.h"
 #include "modbus_units.h"
 
@@ -70,6 +71,10 @@ static uint32_t          s_reconnectCount;
 
 static char s_topic[TOPIC_MAX] CCMRAM_BSS;
 static char s_payload[PAYLOAD_MAX] CCMRAM_BSS;
+
+/* Escaped worst case is six bytes out per byte in (\u00XX). */
+#define HA_NAME_ESC_LEN     (((MB_POINT_NAME_LEN - 1u) * 6u) + 1u)
+#define HA_PREFIX_ESC_LEN   (((MB_TOPIC_PREFIX_LEN - 1u) * 6u) + 1u)
 
 /* --------------------------------------------------------------------------
  * Deferred work state
@@ -279,6 +284,7 @@ typedef struct {
 static int                s_modbusSub = -1;
 static osMessageQueueId_t s_pubQueue;
 static uint32_t           s_droppedMsgs;
+static uint32_t           s_haDiscardedCnt;  /* discovery payloads too long */
 static volatile int       s_catalogueLost;  /* a desc did not fit the queue */
 
 /* A catalogue burst is the heaviest thing the dispatcher does (§4.5) — 27
@@ -621,47 +627,60 @@ static void handle_set_message(const char *topic, const char *payload)
 static void ha_publish_entity(const sBridgeMsg *m, int asNumber)
 {
     const sMbUnitInfo *unit = MbUnits_FromCode(m->unit);
-    int n;
+    char   nameEsc[HA_NAME_ESC_LEN];
+    char   prefixEsc[HA_PREFIX_ESC_LEN];
+    char   devEsc[HA_PREFIX_ESC_LEN];
+    size_t n = 0u;
 
+    /* `prefix` and `name` are display strings out of the uploaded Modbus
+     * config and are interpolated fifteen times below, which is what made
+     * this the reachable half of the overrun: a long name is an upload away,
+     * not an unlucky pack count (docs/task_json_module.md §2.2). */
+    (void)Json_Escape(nameEsc,   sizeof(nameEsc),   m->name);
+    (void)Json_Escape(prefixEsc, sizeof(prefixEsc), m->prefix);
+    (void)Json_Escape(devEsc,    sizeof(devEsc),    s_cfg.prefix);
+
+    /* The topic is not JSON and MUST NOT be escaped -- HA subscribes to the
+     * literal bytes.  It is snprintf-bounded, which is safe on its own. */
     snprintf(s_topic, sizeof(s_topic), "homeassistant/%s/%s/%s%s/config",
              asNumber ? "number" : "sensor", m->prefix, m->name,
              asNumber ? "_set" : "");
 
-    n = snprintf(s_payload, sizeof(s_payload),
+    n = Json_Cat(s_payload, sizeof(s_payload), n,
         "{"
         "\"name\":\"%s\","
         "\"state_topic\":\"%s/%s\","
         "\"unique_id\":\"%s_%s%s\",",
-        m->name,
-        m->prefix, m->name,
-        m->prefix, m->name, asNumber ? "_set" : "");
+        nameEsc,
+        prefixEsc, nameEsc,
+        prefixEsc, nameEsc, asNumber ? "_set" : "");
 
     if (asNumber) {
         char minBuf[16], maxBuf[16], stepBuf[16];
         MbFormat_Scaled(minBuf, sizeof(minBuf), m->writeMin, m->scalePow10);
         MbFormat_Scaled(maxBuf, sizeof(maxBuf), m->writeMax, m->scalePow10);
         MbFormat_Scaled(stepBuf, sizeof(stepBuf), 1, m->scalePow10);
-        n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+        n = Json_Cat(s_payload, sizeof(s_payload), n,
             "\"command_topic\":\"%s/%s/set\","
             "\"min\":%s,\"max\":%s,\"step\":%s,",
-            m->prefix, m->name, minBuf, maxBuf, stepBuf);
+            prefixEsc, nameEsc, minBuf, maxBuf, stepBuf);
     } else {
         if (unit != NULL && unit->haDeviceClass != NULL) {
-            n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+            n = Json_Cat(s_payload, sizeof(s_payload), n,
                 "\"device_class\":\"%s\",", unit->haDeviceClass);
         }
         if (m->decodeType != mbDecode_ascii && unit != NULL) {
-            n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+            n = Json_Cat(s_payload, sizeof(s_payload), n,
                 "\"state_class\":\"%s\",", unit->haStateClass);
         }
     }
 
     if (unit != NULL && unit->haUnit != NULL) {
-        n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+        n = Json_Cat(s_payload, sizeof(s_payload), n,
             "\"unit_of_measurement\":\"%s\",", unit->haUnit);
     }
 
-    n += snprintf(s_payload + n, sizeof(s_payload) - (size_t)n,
+    n = Json_Cat(s_payload, sizeof(s_payload), n,
         "\"availability\":[{\"topic\":\"%s/status\"},"
         "{\"topic\":\"%s/availability\"}],"
         "\"availability_mode\":\"all\","
@@ -672,10 +691,18 @@ static void ha_publish_entity(const sBridgeMsg *m, int asNumber)
           "\"via_device\":\"%s\""
         "}"
         "}",
-        s_cfg.prefix, m->prefix,
-        m->prefix, m->prefix, s_cfg.prefix);
+        devEsc, prefixEsc,
+        prefixEsc, prefixEsc, devEsc);
 
-    if (n > 0 && n < (int)sizeof(s_payload)) {
+    /* A discovery payload that did not fit is not published.  Half a
+     * definition is not a smaller entity, it is an entity Home Assistant
+     * rejects -- and this is the ONLY thing that tells an operator the names
+     * in their config are too long, since nothing here may log. */
+    if (n >= sizeof(s_payload)) {
+        s_haDiscardedCnt++;
+        return;
+    }
+    if (n > 0u) {
         do_publish(s_topic, s_payload, (uint16_t)n, 1 /* retain */, 0);
         /* Small delay between discovery messages to avoid overwhelming
            the lwIP output buffer */
@@ -1011,6 +1038,7 @@ void MqttBridge_Start(const sMqttBridgeCfg *cfg)
     s_devAnnounced  = 0;
     s_devAvailDirty = 0;
     s_droppedMsgs   = 0;
+    s_haDiscardedCnt = 0;
     s_catalogueLost = 0;
     s_catFresh      = 1;
     s_discoveryDone = 0;
@@ -1120,15 +1148,17 @@ void MqttBridge_SetBrokerIp(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 
 void MqttBridge_LogStatus(void)
 {
-    char buf[100];
+    char buf[144];
     snprintf(buf, sizeof(buf),
-             "%s broker=%u.%u.%u.%u:%u pub=%u reconn=%u drop=%u monitor=%s",
+             "%s broker=%u.%u.%u.%u:%u pub=%u reconn=%u drop=%u ha_drop=%u"
+             " monitor=%s",
              s_connected ? "connected" : (s_running ? "connecting" : "stopped"),
              (unsigned)s_cfg.brokerIp[0], (unsigned)s_cfg.brokerIp[1],
              (unsigned)s_cfg.brokerIp[2], (unsigned)s_cfg.brokerIp[3],
              (unsigned)s_cfg.brokerPort,
              (unsigned)s_publishCount, (unsigned)s_reconnectCount,
-             (unsigned)s_droppedMsgs, s_monitorEnabled ? "on" : "off");
+             (unsigned)s_droppedMsgs, (unsigned)s_haDiscardedCnt,
+             s_monitorEnabled ? "on" : "off");
     TRiceS("MQTT: %s\n", buf);
 }
 
