@@ -1,0 +1,1647 @@
+{
+ "capabilities": [
+  {
+   "id": 0,
+   "name": "jk_pb",
+   "addrStride": 2,
+   "writeFc": 16,
+   "maxReadRegs": 123,
+   "blocks": [
+    {
+     "base": 4096,
+     "regs": 147
+    },
+    {
+     "base": 4608,
+     "regs": 147
+    },
+    {
+     "base": 5120,
+     "regs": 147
+    }
+   ],
+   "points": [
+    {
+     "id": 0,
+     "addr": 5120,
+     "fc": "holding",
+     "decodeType": "ascii",
+     "scale": 1,
+     "unit": "",
+     "name": "model",
+     "length": 8
+    },
+    {
+     "id": 1,
+     "addr": 5136,
+     "fc": "holding",
+     "decodeType": "ascii",
+     "scale": 1,
+     "unit": "",
+     "name": "hw_version",
+     "length": 4
+    },
+    {
+     "id": 2,
+     "addr": 5144,
+     "fc": "holding",
+     "decodeType": "ascii",
+     "scale": 1,
+     "unit": "",
+     "name": "sw_version",
+     "length": 4
+    },
+    {
+     "id": 3,
+     "addr": 5152,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "total_runtime"
+    },
+    {
+     "id": 4,
+     "addr": 5156,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "power_on_times"
+    },
+    {
+     "id": 5,
+     "addr": 4608,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell00"
+    },
+    {
+     "id": 6,
+     "addr": 4610,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell01"
+    },
+    {
+     "id": 7,
+     "addr": 4612,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell02"
+    },
+    {
+     "id": 8,
+     "addr": 4614,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell03"
+    },
+    {
+     "id": 9,
+     "addr": 4616,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell04"
+    },
+    {
+     "id": 10,
+     "addr": 4618,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell05"
+    },
+    {
+     "id": 11,
+     "addr": 4620,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell06"
+    },
+    {
+     "id": 12,
+     "addr": 4622,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell07"
+    },
+    {
+     "id": 13,
+     "addr": 4624,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell08"
+    },
+    {
+     "id": 14,
+     "addr": 4626,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell09"
+    },
+    {
+     "id": 15,
+     "addr": 4628,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell10"
+    },
+    {
+     "id": 16,
+     "addr": 4630,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell11"
+    },
+    {
+     "id": 17,
+     "addr": 4632,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell12"
+    },
+    {
+     "id": 18,
+     "addr": 4634,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell13"
+    },
+    {
+     "id": 19,
+     "addr": 4636,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell14"
+    },
+    {
+     "id": 20,
+     "addr": 4638,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell15"
+    },
+    {
+     "id": 21,
+     "addr": 4672,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "cell_present_bits"
+    },
+    {
+     "id": 22,
+     "addr": 4676,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_vol_avg"
+    },
+    {
+     "id": 23,
+     "addr": 4678,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_vol_diff_max"
+    },
+    {
+     "id": 24,
+     "addr": 4680,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "cell_minmax_nbr"
+    },
+    {
+     "id": 25,
+     "addr": 4746,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "mos_temp"
+    },
+    {
+     "id": 26,
+     "addr": 4752,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "pack_voltage"
+    },
+    {
+     "id": 27,
+     "addr": 4756,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "W",
+     "name": "pack_power"
+    },
+    {
+     "id": 28,
+     "addr": 4760,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "pack_current"
+    },
+    {
+     "id": 29,
+     "addr": 4764,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "temp_bat1"
+    },
+    {
+     "id": 30,
+     "addr": 4766,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "temp_bat2"
+    },
+    {
+     "id": 31,
+     "addr": 4768,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "alarms"
+    },
+    {
+     "id": 32,
+     "addr": 4772,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "balance_current"
+    },
+    {
+     "id": 33,
+     "addr": 4774,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "balsta_soc"
+    },
+    {
+     "id": 34,
+     "addr": 4776,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.001,
+     "unit": "Ah",
+     "name": "remaining_capacity"
+    },
+    {
+     "id": 35,
+     "addr": 4780,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "Ah",
+     "name": "full_capacity"
+    },
+    {
+     "id": 36,
+     "addr": 4784,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "cycle_count"
+    },
+    {
+     "id": 37,
+     "addr": 4788,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "Ah",
+     "name": "cycle_capacity"
+    },
+    {
+     "id": 38,
+     "addr": 4792,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "soh_precharge"
+    },
+    {
+     "id": 39,
+     "addr": 4794,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "user_alarm"
+    },
+    {
+     "id": 40,
+     "addr": 4796,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "runtime"
+    },
+    {
+     "id": 41,
+     "addr": 4800,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "chg_dsg_state"
+    },
+    {
+     "id": 42,
+     "addr": 4802,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "user_alarm2"
+    },
+    {
+     "id": 43,
+     "addr": 4816,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "temp_sensor_present"
+    },
+    {
+     "id": 44,
+     "addr": 4836,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 0.01,
+     "unit": "V",
+     "name": "pack_voltage_alt"
+    },
+    {
+     "id": 45,
+     "addr": 4838,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "heat_current"
+    },
+    {
+     "id": 46,
+     "addr": 4848,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.1,
+     "unit": "s",
+     "name": "sys_run_ticks"
+    },
+    {
+     "id": 47,
+     "addr": 4856,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "temp_bat3"
+    },
+    {
+     "id": 48,
+     "addr": 4858,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "temp_bat4"
+    },
+    {
+     "id": 49,
+     "addr": 4860,
+     "fc": "holding",
+     "decodeType": "s16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "temp_bat5"
+    },
+    {
+     "id": 50,
+     "addr": 4096,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "smart_sleep_voltage",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 4300
+    },
+    {
+     "id": 51,
+     "addr": 4100,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_uvp",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 3500
+    },
+    {
+     "id": 52,
+     "addr": 4104,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_uvp_recover",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 3600
+    },
+    {
+     "id": 53,
+     "addr": 4108,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_ovp",
+     "access": "rw",
+     "writeMin": 3000,
+     "writeMax": 4300
+    },
+    {
+     "id": 54,
+     "addr": 4112,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "cell_ovp_recover",
+     "access": "rw",
+     "writeMin": 3000,
+     "writeMax": 4300
+    },
+    {
+     "id": 55,
+     "addr": 4116,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "balance_trigger",
+     "access": "rw",
+     "writeMin": 5,
+     "writeMax": 1000
+    },
+    {
+     "id": 56,
+     "addr": 4120,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "vol_soc100",
+     "access": "rw",
+     "writeMin": 3000,
+     "writeMax": 4300
+    },
+    {
+     "id": 57,
+     "addr": 4124,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "vol_soc0",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 3500
+    },
+    {
+     "id": 58,
+     "addr": 4128,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "charge_voltage",
+     "access": "rw",
+     "writeMin": 3000,
+     "writeMax": 4300
+    },
+    {
+     "id": 59,
+     "addr": 4132,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "float_voltage",
+     "access": "rw",
+     "writeMin": 3000,
+     "writeMax": 4300
+    },
+    {
+     "id": 60,
+     "addr": 4136,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "power_off_voltage",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 3500
+    },
+    {
+     "id": 61,
+     "addr": 4140,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "charge_current_max",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 500000
+    },
+    {
+     "id": 62,
+     "addr": 4144,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "chg_ocp_delay",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 63,
+     "addr": 4148,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "chg_ocp_recover",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 64,
+     "addr": 4152,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "discharge_current_max",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 500000
+    },
+    {
+     "id": 65,
+     "addr": 4156,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "dsg_ocp_delay",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 66,
+     "addr": 4160,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "dsg_ocp_recover",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 67,
+     "addr": 4164,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "scp_recover",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 68,
+     "addr": 4168,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "A",
+     "name": "balance_current_max",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 5000
+    },
+    {
+     "id": 69,
+     "addr": 4172,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "chg_otp",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 70,
+     "addr": 4176,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "chg_otp_recover",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 71,
+     "addr": 4180,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "dsg_otp",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 72,
+     "addr": 4184,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "dsg_otp_recover",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 73,
+     "addr": 4188,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "chg_utp",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 74,
+     "addr": 4192,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "chg_utp_recover",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1000
+    },
+    {
+     "id": 75,
+     "addr": 4196,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "mos_otp",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1500
+    },
+    {
+     "id": 76,
+     "addr": 4200,
+     "fc": "holding",
+     "decodeType": "s32_be",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "mos_otp_recover",
+     "access": "rw",
+     "writeMin": -400,
+     "writeMax": 1500
+    },
+    {
+     "id": 77,
+     "addr": 4204,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "cell_count"
+    },
+    {
+     "id": 78,
+     "addr": 4208,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "charge_enable",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 1
+    },
+    {
+     "id": 79,
+     "addr": 4212,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "discharge_enable",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 1
+    },
+    {
+     "id": 80,
+     "addr": 4216,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "balance_enable",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 1
+    },
+    {
+     "id": 81,
+     "addr": 4220,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "Ah",
+     "name": "design_capacity",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 2000000
+    },
+    {
+     "id": 82,
+     "addr": 4224,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "scp_delay_us",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 1000
+    },
+    {
+     "id": 83,
+     "addr": 4228,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 0.001,
+     "unit": "V",
+     "name": "balance_start_voltage",
+     "access": "rw",
+     "writeMin": 2000,
+     "writeMax": 4300
+    },
+    {
+     "id": 84,
+     "addr": 4360,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "",
+     "name": "device_address"
+    },
+    {
+     "id": 85,
+     "addr": 4364,
+     "fc": "holding",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "s",
+     "name": "predischarge_time",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 3600
+    },
+    {
+     "id": 86,
+     "addr": 4372,
+     "fc": "holding",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "feature_flags",
+     "access": "rw",
+     "writeMin": 0,
+     "writeMax": 65535
+    }
+   ]
+  },
+  {
+   "id": 1,
+   "name": "solis_hybrid",
+   "addrStride": 1,
+   "writeFc": 6,
+   "maxReadRegs": 100,
+   "blocks": [
+    {
+     "base": 33022,
+     "regs": 20
+    },
+    {
+     "base": 33049,
+     "regs": 12
+    },
+    {
+     "base": 33071,
+     "regs": 30
+    },
+    {
+     "base": 33121,
+     "regs": 62
+    }
+   ],
+   "points": [
+    {
+     "id": 0,
+     "addr": 33071,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "dc_bus_voltage"
+    },
+    {
+     "id": 1,
+     "addr": 33073,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "grid_voltage_a"
+    },
+    {
+     "id": 2,
+     "addr": 33074,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "grid_voltage_b"
+    },
+    {
+     "id": 3,
+     "addr": 33075,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "grid_voltage_c"
+    },
+    {
+     "id": 4,
+     "addr": 33076,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "grid_current_a"
+    },
+    {
+     "id": 5,
+     "addr": 33077,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "grid_current_b"
+    },
+    {
+     "id": 6,
+     "addr": 33078,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "grid_current_c"
+    },
+    {
+     "id": 7,
+     "addr": 33079,
+     "fc": "input",
+     "decodeType": "s32_be",
+     "scale": 1,
+     "unit": "W",
+     "name": "active_power"
+    },
+    {
+     "id": 8,
+     "addr": 33093,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "C",
+     "name": "inv_temp"
+    },
+    {
+     "id": 9,
+     "addr": 33094,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.01,
+     "unit": "Hz",
+     "name": "grid_freq"
+    },
+    {
+     "id": 10,
+     "addr": 33095,
+     "fc": "input",
+     "decodeType": "bitfield",
+     "scale": 1,
+     "unit": "",
+     "name": "inv_status"
+    },
+    {
+     "id": 11,
+     "addr": 33133,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "bat_voltage"
+    },
+    {
+     "id": 12,
+     "addr": 33134,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "bat_current"
+    },
+    {
+     "id": 13,
+     "addr": 33135,
+     "fc": "input",
+     "decodeType": "bitfield",
+     "scale": 1,
+     "unit": "",
+     "name": "bat_direction"
+    },
+    {
+     "id": 14,
+     "addr": 33139,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "%",
+     "name": "bat_soc"
+    },
+    {
+     "id": 15,
+     "addr": 33147,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "W",
+     "name": "house_load"
+    },
+    {
+     "id": 16,
+     "addr": 33149,
+     "fc": "input",
+     "decodeType": "s32_be",
+     "scale": 1,
+     "unit": "W",
+     "name": "bat_power"
+    },
+    {
+     "id": 17,
+     "addr": 33151,
+     "fc": "input",
+     "decodeType": "s32_be",
+     "scale": 1,
+     "unit": "W",
+     "name": "grid_port_power"
+    },
+    {
+     "id": 18,
+     "addr": 33049,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "pv1_voltage"
+    },
+    {
+     "id": 19,
+     "addr": 33050,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "pv1_current"
+    },
+    {
+     "id": 20,
+     "addr": 33051,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "V",
+     "name": "pv2_voltage"
+    },
+    {
+     "id": 21,
+     "addr": 33052,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "pv2_current"
+    },
+    {
+     "id": 22,
+     "addr": 33057,
+     "fc": "input",
+     "decodeType": "s32_be",
+     "scale": 1,
+     "unit": "W",
+     "name": "dc_power"
+    },
+    {
+     "id": 23,
+     "addr": 33140,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "%",
+     "name": "bat_soh"
+    },
+    {
+     "id": 24,
+     "addr": 33141,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.01,
+     "unit": "V",
+     "name": "bat_voltage_bms"
+    },
+    {
+     "id": 25,
+     "addr": 33142,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "bat_current_bms"
+    },
+    {
+     "id": 26,
+     "addr": 33143,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "bat_chg_limit_bms"
+    },
+    {
+     "id": 27,
+     "addr": 33144,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "A",
+     "name": "bat_dsg_limit_bms"
+    },
+    {
+     "id": 28,
+     "addr": 33145,
+     "fc": "input",
+     "decodeType": "bitfield",
+     "scale": 1,
+     "unit": "",
+     "name": "bat_fault1_bms"
+    },
+    {
+     "id": 29,
+     "addr": 33146,
+     "fc": "input",
+     "decodeType": "bitfield",
+     "scale": 1,
+     "unit": "",
+     "name": "bat_fault2_bms"
+    },
+    {
+     "id": 30,
+     "addr": 33148,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "W",
+     "name": "backup_load"
+    },
+    {
+     "id": 31,
+     "addr": 33029,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "pv_total_energy"
+    },
+    {
+     "id": 32,
+     "addr": 33035,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "pv_today_energy"
+    },
+    {
+     "id": 33,
+     "addr": 33121,
+     "fc": "input",
+     "decodeType": "bitfield",
+     "scale": 1,
+     "unit": "",
+     "name": "operating_status"
+    },
+    {
+     "id": 34,
+     "addr": 33122,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 1,
+     "unit": "",
+     "name": "operating_mode"
+    },
+    {
+     "id": 35,
+     "addr": 33161,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "bat_chg_total"
+    },
+    {
+     "id": 36,
+     "addr": 33163,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "bat_chg_today"
+    },
+    {
+     "id": 37,
+     "addr": 33165,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "bat_dsg_total"
+    },
+    {
+     "id": 38,
+     "addr": 33167,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "bat_dsg_today"
+    },
+    {
+     "id": 39,
+     "addr": 33169,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "grid_import_total"
+    },
+    {
+     "id": 40,
+     "addr": 33171,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "grid_import_today"
+    },
+    {
+     "id": 41,
+     "addr": 33173,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "grid_export_total"
+    },
+    {
+     "id": 42,
+     "addr": 33175,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "grid_export_today"
+    },
+    {
+     "id": 43,
+     "addr": 33177,
+     "fc": "input",
+     "decodeType": "u32_be",
+     "scale": 1,
+     "unit": "kWh",
+     "name": "consumption_total"
+    },
+    {
+     "id": 44,
+     "addr": 33179,
+     "fc": "input",
+     "decodeType": "u16",
+     "scale": 0.1,
+     "unit": "kWh",
+     "name": "consumption_today"
+    }
+   ]
+  }
+ ],
+ "devices": [
+  {
+   "id": 0,
+   "slaveAddr": 2,
+   "capability": 0,
+   "baud": 115200,
+   "format": "8N1",
+   "port": "rs485",
+   "topicPrefix": "bms2"
+  },
+  {
+   "id": 1,
+   "slaveAddr": 15,
+   "capability": 0,
+   "baud": 115200,
+   "format": "8N1",
+   "port": "rs485",
+   "topicPrefix": "bms15"
+  },
+  {
+   "id": 2,
+   "slaveAddr": 1,
+   "capability": 1,
+   "baud": 9600,
+   "format": "8N1",
+   "port": "rs485",
+   "topicPrefix": "solis"
+  }
+ ],
+ "plans": [
+  {
+   "id": 0,
+   "name": "jk0",
+   "capability": 0,
+   "devices": [
+    0,
+    1
+   ],
+   "timeTables": [
+    {
+     "id": 0,
+     "everySec": 5,
+     "points": [
+      26,
+      27,
+      28,
+      33,
+      34
+     ]
+    },
+    {
+     "id": 1,
+     "everySec": 15,
+     "points": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+     ]
+    },
+    {
+     "id": 2,
+     "everySec": 15,
+     "points": [
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+     ]
+    },
+    {
+     "id": 3,
+     "everySec": 15,
+     "points": [
+      22,
+      23,
+      24,
+      21
+     ]
+    },
+    {
+     "id": 4,
+     "everySec": 30,
+     "points": [
+      25,
+      29,
+      30,
+      47,
+      48,
+      49,
+      31,
+      39
+     ]
+    },
+    {
+     "id": 5,
+     "everySec": 30,
+     "points": [
+      42,
+      32,
+      35,
+      36,
+      37,
+      38,
+      41,
+      43
+     ]
+    },
+    {
+     "id": 6,
+     "everySec": 30,
+     "points": [
+      44,
+      45,
+      46
+     ]
+    },
+    {
+     "id": 7,
+     "everySec": 600,
+     "points": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      40,
+      77,
+      84
+     ]
+    }
+   ]
+  },
+  {
+   "id": 1,
+   "name": "jk1",
+   "capability": 0,
+   "devices": [
+    0,
+    1
+   ],
+   "timeTables": [
+    {
+     "id": 0,
+     "everySec": 600,
+     "points": [
+      86
+     ]
+    },
+    {
+     "id": 1,
+     "everySec": 600,
+     "points": [
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57
+     ]
+    },
+    {
+     "id": 2,
+     "everySec": 600,
+     "points": [
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65
+     ]
+    },
+    {
+     "id": 3,
+     "everySec": 600,
+     "points": [
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73
+     ]
+    },
+    {
+     "id": 4,
+     "everySec": 600,
+     "points": [
+      74,
+      75,
+      76,
+      78,
+      79,
+      80,
+      81,
+      82
+     ]
+    },
+    {
+     "id": 5,
+     "everySec": 600,
+     "points": [
+      83,
+      85
+     ]
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "name": "solis",
+   "capability": 1,
+   "devices": [
+    2
+   ],
+   "timeTables": [
+    {
+     "id": 0,
+     "everySec": 5,
+     "points": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+     ]
+    },
+    {
+     "id": 1,
+     "everySec": 15,
+     "points": [
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30
+     ]
+    },
+    {
+     "id": 2,
+     "everySec": 300,
+     "points": [
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44
+     ]
+    }
+   ]
+  }
+ ]
+}
