@@ -305,6 +305,14 @@ static void handle_peer(sWgConfParser *p, const char *key, char *val)
         uint32_t    port = 0u;
         int         digits = 0;
 
+        /* THIS REFUSAL STRANDED A BOARD.  On 2026-09-04 the site's public
+         * address changed; sodas had 85.206.57.75 compiled into its stored
+         * config, kept dialling it, and could not be told otherwise because
+         * the only route to it was the tunnel that address had broken.  A
+         * literal is not a safe default on a dynamic-IP site -- it is a
+         * one-way door.  Inverting this check (literal first, hostname
+         * second) is step 4 of docs/task_wg_endpoint_by_name.md; the check
+         * stays as-is only until the resolver behind it exists. */
         if (parse_ipv4(val, p->conf.endpointIp, &rest) != 0) {
             fail(p, "Endpoint must be a literal IPv4 address (no hostnames)");
             return;

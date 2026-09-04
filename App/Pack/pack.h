@@ -887,6 +887,36 @@ typedef struct {
  */
 int Pack_GetCellEstimate(uint8_t idx, sPackCellEstimate *out);
 
+/**
+ * HOW THE ESTIMATOR IS ANCHORING -- diagnostics, deliberately NOT in
+ * sPackState.
+ *
+ * sPackState is what a CLUSTER acts on and it is size-budgeted per instance;
+ * this is what an OPERATOR reads when socDrift looks wrong, and the two have
+ * no business sharing a struct (the same reason sPackCellEstimate is its
+ * own).
+ *
+ * A pack whose baseline load never falls below C/50 cannot anchor from rest
+ * at all, and its SOC free-runs from the last anchor it managed -- which is
+ * how a pack sitting at 3235 mV came to report 82 %%.  These three say
+ * whether that is happening here.
+ */
+typedef struct {
+    /** Fitted POWER-PATH resistance: busbars, terminals, cell internals.
+     *  NOT the BMS's balance-lead figure, which measures the sense harness
+     *  and carries no load current.  0 when not measured yet. */
+    uint32_t dcRes_uOhm;
+    uint32_t dcResSteps;        /* current steps folded into the fit        */
+    uint32_t anchorSamples;     /* voltages folded into anchors             */
+    uint32_t anchorIrSamples;   /* of those, taken under load and corrected */
+} sPackSocDiag;
+
+/**
+ * @brief  Read one pack's anchoring diagnostics.
+ * @retval 0, or a negative ePackErr
+ */
+int Pack_SocDiag(uint8_t idx, sPackSocDiag *out);
+
 /* --- names, for a UI ------------------------------------------------------
  *
  * Thin forwarders over pack_cfg.c's tables.  They exist so a consumer can

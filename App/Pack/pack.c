@@ -135,6 +135,7 @@ typedef struct {
     int32_t              socBalSnap_mAs[PACK_CELLS_MAX]; /* last step's net */
     uint8_t              haveBalSnap;
     uint32_t             socRestSamples;
+    uint32_t             socIrSamples;   /* of those, IR-corrected      */
     uint32_t             socDisturbed_ms;   /* last |I| > C/20              */
     uint8_t              socHaveDisturb;
 
@@ -739,6 +740,7 @@ static void BindAll(void)
         }
         in->haveBalSnap = 0u;
         in->socRestSamples = 0u;
+        in->socIrSamples   = 0u;
         in->fsm.caps   = res.caps;
         /* A type may qualify a SUCCESSFUL bind -- "resolved, but no plan
          * reads it".  Carrying that through is what makes the difference
@@ -1474,6 +1476,31 @@ int Pack_BalanceStats(uint8_t idx, sPackBalanceStats *out)
     return packErr_ok;
 }
 
+int Pack_SocDiag(uint8_t idx, sPackSocDiag *out)
+{
+    uint32_t saved;
+
+    if ((idx >= PACK_MAX) || (out == NULL) || (s_inst[idx].used == 0u)) {
+        return packErr_badArg;
+    }
+
+    (void)memset(out, 0, sizeof(*out));
+
+    saved = CoreLock();
+    {
+        const sPackInst *in = &s_inst[idx];
+        uint32_t         r_uOhm = 0u;
+
+        (void)PackSoc_ResGet_uOhm(&in->soc.res, &r_uOhm);
+        out->dcRes_uOhm      = r_uOhm;
+        out->dcResSteps      = in->soc.res.steps;
+        out->anchorSamples   = in->socRestSamples;
+        out->anchorIrSamples = in->socIrSamples;
+    }
+    CoreUnlock(saved);
+    return 0;
+}
+
 int Pack_GetCellEstimate(uint8_t idx, sPackCellEstimate *out)
 {
     uint32_t saved;
@@ -1810,6 +1837,10 @@ static void SocOnCommit(uint8_t idx, uint32_t groups)
                                                      : in->nameplate_mAh;
     int32_t        restLimit_mA;
     int32_t        busyLimit_mA;
+    int32_t        atRest;
+    int32_t        irDrop_mV  = 0;     /* string I*R, corrected             */
+    int32_t        irBound_mV = 0;     /* string worst-case error, uncorrected */
+    uint32_t       res_uOhm   = 0u;
 
     if (cap == 0u) {
         return;
@@ -1848,41 +1879,101 @@ static void SocOnCommit(uint8_t idx, uint32_t groups)
         }
     }
 
+    /* THE PACK'S DC RESISTANCE.  Fed from every ELECTRICAL commit and gated
+     * by none of the anchor conditions below: the current steps that measure
+     * resistance happen exactly where that gate throws samples away, so a fit
+     * fed from the far side of it would never see one.
+     *
+     * The group matters.  dV/dI is only a resistance if the two came from the
+     * SAME instant, and packGrp_electrical is precisely the pair a JK
+     * delivers in one transaction (§ the group table in pack.h).  Folding a
+     * fresh current against a voltage from a different poll would measure the
+     * skew between two Modbus tables and call it milliohms. */
+    if ((groups & PACK_GRP_BIT(packGrp_electrical)) != 0u) {
+        int32_t step_mA = (int32_t)(cap / PACK_SOC_RSTEP_C_DIV);
+
+        if (step_mA < PACK_SOC_RSTEP_MIN_mA) {
+            step_mA = PACK_SOC_RSTEP_MIN_mA;
+        }
+        PackSoc_ResNote(&in->soc.res, (int32_t)in->live.voltage_mV,
+                        in->live.current_mA, step_mA);
+    }
+
     /* THE GATE IS THE WHOLE DESIGN (§5.3 of the estimation doc): an
      * estimator that admits bad samples converges CONFIDENTLY to a wrong
      * answer, which is worse than not converging.  Each of these excludes a
      * sample whose voltage is not the cell's OCV. */
 
     /* 1. Disturbed?  Above C/20 the pack is being worked; note the time and
-     *    start the relaxation clock. */
+     *    start the relaxation clock.
+     *
+     *    IT NO LONGER RETURNS HERE.  The relaxation clock belongs to the REST
+     *    path -- it exists to wait out a polarisation the rest path cannot
+     *    measure -- and the IR-corrected path below does not wait for that,
+     *    it subtracts it.  §5.3 scopes the relax row "when using the rest
+     *    path" for exactly this reason. */
     busyLimit_mA = (int32_t)(cap / PACK_SOC_BUSY_C_DIV);
     if ((in->live.current_mA > busyLimit_mA) ||
         (in->live.current_mA < -busyLimit_mA)) {
         in->socDisturbed_ms = (uint32_t)osKernelGetTickCount();
         in->socHaveDisturb  = 1u;
-        return;
     }
 
-    /* 2. Relaxed?  LFP polarisation decays slowly, so a low-current sample
-     *    taken shortly after a heavy one still reads high.  THIS IS THE
-     *    CHECK THAT WAS MISSING: without it a 30 A charge ending one second
-     *    ago counted as rest, biasing every anchor upward. */
-    if (in->socHaveDisturb != 0u) {
-        const uint32_t since =
-            (uint32_t)((uint32_t)osKernelGetTickCount() - in->socDisturbed_ms);
-
-        if (since < PACK_SOC_RELAX_MS) {
-            return;
-        }
-    }
-
-    /* 3. Near rest?  Below C/50 the IR term is small enough to ignore, which
-     *    matters because correcting it needs a per-cell resistance this
-     *    board does not always carry. */
+    /* 2/3. REST, or IR-CORRECTED -- §5.3's "current small, OR IR-corrected".
+     *
+     *    A site whose baseline load never falls below C/50 never anchors at
+     *    all.  That is not hypothetical: zaliakalnis draws 11.6 A on a 261 Ah
+     *    pack, so its 5.2 A rest limit is unreachable and its coulomb count
+     *    free-ran to 82 %% while its cells sat at 3235 mV, which this
+     *    module's own OCV table calls 17 %%.  Sodas, drawing 1.5 A on 660 Ah,
+     *    anchors continuously and agrees with the table to a tenth of a
+     *    per-cent.  The difference between the two sites is this gate, not
+     *    the batteries. */
     restLimit_mA = (int32_t)(cap / PACK_SOC_REST_C_DIV);
-    if ((in->live.current_mA > restLimit_mA) ||
-        (in->live.current_mA < -restLimit_mA)) {
-        return;
+    atRest = ((in->live.current_mA <= restLimit_mA) &&
+              (in->live.current_mA >= -restLimit_mA)) ? 1 : 0;
+
+    if (atRest != 0) {
+        /* Relaxed?  LFP polarisation decays slowly, so a low-current sample
+         * taken shortly after a heavy one still reads high.  THIS IS THE
+         * CHECK THAT WAS MISSING: without it a 30 A charge ending one second
+         * ago counted as rest, biasing every anchor upward. */
+        if (in->socHaveDisturb != 0u) {
+            const uint32_t since =
+                (uint32_t)((uint32_t)osKernelGetTickCount() -
+                           in->socDisturbed_ms);
+
+            if (since < PACK_SOC_RELAX_MS) {
+                return;
+            }
+        }
+    } else {
+        /* Working.  Two ways through, and the second is what makes this
+         * useful at a site that never rests.
+         *
+         * MEASURED: correct by I*R and carry a quarter of the correction as
+         * uncertainty.  Never from the JK's CellWireRes, which measures the
+         * balance harness and not the path this current takes (§5.4).
+         *
+         * NOT MEASURED: correct by NOTHING and carry the whole worst-case
+         * error instead.  A guessed correction moves the estimate by an
+         * amount nobody measured; a bounded uncertainty moves it by none and
+         * only decides how little the sample weighs.  The residual bias is
+         * then the real IR drop, which reads LOW while discharging -- the
+         * safe direction here, since the failure being fixed is an estimate
+         * that reads far too HIGH. */
+        if (PackSoc_ResGet_uOhm(&in->soc.res, &res_uOhm) != 0) {
+            /* i_mA * r_uOhm is nanovolts, so the 1e6 lands it in mV. */
+            irDrop_mV = (int32_t)(((int64_t)in->live.current_mA *
+                                   (int64_t)res_uOhm) / 1000000);
+        } else {
+            const int32_t i = (in->live.current_mA < 0) ? -in->live.current_mA
+                                                        : in->live.current_mA;
+
+            irDrop_mV = 0;
+            irBound_mV = (int32_t)(((int64_t)i *
+                                    (int64_t)PACK_SOC_R_BOUND_uOhm) / 1000000);
+        }
     }
 
     /* 4. In the temperature band the OCV table describes. */
@@ -1906,14 +1997,62 @@ static void SocOnCommit(uint8_t idx, uint32_t groups)
          * already is once divided.  Per-cell SOC needs the cell array and is
          * the next step, not this one. */
         const uint8_t  n = (in->cellCount > 0u) ? in->cellCount : 16u;
-        const uint16_t meanCell_mV = (uint16_t)(in->live.voltage_mV / n);
+        const int32_t  corr_mV = irDrop_mV / (int32_t)n;
+        uint32_t       sigma_mV = PACK_SOC_SIGMA_V_mV;
+        int32_t        meanCell_mV;
 
-        PackSoc_UnitAnchorAdd(&in->soc.unit, meanCell_mV);
+        /* V_ocv = V_terminal - I*R, per cell.  Charging current is positive,
+         * so the correction removes what the current ADDED -- and on
+         * discharge, where i_mA is negative, it adds back what the current
+         * took away. */
+        meanCell_mV = (int32_t)(in->live.voltage_mV / n) - corr_mV;
+        if (meanCell_mV <= 0) {
+            return;
+        }
+
+        if (atRest == 0) {
+            const uint32_t mag =
+                (uint32_t)((corr_mV < 0) ? -corr_mV : corr_mV);
+            uint32_t       err;
+
+            /* THE BUDGET IS ON THE ERROR THIS SAMPLE CARRIES, corrected or
+             * merely bounded -- not on the current, and not on capacity.
+             * A corrected sample's residual scales with the correction it
+             * needed; an uncorrected one still carries all of its own. */
+            err = (mag != 0u)
+                      ? (mag / PACK_SOC_IR_SIGMA_DIV)
+                      : (uint32_t)(irBound_mV / (int32_t)n);
+
+            if (err > PACK_SOC_IR_MAX_ERR_mV) {
+                return;         /* genuinely too disturbed to mean anything */
+            }
+
+            /* THE ERROR PAYS FOR ITSELF IN WEIGHT.  A 2 mV sample weighs
+             * almost like a rest one and a 14 mV sample a fraction of it.
+             * Graded, with no cliff -- the same treatment the OCV slope gets.
+             *
+             * What remains is signed with the current, so charge-side and
+             * discharge-side anchors carry it in opposite directions and a
+             * site that does both averages it out.  A site that only ever
+             * discharges does not, which is what socDrift is for. */
+            sigma_mV += err;
+            in->socIrSamples++;
+        }
+
+        PackSoc_UnitAnchorAddSigma(&in->soc.unit, (uint16_t)meanCell_mV,
+                                   sigma_mV);
 
         /* PER CELL, from the same gated sample.  Its own voltage, its own
          * anchor -- which is what eventually makes C_i a per-cell number
-         * rather than a pack number divided by 16. */
-        {
+         * rather than a pack number divided by 16.
+         *
+         * REST SAMPLES ONLY.  Correcting every cell by the pack's resistance
+         * divided by n assumes the cells are identical in exactly the respect
+         * per-cell estimation exists to measure, so it would write the answer
+         * into its own input.  Per-cell anchoring under load waits for a
+         * per-cell R (§5.4), and until then loses nothing: this path is no
+         * worse than it was. */
+        if (atRest != 0) {
             uint8_t c;
 
             for (c = 0u; (c < n) && (c < PACK_CELLS_MAX); c++) {

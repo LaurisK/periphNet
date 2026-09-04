@@ -467,6 +467,338 @@ static void test_advance_uses_fallback_and_skips_unanchored(void)
     TEST_ASSERT(c[1].soc_pm == -1);       /* untouched */
 }
 
+/* ==========================================================================
+ * Pack DC resistance, from current steps -- and the IR-corrected anchor it
+ * exists to enable.  The site this was built for (zaliakalnis) draws 11.6 A
+ * on a 261 Ah pack, so it never reaches the C/50 rest gate and never anchors;
+ * removing the IR term instead of waiting it out is the whole point.
+ * ========================================================================== */
+
+#define CAP_mAh     261000u
+#define STEP_mA     ((int32_t)(CAP_mAh / PACK_SOC_RSTEP_C_DIV))  /* 1305 mA */
+
+/* A perfectly ohmic pack: V = OCV + I*R, charging current positive. */
+static int32_t ohmic_mV(int32_t ocv_mV, int32_t i_mA, int32_t r_uOhm)
+{
+    return ocv_mV + (int32_t)(((int64_t)i_mA * (int64_t)r_uOhm) / 1000000);
+}
+
+static void drive_steps(sPackSocRes *r, int32_t r_uOhm, int n, int32_t sign)
+{
+    const int32_t profile[4] = { 0, -40000, 0, 20000 };
+    int           i;
+
+    for (i = 0; i < n; i++) {
+        const int32_t cur = profile[i & 3];
+
+        PackSoc_ResNote(r, ohmic_mV(51200, cur * sign, r_uOhm), cur,
+                        STEP_mA);
+    }
+}
+
+static void test_anchor_resolve_terminates_for_every_weight(void)
+{
+    /* REGRESSION.  The integer sqrt inside AnchorResolve used to stop on
+     * "the iterate stopped changing", which a Newton two-cycle never does:
+     * for w = n^2 - 1 it alternated between n-1 and n forever, hanging the
+     * pack task on the board.  These are the first such weights; the loop
+     * below sweeps far enough to catch a reintroduction. */
+    static const int32_t cyclers[] = { 3, 8, 15, 24, 35, 48, 63, 80, 99, 120 };
+    uint32_t i;
+
+    for (i = 0u; i < (sizeof(cyclers) / sizeof(cyclers[0])); i++) {
+        sPackSocUnit u;
+        int32_t      soc = 0;
+        uint32_t     sig = 0;
+
+        PackSoc_UnitInit(&u, CAP_mAh);
+        u.samples = 1u;
+        u.w       = cyclers[i];
+        u.wSum    = (int64_t)cyclers[i] * 500;
+
+        TEST_ASSERT(PackSoc_UnitAnchorResolve(&u, &soc, &sig) == 1);
+        TEST_ASSERT(soc == 500);
+        TEST_ASSERT(sig >= 1u);
+    }
+
+    for (i = 1u; i < 4000u; i++) {
+        sPackSocUnit u;
+        int32_t      soc = 0;
+        uint32_t     sig = 0;
+
+        PackSoc_UnitInit(&u, CAP_mAh);
+        u.samples = 1u;
+        u.w       = (int32_t)i;
+        u.wSum    = (int64_t)i * 300;
+        TEST_ASSERT(PackSoc_UnitAnchorResolve(&u, &soc, &sig) == 1);
+    }
+}
+
+static void test_resistance_says_nothing_until_it_has_steps(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+
+    PackSoc_ResInit(&r);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 0);
+
+    /* One step short of the minimum is still nothing -- the caller must fall
+     * back to the rest path, never to a half-measured guess. */
+    drive_steps(&r, 5000, (int)PACK_SOC_R_MIN_STEPS, 1);
+    TEST_ASSERT(r.steps == PACK_SOC_R_MIN_STEPS - 1u);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 0);
+}
+
+static void test_resistance_fits_a_known_ohmic_pack(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+
+    PackSoc_ResInit(&r);
+    drive_steps(&r, 5000, 40, 1);
+
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 1);
+    TEST_ASSERT(got == 5000u);          /* exact: the fit is a ratio of sums */
+}
+
+static void test_resistance_survives_voltage_noise(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+    int         i;
+    int32_t     seed = 12345;
+
+    PackSoc_ResInit(&r);
+    for (i = 0; i < 400; i++) {
+        const int32_t profile[4] = { 0, -40000, 0, 20000 };
+        const int32_t cur = profile[i & 3];
+        int32_t       noise;
+
+        seed  = (seed * 1103515245) + 12345;
+        noise = ((seed >> 16) & 7) - 3;         /* +/-3 mV, like the ADC */
+
+        PackSoc_ResNote(&r, ohmic_mV(51200, cur, 5000) + noise, cur, STEP_mA);
+    }
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 1);
+    /* Through-origin least squares over big steps: noise costs a few per
+     * cent, not an order of magnitude. */
+    TEST_ASSERT((got > 4800u) && (got < 5200u));
+}
+
+static void test_resistance_ignores_movements_too_small_to_measure(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+    int         i;
+
+    PackSoc_ResInit(&r);
+    for (i = 0; i < 200; i++) {
+        const int32_t cur = ((i & 1) != 0) ? 1000 : 0;   /* well under C/40 */
+
+        PackSoc_ResNote(&r, ohmic_mV(51200, cur, 5000), cur, STEP_mA);
+    }
+    TEST_ASSERT(r.steps == 0u);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 0);
+}
+
+static void test_resistance_refuses_a_backwards_fit(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+
+    /* Voltage FALLING as charge current rises is not a battery; it is a sign
+     * error or a mis-paired sample.  A negative fit lands outside the band by
+     * construction, which is the cheapest sign check there is. */
+    PackSoc_ResInit(&r);
+    drive_steps(&r, 5000, 40, -1);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 0);
+}
+
+static void test_resistance_refuses_an_implausible_fit(void)
+{
+    sPackSocRes r;
+    uint32_t    got = 0;
+
+    PackSoc_ResInit(&r);
+    drive_steps(&r, (int32_t)PACK_SOC_R_MAX_uOhm * 2, 40, 1);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &got) == 0);
+}
+
+static void test_resistance_follows_a_rise(void)
+{
+    sPackSocRes r;
+    uint32_t    early = 0;
+    uint32_t    late  = 0;
+
+    /* Enough steps to cross the accumulator ceiling several times, so the
+     * forgetting is exercised rather than assumed. */
+    PackSoc_ResInit(&r);
+    drive_steps(&r, 4000, 4000, 1);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &early) == 1);
+    TEST_ASSERT((early > 3900u) && (early < 4100u));
+
+    drive_steps(&r, 8000, 4000, 1);
+    TEST_ASSERT(PackSoc_ResGet_uOhm(&r, &late) == 1);
+
+    /* A pack whose resistance doubles must be followed, not averaged away
+     * over its whole life -- rising R is the degradation signal. */
+    TEST_ASSERT(late > early + 3000u);
+}
+
+static void test_resistance_accumulators_stay_bounded(void)
+{
+    sPackSocRes r;
+
+    PackSoc_ResInit(&r);
+    drive_steps(&r, 5000, 20000, 1);
+    TEST_ASSERT(r.sumII < PACK_SOC_R_SUM_MAX);
+    TEST_ASSERT(r.sumIV > 0);
+}
+
+static void test_stated_sigma_at_base_is_the_plain_anchor(void)
+{
+    sPackSocUnit a;
+    sPackSocUnit b;
+    int32_t      sa = 0, sb = 0;
+    uint32_t     ga = 0, gb = 0;
+
+    PackSoc_UnitInit(&a, CAP_mAh);
+    PackSoc_UnitInit(&b, CAP_mAh);
+
+    PackSoc_UnitAnchorAdd(&a, 3270);
+    PackSoc_UnitAnchorAddSigma(&b, 3270, PACK_SOC_SIGMA_V_mV);
+
+    TEST_ASSERT(PackSoc_UnitAnchorResolve(&a, &sa, &ga) == 1);
+    TEST_ASSERT(PackSoc_UnitAnchorResolve(&b, &sb, &gb) == 1);
+    TEST_ASSERT((sa == sb) && (ga == gb));
+    TEST_ASSERT(a.w == b.w);
+}
+
+static void test_a_less_certain_sample_weighs_less(void)
+{
+    sPackSocUnit a;
+    sPackSocUnit b;
+    int32_t      sa = 0, sb = 0;
+    uint32_t     ga = 0, gb = 0;
+
+    /* Same two voltages into both units; only the second sample's stated
+     * uncertainty differs.  The less certain unit must end up LESS sure. */
+    PackSoc_UnitInit(&a, CAP_mAh);
+    PackSoc_UnitAnchorAdd(&a, 3270);
+    PackSoc_UnitAnchorAdd(&a, 3270);
+
+    PackSoc_UnitInit(&b, CAP_mAh);
+    PackSoc_UnitAnchorAdd(&b, 3270);
+    PackSoc_UnitAnchorAddSigma(&b, 3270, PACK_SOC_SIGMA_V_mV * 4u);
+
+    TEST_ASSERT(PackSoc_UnitAnchorResolve(&a, &sa, &ga) == 1);
+    TEST_ASSERT(PackSoc_UnitAnchorResolve(&b, &sb, &gb) == 1);
+    TEST_ASSERT(a.w > b.w);
+    TEST_ASSERT(ga < gb);               /* sigma: more weight, less doubt */
+}
+
+static void test_a_doubtful_sample_barely_moves_the_anchor(void)
+{
+    sPackSocUnit u;
+    int32_t      soc  = 0;
+    uint32_t     sig  = 0;
+    int32_t      near = PackSoc_OcvToSoc_pm(3270);
+    int32_t      far  = PackSoc_OcvToSoc_pm(3310);
+
+    /* One trusted sample and one badly corrected one, on the SAME slope
+     * region so only sigma separates them.  This is what stops a big IR
+     * correction from dragging the estimate. */
+    PackSoc_UnitInit(&u, CAP_mAh);
+    PackSoc_UnitAnchorAdd(&u, 3270);
+    PackSoc_UnitAnchorAddSigma(&u, 3310, PACK_SOC_SIGMA_V_mV * 20u);
+
+    TEST_ASSERT(PackSoc_UnitAnchorResolve(&u, &soc, &sig) == 1);
+    TEST_ASSERT(far > near);
+    /* Nearer the trusted end than the midpoint by a wide margin. */
+    TEST_ASSERT(soc < (near + ((far - near) / 4)));
+}
+
+static void test_a_working_site_fits_inside_the_error_budget(void)
+{
+    /* zaliakalnis, measured 2026-09-04: 6.0 A on a 261 Ah 16S pack.  The old
+     * gate refused every one of its samples (C/50 = 5.22 A) and it took ZERO
+     * anchors in ten minutes while sodas, at 1.5 A on 660 Ah, took 48.
+     *
+     * Under the WORST-CASE resistance bound -- no measurement needed, and
+     * none is available at that current -- the error it carries is inside the
+     * budget, so it anchors.  That is the entire benefit. */
+    const int32_t i_mA = 6000;
+    const int32_t n    = 16;
+    const int32_t worst_mV_cell =
+        (int32_t)(((int64_t)i_mA * (int64_t)PACK_SOC_R_BOUND_uOhm) / 1000000)
+        / n;
+
+    TEST_ASSERT(worst_mV_cell <= (int32_t)PACK_SOC_IR_MAX_ERR_mV);
+
+    /* And it still weighs something: sigma grows, it does not become
+     * infinite.  Roughly a twelfth of a rest sample here, so a minute of
+     * 5 s samples is worth one clean anchor. */
+    {
+        sPackSocUnit a2;
+        sPackSocUnit b2;
+
+        PackSoc_UnitInit(&a2, CAP_mAh);
+        PackSoc_UnitInit(&b2, CAP_mAh);
+        PackSoc_UnitAnchorAdd(&a2, 3235);
+        PackSoc_UnitAnchorAddSigma(&b2, 3235,
+                                   PACK_SOC_SIGMA_V_mV +
+                                   (uint32_t)worst_mV_cell);
+        TEST_ASSERT(b2.w >= 1);
+        TEST_ASSERT(b2.w < a2.w);
+    }
+}
+
+static void test_the_bound_is_smaller_than_the_error_it_replaces(void)
+{
+    /* The argument for admitting these samples at all, as arithmetic: across
+     * the WHOLE plausible range of pack resistance the SOC error at 6 A spans
+     * about one per-cent, and the free-running coulomb count it displaces was
+     * out by sixty-five.  A gate protecting the smaller number at the cost of
+     * the larger one is mis-calibrated, whatever its threshold. */
+    const int32_t i_mA = 6000, n = 16;
+    const int32_t lo_mV_cell = (int32_t)(((int64_t)i_mA * 5000) / 1000000) / n;
+    const int32_t hi_mV_cell =
+        (int32_t)(((int64_t)i_mA * (int64_t)PACK_SOC_R_BOUND_uOhm) / 1000000)
+        / n;
+
+    /* ~5 mV per per-cent on the 3200..3250 plateau. */
+    TEST_ASSERT((hi_mV_cell - lo_mV_cell) / 5 <= 2);    /* <= 2 %% SOC span */
+    TEST_ASSERT(hi_mV_cell <= (int32_t)PACK_SOC_IR_MAX_ERR_mV);
+}
+
+static void test_the_correction_a_real_site_needs_is_small(void)
+{
+    /* zaliakalnis, measured 2026-09-03: 11.6 A on a 261 Ah pack whose fitted
+     * resistance is a few milliohms.  The point of this test is the SIZE of
+     * the thing being corrected -- if it were large, correcting it would be
+     * the riskier choice, and the cap in the caller would refuse it. */
+    const int32_t  i_mA    = -11600;
+    const uint32_t r_uOhm  = 5000u;
+    const int32_t  ir_mV   = (int32_t)(((int64_t)i_mA * (int64_t)r_uOhm) /
+                                       1000000);
+    const int32_t  perCell = ir_mV / 16;
+
+    TEST_ASSERT(ir_mV == -58);
+    TEST_ASSERT((perCell > -4) && (perCell < 0));
+    TEST_ASSERT((uint32_t)(-perCell) <= PACK_SOC_IR_MAX_ERR_mV);
+
+    /* And it is worth about a per-cent of SOC on the plateau: 3235 mV reads
+     * ~3 mV low under this load, and the curve is ~5 mV per per-cent there.
+     * Small enough to correct, big enough to be worth correcting. */
+    {
+        const int32_t raw  = PackSoc_OcvToSoc_pm(3232);
+        const int32_t corr = PackSoc_OcvToSoc_pm(3235);
+
+        TEST_ASSERT(corr > raw);
+        TEST_ASSERT((corr - raw) < 100);        /* under 10 %% SOC */
+    }
+}
+
 int main(void)
 {
     printf("=== pack_soc tests ===\n");
@@ -498,6 +830,23 @@ int main(void)
     RUN_TEST(test_weakest_cell_is_identified);
     RUN_TEST(test_smaller_cell_moves_further_per_amp_hour);
     RUN_TEST(test_advance_uses_fallback_and_skips_unanchored);
+
+    /* pack DC resistance and the IR-corrected anchor */
+    RUN_TEST(test_anchor_resolve_terminates_for_every_weight);
+    RUN_TEST(test_resistance_says_nothing_until_it_has_steps);
+    RUN_TEST(test_resistance_fits_a_known_ohmic_pack);
+    RUN_TEST(test_resistance_survives_voltage_noise);
+    RUN_TEST(test_resistance_ignores_movements_too_small_to_measure);
+    RUN_TEST(test_resistance_refuses_a_backwards_fit);
+    RUN_TEST(test_resistance_refuses_an_implausible_fit);
+    RUN_TEST(test_resistance_follows_a_rise);
+    RUN_TEST(test_resistance_accumulators_stay_bounded);
+    RUN_TEST(test_stated_sigma_at_base_is_the_plain_anchor);
+    RUN_TEST(test_a_less_certain_sample_weighs_less);
+    RUN_TEST(test_a_doubtful_sample_barely_moves_the_anchor);
+    RUN_TEST(test_the_correction_a_real_site_needs_is_small);
+    RUN_TEST(test_a_working_site_fits_inside_the_error_budget);
+    RUN_TEST(test_the_bound_is_smaller_than_the_error_it_replaces);
 
     printf("%s (%d failures)\n", test_failures ? "FAILED" : "PASSED",
            test_failures);

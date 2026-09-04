@@ -750,6 +750,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear |
 | `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag) |
 | `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |
+| `/api/system/reboot` | POST | Restart the board (`?delay_ms=N`, default 1000, floored at 500). Answers **before** it acts — the reset is armed on a deadline and performed by defaultTask, so the caller gets a 200 instead of a dropped connection. Arms **no** FWU state, unlike the `/api/fwu/install` trick that used to stand in for it |
 | `/api/nvdb/layout` | GET | The storage layout in force, free space, and anything that has come aboard but not been applied |
 | `/api/nvdb/layout` | POST | Take a layout aboard (JSON, §2.7 schema). **202 Accepted** — nothing moves now: a layout is applied at the NEXT boot and only there, so check `lastApplyResult` afterwards. 422 with the offending field on a parse error; 409 when the advisory structural check refuses (nothing written, previous layout untouched) |
 | `/api/nvdb/layout` | DELETE | Discard a layout that came aboard but has not applied. Never touches the layout in force |
@@ -759,6 +760,8 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/config/upload` | POST | Upload Modbus register config JSON — streams straight through the JSON→records compiler into the inactive LUT region (compile = validation; 422 pinpoints device/txn/point/field on reject; 409 while apply pending) |
 | `/api/modbus/config/apply` | POST | Arm the config swap; the engine commits it at its next safe point (hot reload, no reboot) |
 | `/api/modbus/config/status` | GET | JSON: active region, valid, device/txn/point counts, staged/swap state, last upload result |
+| `/api/modbus/bus` | GET | **Line occupancy, per port** — txns, busy ms, duty per-mille lifetime and over a 60 s window, last and longest frame. The budget answer for "will another device fit on this pair": a timeout counts as busy because the line is, so `max_ms` near the response timeout is a slave that is not answering and is eating the wire |
+| `/api/modbus/bus/reset` | POST | Zero every port's counters and restart the window |
 | `/api/modbus/config/download` | GET | Active config re-serialized to JSON (data-faithful, not byte-identical) |
 | `/api/modbus/config` | DELETE | Erase the config — the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
 | `/api/modbus/write` | POST | Write points on one device: `{"device":N,"items":[{"id":P,"value":V}],"timeout_ms":T}`. Values are **scaled integers** (the `writeMin`/`writeMax` domain — `cell_ovp` is `3550`, not `3.550`); no floats accepted. **422 refuses a point the config did not mark writable** — a `/write` must never let a read masquerade as a write. Per-item `result` (0 = ok, `-13` = out of bounds, `-4` = no reply) rides a **200**, so check items, not just status. Max 16 items; `rw` points report the register read back after writing |
@@ -766,7 +769,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/modbus/plans` | POST | Create a plan (201 + `{"id":N}`); body is one element of the config's `plans[]`, so one schema, one validator |
 | `/api/modbus/plans/N` | PUT | Modify a plan — **409 if a subscription named it** (`MB_PLAN_ALL` subscribers do not lock a plan) |
 | `/api/modbus/plans/N` | DELETE | Free a slot; 409 likewise. Deleting moves no other plan — that is what makes a slot a slot |
-| `/api/pack/status` | GET | Every battery pack: condition + `why`, caps/cmds/flags, V/A, SOC/SOH with **confidence**, amp-hours (remaining / capacity / nameplate), per-direction switch state, current **and voltage** limits, alarms, and a **per-group age array** — a pack is not one clock (on a JK the cell group runs 4–5 s behind) |
+| `/api/pack/status` | GET | Every battery pack: condition + `why`, caps/cmds/flags, V/A, SOC/SOH with **confidence**, amp-hours (remaining / capacity / nameplate), per-direction switch state, current **and voltage** limits, alarms, and a **per-group age array** — a pack is not one clock (on a JK the cell group runs 4–5 s behind). Also **how it is anchoring**: `dcRes_uOhm`/`dcResSteps` (the fitted power-path resistance) and `anchorSamples`/`anchorIrSamples`. A pack whose baseline load never falls below C/50 cannot anchor from rest and its SOC free-runs — `anchorSamples` stuck at 0 is that, and it is why zaliakalnis read 82 % with its cells at 3235 mV |
 | `/api/pack/cells` | GET | `?idx=N` — per-cell mV and balance-lead mΩ, plus balancer state. **404 when the type reports no cell detail** (a Pylontech-speaking pack never will) — an absent capability, not an error |
 | `/api/pack/config` | GET | The active configuration, re-serialised (data-faithful, not byte-identical) |
 | `/api/pack/config` | POST | Upload + apply a pack configuration. 422 names the offending **pack index and key**; 409 while another parse holds the shared scratch |
@@ -839,6 +842,14 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
   the site LAN reaches hosts beyond the tunnel subnet. The hook refuses to
   route the hub's own endpoint address, so an over-broad `AllowedIPs` cannot
   swallow the encapsulated UDP and deadlock the link.
+
+- **The hub endpoint is a LITERAL IPv4 and cannot be a name** — `wg_conf.c`
+  refuses hostnames and `wg_cfg` persists `endpointIp[4]`, so a board on a
+  dynamic-IP site strands itself the first time the address rotates and cannot
+  be told otherwise remotely (that is exactly what happened on 2026-09-04, and
+  `POST /api/wg/config` sets only addresses, never the peer key). The fix, with
+  its threat analysis and record migration:
+  [docs/task_wg_endpoint_by_name.md](docs/task_wg_endpoint_by_name.md).
 
 - **The tunnel address is device config, not network-assigned.** WireGuard has
   no address-assignment protocol: the hub's `AllowedIPs` is simultaneously the
@@ -959,5 +970,5 @@ what the switch is for during bring-up.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
 - **One file owns the bxCAN cells, and CMake enforces it** — no `HAL_CAN_*` name and no CAN handle anywhere in `App/` except `App/Can/can_bus.c`. The HAL offers ONE weak RX-FIFO-pending callback for both cells, so whoever defines it takes a link-level monopoly: that is how `bms_reader.c` came to block `pack_pylontech` outright. Consumers subscribe by `(bus, id, mask)`, and **every subscriber callback runs in the RX ISR** — copy, count, enqueue, return
 - **The CAN bridge is store-and-forward, not a wire** — each side is its own collision domain and the board ACKs on both, arbitration is per side (the TX FIFO is chronological so a burst is not re-sorted by identifier), error frames do not cross, one frame time of latency is added, and **both sides must run the same bitrate**; a rate that does not divide PCLK1/14 exactly is refused rather than rounded. Free for the 1 Hz one-way Pylontech dialect, and stated in [docs/design_can_bridge.md](docs/design_can_bridge.md) §3 because none of it is academic for a different protocol
-- **There is no persisted CAN configuration** — mode, bitrate and bus roles are compile-time defaults, so a change made over the tunnel lasts until the next reset. Adding one means a new nvDb user, which means moving the layout that is still pinned to the bootloader
+- **There is no persisted CAN configuration** — mode, bitrate and bus roles are compile-time defaults, so a change made over the tunnel lasts until the next reset. **This is now a known defect, not just a simplification** — zaliakalnis is wired with the battery on CAN1, which the image asserts is the inverter side, and `bms` mode would take over the wrong cell silently ([docs/issue_can_bus_roles_not_configurable.md](docs/issue_can_bus_roles_not_configurable.md)). Adding one means a new nvDb user, which means moving the layout that is still pinned to the bootloader
 - **MQTT publishes happen on `mqttTask` only** — the bridge's Modbus callback copies and posts, so `LOCK_TCPIP_CORE` is off the Modbus sequence path entirely (docs/modbus.md §4.10); never call the raw lwIP MQTT API from app tasks without the core lock

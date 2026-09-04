@@ -402,6 +402,16 @@ void App_DefaultTaskEntry(void)
             NVIC_SystemReset();
         }
 
+        /* Plain reboot, asked for over the network (POST /api/system/reboot).
+         * Separate from the install path above because it carries no FWU
+         * meaning: nothing is armed in the boot status, so the same image
+         * comes back up. */
+        if (System_RebootDue()) {
+            TRice("Rebooting on request...\n");
+            vTaskDelay(pdMS_TO_TICKS(100U));   /* let Trice flush */
+            NVIC_SystemReset();
+        }
+
         /* Copy staged blob → golden after a confirm (a few seconds of
          * SPI traffic; runs here so tcpip_thread stays responsive) */
         if (FwuCtl_PromotePending()) {

@@ -104,6 +104,25 @@ void System_ResetIwdgStats(void);
  */
 void System_SetWatchdogTestMode(void);
 
+/** Floor on a requested reboot delay: long enough for the HTTP reply that
+ *  asked for it to leave the board and for Trice to flush. */
+#define SYSTEM_REBOOT_MIN_DELAY_MS  500U
+
+/**
+ * @brief Arm a deferred reboot; defaultTask performs it when it comes due.
+ *
+ *        Deferred rather than immediate so the caller gets an answer first --
+ *        a reset inside a request handler is indistinguishable from a crash
+ *        at the other end of the connection.
+ *
+ * @param delay_ms  wait before resetting; floored at
+ *                  SYSTEM_REBOOT_MIN_DELAY_MS
+ */
+void System_RequestReboot(uint32_t delay_ms);
+
+/** @return 1 once an armed reboot has come due.  Polled by defaultTask. */
+int System_RebootDue(void);
+
 #ifdef __cplusplus
 }
 #endif

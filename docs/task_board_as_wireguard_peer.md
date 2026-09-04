@@ -49,6 +49,29 @@ diagnostics if a test fails.
 | Fact | Value | How verified |
 |------|-------|--------------|
 | Hub public endpoint | `85.206.57.75:51820` | public IP read from the site LAN; `manochata.ddns.net` still does **not** resolve — use the raw IP |
+
+> **2026-09-04 morning: believed dead — `78.62.38.227` was read from inside the
+> site LAN and every peer dialling the old literal had lost its session within
+> minutes.**
+>
+> **2026-09-04 13:50, re-measured from the sodas LAN: the literal is ALIVE and
+> `78.62.38.227` is not the site.** `http://85.206.57.75:10086` serves
+> WGDashboard (HTTP 200, gunicorn), `PeriphNet_sodas` handshakes against
+> `85.206.57.75:51820` in under 10 s, and through that tunnel `10.77.0.1`,
+> `10.77.0.64`, `192.168.0.116` and `192.168.0.161` all answer.
+> `78.62.38.227:51820` produced no handshake in 2 minutes of retries and
+> `:10086` does not connect. So the outage was **not** an endpoint change, and
+> the endpoint below stands.
+>
+> What actually stranded `PeriphNet_sodas` was its own peer state freezing with
+> a stale-but-`valid` keypair, which suppresses re-handshaking forever; a
+> `POST /api/wg/restart` recovered it against this same unchanged address. See
+> [task_wg_endpoint_by_name.md](task_wg_endpoint_by_name.md) §1.1.
+>
+> The naming argument in
+> [task_wg_endpoint_by_name.md](task_wg_endpoint_by_name.md) is unaffected — a
+> literal endpoint still cannot be corrected remotely — but this particular
+> incident is no longer evidence for it.
 | UDP 51820 forwarded | yes | router (`192.168.0.1`, Archer C6 v2) |
 | wg0 up + listening | yes, port `51820` | live handshake in <4 s from the site LAN |
 | Hub tunnel IP | `10.77.0.1` (was `10.0.0.1`) | dashboard interface panel |

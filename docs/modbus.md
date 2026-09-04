@@ -1944,6 +1944,10 @@ curl -X POST --data-binary @plan.json \
 curl -X PUT  --data-binary @plan.json \
           http://10.42.0.203/api/modbus/plans/1              # modify  (409 if subscribed)
 curl -X DELETE http://10.42.0.203/api/modbus/plans/1         # delete  (409 if subscribed)
+
+# Line occupancy — how much of the pair is already spoken for (§8.6)
+curl      http://10.42.0.203/api/modbus/bus
+curl -X POST http://10.42.0.203/api/modbus/bus/reset
 ```
 
 A plan body is one element of the config's `plans[]` array, so the same JSON an
@@ -2046,6 +2050,62 @@ request, so a longer silence can never split a frame or merge two.
 the word length, so `WORDLENGTH_8B` + `PARITY_EVEN` gives **7 data bits plus
 parity** — a device configured for 8E1 then decodes some bytes correctly and
 mangles the rest, which reads like a wiring fault rather than a configuration one.
+
+### 8.6 Line occupancy — the bus budget
+
+`GET /api/modbus/bus` reports, **per port**, how much of the line's time is
+already spoken for. It is keyed on the port and not on a device, a plan or a
+clock on purpose: the wire is the shared thing, so the wire is the only thing a
+budget can be kept against. Every device, every plan and every `Modbus_Request`
+draw on the same line, and a figure keyed on any of them cannot be added up.
+
+```json
+{"port":"rs485","registered":true,"txns":248,"busy_ms":7013,"elapsed_ms":477445,
+ "duty_permille":14,"win_permille":14,"window_sec":60,"last_ms":29,"max_ms":39}
+```
+
+| Field | What it is for |
+|---|---|
+| `win_permille` | **read this one.** Occupancy over the last `window_sec` (60, or the uptime if less). Lifetime `duty_permille` averages away exactly the bursts that collide |
+| `max_ms` | the longest single frame. Sitting near the response timeout means a slave is not answering |
+| `txns`, `busy_ms` | the raw pair, so an interval can be measured by hand against `/api/modbus/bus/reset` |
+
+What is measured is the whole transaction as the wire sees it — the driver's
+pre-transmit silence (§8.5), the frame out, the slave's think time, the frame
+back and the end-of-frame idle. It is accumulated in `port_submit()`, the one
+place every frame on every port passes through, so plan traffic and API requests
+are both counted and neither can be forgotten by a new caller.
+
+**A timeout is busy time, and it is the reading that matters most.** A slave
+that does not answer holds the line for its full response timeout and yields
+nothing, so a mis-addressed device or one on the wrong baud is not a quiet
+failure — it is the most expensive traffic on the bus, and it starves everything
+scheduled behind it. At the 1000 ms `ENGINE_RESP_TIMEOUT` a silent device costs
+~1020 ms **per derived read block**; four blocks is 4.1 s, which no longer fits
+inside a 5 s period.
+
+**The cost of a transaction is dominated by a fixed overhead, not by baud or by
+register count.** Measured on a JK at 115200: 29 ms mean, 39 ms worst, whether
+the block is 5 registers or 80 — because `RS485_TURNAROUND_MS` (20 ms, §11a.1)
+plus the slave's think time is nearly all of it. **The currency of this budget is
+transactions, not bytes**, which is why the derivation that merges spans into
+read blocks (§3.2) is the lever that matters, and why a wider block is close to
+free while one more block is not.
+
+Measured baseline, 2026-09-03, `Pd1.1.43`:
+
+| Board | Devices | Sequences | Steady-state |
+|---|---|---|---|
+| zaliakalnis | 1 JK @115200 | 14 on 4 clocks | **14 ‰** (248 txns / 8 min) |
+| sodas | 2 JK @115200 | 28 on 4 clocks | **~30 ‰** |
+
+**Periods are harmonics, so the stack is guaranteed rather than accidental.**
+Every clock starts together at init and stays phase-locked (§12), and 5/15/30/600
+are exact multiples, so once every 600 s *every* sequence falls due in one pass of
+`service_due()` — 14 sequences and 543 ms on zaliakalnis, 28 and 1085 ms on sodas
+(21 % of the 5 s budget). The cheapest way to break it is a **coprime** slow
+period — 601 s rather than 600 — which is a config edit, not firmware; the
+principled fix, a per-sequence start offset, is still undesigned (§12).
 
 ---
 

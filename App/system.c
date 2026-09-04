@@ -157,6 +157,46 @@ void System_SetWatchdogTestMode(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Deferred reboot
+ *
+ * A reset issued inside the request handler that asked for it answers nobody:
+ * the caller sees a dropped connection and cannot tell an accepted reboot from
+ * a board that crashed.  So the request only ARMS a deadline, and defaultTask
+ * -- the task that already owns reboot-for-install -- performs it once the
+ * reply has left the board.
+ *
+ * Nothing is quiesced first, deliberately.  Every store on this device is
+ * built to survive losing power at an arbitrary instant (CRC'd records, the
+ * nvDb relocation journal, NOR bit-clear flags), so a reboot is no worse than
+ * the case they already handle -- while waiting for flash to fall idle would
+ * make the one route that recovers a wedged board depend on the board not
+ * being wedged.
+ * -------------------------------------------------------------------------- */
+
+static volatile uint8_t  s_rebootArmed = 0U;
+static volatile uint32_t s_rebootAt_ms = 0U;
+
+void System_RequestReboot(uint32_t delay_ms)
+{
+    /* Floored, not honoured verbatim: a caller asking for 0 wants "now", and
+     * "now" still has to outlast the TCP reply it is riding on. */
+    if (delay_ms < SYSTEM_REBOOT_MIN_DELAY_MS) {
+        delay_ms = SYSTEM_REBOOT_MIN_DELAY_MS;
+    }
+    s_rebootAt_ms = HAL_GetTick() + delay_ms;
+    s_rebootArmed = 1U;
+}
+
+int System_RebootDue(void)
+{
+    if (s_rebootArmed == 0U) {
+        return 0;
+    }
+    /* Signed difference: the deadline may sit the far side of a tick wrap. */
+    return ((int32_t)(HAL_GetTick() - s_rebootAt_ms) >= 0) ? 1 : 0;
+}
+
+/* --------------------------------------------------------------------------
  * TIM14 IRQ handler (called from TIM8_TRG_COM_TIM14_IRQHandler in it.c)
  * -------------------------------------------------------------------------- */
 

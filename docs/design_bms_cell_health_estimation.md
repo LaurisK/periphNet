@@ -700,6 +700,19 @@ A sample enters the fit only if **all** hold:
 |---|---|---|
 | Curve steep enough | `\|dOCV/ds\| > 4 mV/%` | excludes the plateau |
 | Current small, or IR-corrected | `\|I\| < C/50`, else use `V_ocv = V_i − I·R_i` | terminal voltage ≠ OCV under load |
+
+> **IMPLEMENTED at pack level, `Pd1.1.44` (2026-09-04).** `sPackSocRes` in
+> `App/Pack/pack_soc.c` fits `R = Σ(ΔI·ΔV)/Σ(ΔI²)` from current steps on the
+> `packGrp_electrical` pair (the only V/I the BMS delivers in one
+> transaction), and `SocOnCommit` anchors on `V − I·R` when the pack is above
+> the rest limit. The correction is capped at 15 mV/cell and pays for itself
+> in weight — `sigma += |correction|/4` — because a step fit measures the
+> OHMIC part and the slow polarisation it cannot see biases the result in the
+> direction the current flows. **Per-cell anchoring still waits for a
+> per-cell `R_i` (§5.4)**: correcting every cell by `R_pack/n` would assume
+> the cells are identical in exactly the respect per-cell estimation exists
+> to measure. `CellWireRes` is NOT used for this and must not be — it is the
+> balance harness, a different circuit (§5.4).
 | Relaxed | ≥ 10 min since `\|I\|` last exceeded C/20, when using the rest path | LFP relaxation is slow |
 | Balancer accounted for | `BalanSta == 0`, **or** cell is neither `MaxVolCellNbr` nor `MinVolCellNbr`, **or** §5.5's correction applied at reduced weight | the balancer breaks the shared-coulomb identity — but only for two known cells (§2.5), so all but two stay clean even mid-balance. Deliberately stricter than §5.5's bookkeeping gate: that one keys on the duty register, this one on `BalanSta`, because an anchor is worth being conservative about and a coulomb is not |
 | Sense path trustworthy | `CellWireRes_i` below threshold when that cell is the balance source/sink | balance current through a degraded lead adds an IR error to the very voltage being used as OCV |

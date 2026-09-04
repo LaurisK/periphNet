@@ -37,9 +37,82 @@ extern "C" {
 #define PACK_SOC_SIGMA_V_mV     3u
 
 /** Current below which terminal voltage is treated as OCV, as a divisor of
- *  the pack's capacity: |I| < C/50.  Above it a sample needs IR correction,
- *  which needs a per-cell resistance this board does not always have. */
+ *  the pack's capacity: |I| < C/50.  Above it a sample needs IR correction --
+ *  which the pack path now has (sPackSocRes), and the per-cell path still
+ *  does not. */
 #define PACK_SOC_REST_C_DIV     50u
+
+/* --- IR-corrected anchoring (estimation design 5.3, second gate row) ------
+ *
+ * "Current small, OR IR-corrected."  A site whose baseline load never falls
+ * below C/50 never anchors at all: zaliakalnis draws 11.6 A on a 261 Ah pack,
+ * so its rest limit of 5.2 A is unreachable and its coulomb count free-ran to
+ * 82 %% against cells sitting at 3235 mV, which the OCV table calls 17 %%.
+ * Removing the IR term is what turns that site from never-anchoring into
+ * anchoring continuously. */
+
+/** Smallest |dI| between consecutive samples that carries resistance
+ *  information, as a divisor of capacity, with an absolute floor applied by
+ *  the caller.
+ *
+ *  SET FROM THE INSTRUMENTATION, not from taste.  A JK quantises its current
+ *  at ~115 mA and its pack voltage at 1 mV, so one LSB over one LSB is
+ *  ~8.7 mOhm: a step of 115 mA can only resolve R in 8.7 mOhm granules,
+ *  which is not a measurement.  A step of ~1.3 A puts dV 15 LSBs clear of
+ *  quantisation, which is.  (The first version of this used C/40 = 6.5 A on
+ *  a 261 Ah pack -- larger than that site's entire load current, so it could
+ *  never fit anything at all.) */
+#define PACK_SOC_RSTEP_C_DIV    200u
+#define PACK_SOC_RSTEP_MIN_mA   1000
+
+/** Steps required before a fitted resistance is used for anything. */
+#define PACK_SOC_R_MIN_STEPS    8u
+
+/** Plausibility band on a fitted PACK resistance, micro-ohms.  Outside it the
+ *  fit is arithmetic gone wrong -- a sign error, a re-seed step mistaken for
+ *  a load step -- not a discovery about the battery.  A NEGATIVE fit lands
+ *  outside by construction, which is the cheapest sign check available. */
+#define PACK_SOC_R_MIN_uOhm     50u
+#define PACK_SOC_R_MAX_uOhm     200000u
+
+/** Accumulator ceiling, mA^2.  On reaching it both sums halve, which bounds
+ *  the arithmetic AND makes the fit exponentially forgetful -- resistance
+ *  rises over months and the estimate has to be able to follow it. */
+#define PACK_SOC_R_SUM_MAX      1000000000000LL
+
+/** Worst-case pack DC resistance, used ONLY as a bound when nothing has been
+ *  measured yet.  Generous for a 16S pack of any size this board serves.
+ *
+ *  IT IS A BOUND, NEVER A CORRECTION.  Correcting by a guess would move the
+ *  estimate by an amount nobody measured; charging the guess as UNCERTAINTY
+ *  moves nothing and only decides how much a sample is allowed to weigh. */
+#define PACK_SOC_R_BOUND_uOhm   20000u
+
+/** Largest per-cell IR error, in mV, that a sample may carry and still
+ *  anchor -- whether that error has been corrected or merely bounded.
+ *
+ *  THE BUDGET IS ON THE ERROR, NOT ON THE CURRENT, and the difference is the
+ *  whole point.  C/50 is a proxy for "the IR error is negligible"; on a
+ *  261 Ah pack it works out to ~1.6 mV/cell.  A site sitting at 6 A carries
+ *  ~1.9 mV/cell -- 0.3 mV/cell worse -- and was refused every sample for it,
+ *  while its coulomb count free-ran 65 PERCENTAGE POINTS away from the truth.
+ *  Across the whole plausible range of R, from 5 to 20 mOhm, that site's IR
+ *  error spans 0.38 %% to 1.50 %% SOC: the entire quantity being protected
+ *  against is smaller than one part in forty of the error being tolerated.
+ *
+ *  15 mV/cell is about 3 %% SOC on the plateau -- large enough to admit any
+ *  ordinary operating point, small enough that a mis-estimated R cannot move
+ *  the anchor by more than the drift it is there to correct. */
+#define PACK_SOC_IR_MAX_ERR_mV  15u
+
+/** A CORRECTED sample carries a quarter of the correction as extra
+ *  uncertainty: what a step fit measures is the ohmic part, and the slow
+ *  polarisation it cannot see scales with the same current.  An UNCORRECTED
+ *  sample carries the whole worst-case error instead -- it has not been
+ *  corrected, so all of it is still there.  Either way big errors weigh
+ *  almost nothing and small ones weigh nearly full, with no cliff between --
+ *  the same graded treatment the OCV slope already gets. */
+#define PACK_SOC_IR_SIGMA_DIV   4u
 
 /** Current above which the cell is considered DISTURBED, as a divisor of
  *  capacity: |I| > C/20.  After that, terminal voltage needs time to relax
@@ -119,10 +192,44 @@ typedef struct {
     uint8_t  capacityLearned;   /* 1 = measured, 0 = supplied at init       */
 } sPackSocUnit;
 
+/**
+ * THE PACK'S DC RESISTANCE, fitted through the origin from current STEPS:
+ *
+ *      R = sum(dI * dV) / sum(dI^2)
+ *
+ * THIS IS THE POWER PATH -- busbars, terminals, cell internals -- the circuit
+ * the pack current actually flows through, and therefore the only resistance
+ * that can explain a load IR drop.
+ *
+ * IT IS NOT THE JK'S `CellWireRes`.  That array measures the sense/balance
+ * HARNESS, which carries balance current and nothing else (estimation design
+ * 5.4: "these are different circuits").  Its role in this estimator is a
+ * VETO -- a cell being balanced through a degraded lead reads high and must
+ * not supply an anchor -- never a correction term.  Subtracting I*R_wire from
+ * a load IR drop would apply a wrong number with confidence, which is the one
+ * failure mode the whole gate exists to prevent.
+ *
+ * No anchors are needed and none are consumed: a solar ESS supplies inverter
+ * load steps for free, so this converges on ordinary operation within
+ * minutes of a board starting.  Deliberately NOT persisted -- it re-learns
+ * far faster than the learned capacities that share the state record, and
+ * bumping that record's version to carry it would discard those.
+ */
+typedef struct {
+    int64_t  sumIV;             /* sum(dI_mA * dV_mV)                       */
+    int64_t  sumII;             /* sum(dI_mA^2)                             */
+    int32_t  lastI_mA;
+    int32_t  lastV_mV;
+    uint32_t steps;             /* qualifying steps folded in               */
+    uint8_t  haveLast;
+} sPackSocRes;
+
 /** The pack's estimator: one unit, plus the bookkeeping for reading the
- *  vendor's mAh counter -- which is a transport concern, not a SOC one. */
+ *  vendor's mAh counter -- which is a transport concern, not a SOC one --
+ *  plus the resistance that lets it anchor while the pack is working. */
 typedef struct {
     sPackSocUnit unit;
+    sPackSocRes  res;
     int32_t      lastCounter_mAh;
     uint8_t      haveCounter;
 } sPackSoc;
@@ -166,6 +273,21 @@ void PackSoc_UnitInit(sPackSocUnit *u, uint32_t capacity_mAh);
  * @note   Pure.
  */
 void PackSoc_UnitAnchorAdd(sPackSocUnit *u, uint16_t ocv_mV);
+
+/**
+ * @brief  Fold one voltage into the anchor at a STATED per-sample
+ *         uncertainty, so a corrected sample can weigh less than a rest one.
+ *
+ * Weight is inverse-variance, w = (k/sigma)^2, so passing
+ * PACK_SOC_SIGMA_V_mV reproduces PackSoc_UnitAnchorAdd exactly.
+ *
+ * @param  sigmaV_mV - this sample's voltage uncertainty; values below the
+ *                     base are clamped up to it, since no sample is better
+ *                     known than the ADC
+ * @note   Pure.
+ */
+void PackSoc_UnitAnchorAddSigma(sPackSocUnit *u, uint16_t ocv_mV,
+                                uint32_t sigmaV_mV);
 
 /**
  * @brief  Resolve the accumulated anchor without consuming it.
@@ -241,6 +363,39 @@ void PackSoc_Init(sPackSoc *s, uint32_t capacity_mAh);
  */
 int PackSoc_NoteCounter(sPackSoc *s, int32_t counter_mAh, uint32_t maxStep_mAh,
                         int32_t *dQ_mAh_out);
+
+/* --- pack DC resistance, from current steps ------------------------------ */
+
+/**
+ * @brief  Start the resistance fit.
+ * @note   Pure.
+ */
+void PackSoc_ResInit(sPackSocRes *r);
+
+/**
+ * @brief  Offer one (voltage, current) sample to the resistance fit.
+ *
+ * CALLED FOR EVERY SAMPLE, INCLUDING THE ONES THE ANCHOR GATE THROWS AWAY --
+ * the steps live precisely where the pack is being worked, so a fit fed only
+ * from near-rest samples would never see one.
+ *
+ * @param  v_mV       - pack terminal voltage
+ * @param  i_mA       - pack current, POSITIVE INTO the pack
+ * @param  minStep_mA - smallest |dI| that counts as a step
+ * @note   Pure.
+ */
+void PackSoc_ResNote(sPackSocRes *r, int32_t v_mV, int32_t i_mA,
+                     int32_t minStep_mA);
+
+/**
+ * @brief  The fitted resistance, if it is trustworthy yet.
+ * @param  r_uOhm_out - the fit, micro-ohms
+ * @retval 1 when enough steps have been seen AND the fit is inside the
+ *         plausibility band, 0 otherwise -- callers must fall back to the
+ *         rest path on 0, never to a guess
+ * @note   Pure.
+ */
+int PackSoc_ResGet_uOhm(const sPackSocRes *r, uint32_t *r_uOhm_out);
 
 /**
  * @brief  The weakest unit of @p n by measured capacity.

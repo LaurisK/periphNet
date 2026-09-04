@@ -99,7 +99,16 @@ static const sPackType s_pylontechType = {
 
 /** "can:<nodeId>".  A CAN node id is a PROTOCOL ADDRESS, not a position in
  *  anyone's array — which is the whole reason bind tokens name physical
- *  addresses (§12). */
+ *  addresses (§12).
+ *
+ *  BUT THE TOKEN CANNOT NAME A BUS, and on a board with two independent cells
+ *  a node id is not a physical address: node 2 on CAN1 and node 2 on CAN2 are
+ *  different batteries.  jkbms binds as "<port>:<slaveAddr>" and does name its
+ *  peripheral; this must too, and the grammar has no room for it today ("can"
+ *  is matched with the colon fixed at offset 3, so "can2:5" is refused).
+ *  Fix it BEFORE or WITH the frame parser below -- once a pack in the field
+ *  binds an unqualified token there is a config format to migrate:
+ *  docs/issue_can_bus_roles_not_configurable.md */
 static int parse_bind(const char *bindKey, uint16_t *nodeId)
 {
     const char *colon;

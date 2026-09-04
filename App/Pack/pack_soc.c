@@ -111,11 +111,20 @@ void PackSoc_UnitInit(sPackSocUnit *u, uint32_t capacity_mAh)
 
 void PackSoc_UnitAnchorAdd(sPackSocUnit *u, uint16_t ocv_mV)
 {
+    PackSoc_UnitAnchorAddSigma(u, ocv_mV, PACK_SOC_SIGMA_V_mV);
+}
+
+void PackSoc_UnitAnchorAddSigma(sPackSocUnit *u, uint16_t ocv_mV,
+                                uint32_t sigmaV_mV)
+{
     uint32_t k;
     int32_t  w;
 
     if (u == NULL) {
         return;
+    }
+    if (sigmaV_mV < PACK_SOC_SIGMA_V_mV) {
+        sigmaV_mV = PACK_SOC_SIGMA_V_mV;   /* nothing beats the ADC */
     }
 
     /* WEIGHT IS k SQUARED: a sample's SOC uncertainty is sigma_V / k, so
@@ -123,6 +132,17 @@ void PackSoc_UnitAnchorAdd(sPackSocUnit *u, uint16_t ocv_mV)
      * rather than a cliff -- and a cliff, measured, admits nothing. */
     k = PackSoc_Slope_uV_per_pm(ocv_mV);
     w = (int32_t)(((int64_t)k * (int64_t)k) / 1000);
+
+    /* A SAMPLE KNOWN LESS WELL WEIGHS LESS, by the same inverse-variance
+     * rule: scaling by (base/sigma)^2 leaves the rest path arithmetically
+     * untouched at sigma == base, and lets an IR-corrected sample pay for its
+     * correction in weight rather than be admitted or refused outright. */
+    if (sigmaV_mV > PACK_SOC_SIGMA_V_mV) {
+        const int64_t base = (int64_t)PACK_SOC_SIGMA_V_mV;
+
+        w = (int32_t)(((int64_t)w * base * base) /
+                      ((int64_t)sigmaV_mV * (int64_t)sigmaV_mV));
+    }
     if (w < 1) {
         w = 1;
     }
@@ -142,16 +162,33 @@ int PackSoc_UnitAnchorResolve(const sPackSocUnit *u, int32_t *soc_pm_out,
     }
     if (sigma_pm_out != NULL) {
         /* sigma = sigma_V / sqrt(sum w).  Integer sqrt by Newton; this runs
-         * once per anchor, not per sample. */
+         * once per anchor, not per sample.
+         *
+         * TERMINATION IS THE SUBTLE PART.  Newton from above descends to
+         * floor(sqrt(x)) and then, for x = n^2 - 1, ENTERS A TWO-CYCLE
+         * between n-1 and n: an earlier form stopped on `r != prev`, which a
+         * two-cycle never satisfies, so this loop ran forever for x = 3, 8,
+         * 15, 24, 35 ... -- 1731 values below three million, and w is a sum
+         * of weights that lands wherever it lands.  Stopping when the iterate
+         * stops DECREASING is what makes it total: the sequence is monotone
+         * until the cycle, so the last decrease is the answer. */
         int64_t  x = u->w;
-        int64_t  r = x;
-        int64_t  prev = 0;
+        int64_t  r;
+        int64_t  prev;
         uint32_t sigma;
 
-        while ((r > 0) && (r != prev)) {
+        if (x < 1) {
+            x = 1;
+        }
+        r = x;
+        for (;;) {
             prev = r;
             r = (r + (x / r)) / 2;
+            if (r >= prev) {
+                break;
+            }
         }
+        r = prev;
         if (r < 1) {
             r = 1;
         }
@@ -322,6 +359,85 @@ void PackSoc_Init(sPackSoc *s, uint32_t capacity_mAh)
     }
     (void)memset(s, 0, sizeof(*s));
     PackSoc_UnitInit(&s->unit, capacity_mAh);
+}
+
+/* --- pack DC resistance, from current steps ------------------------------ */
+
+void PackSoc_ResInit(sPackSocRes *r)
+{
+    if (r != NULL) {
+        (void)memset(r, 0, sizeof(*r));
+    }
+}
+
+void PackSoc_ResNote(sPackSocRes *r, int32_t v_mV, int32_t i_mA,
+                     int32_t minStep_mA)
+{
+    if (r == NULL) {
+        return;
+    }
+    if (minStep_mA < 1) {
+        minStep_mA = 1;
+    }
+
+    if (r->haveLast != 0u) {
+        const int32_t dI = i_mA - r->lastI_mA;
+        const int32_t dV = v_mV - r->lastV_mV;
+
+        /* ONLY STEPS.  Between two samples the pack's OCV moves by the charge
+         * that passed -- at 45 A on a 261 Ah pack over 5 s that is 0.024 %%
+         * SOC, which on this curve is microvolts.  So across a step dV is the
+         * IR term and essentially nothing else, and no OCV model is needed to
+         * separate them.  Small dI is the case where that stops being true,
+         * and it is also where dV is pure noise; both argue for the same
+         * threshold. */
+        if ((dI >= minStep_mA) || (dI <= -minStep_mA)) {
+            r->sumIV += (int64_t)dI * (int64_t)dV;
+            r->sumII += (int64_t)dI * (int64_t)dI;
+            if (r->steps < 0xFFFFFFFFu) {
+                r->steps++;
+            }
+
+            /* Halve on reaching the ceiling: bounds the arithmetic, and makes
+             * the fit forget at a rate that lets a slowly rising resistance
+             * be followed instead of averaged away over the pack's life. */
+            if (r->sumII >= PACK_SOC_R_SUM_MAX) {
+                r->sumIV /= 2;
+                r->sumII /= 2;
+            }
+        }
+    }
+
+    r->lastI_mA  = i_mA;
+    r->lastV_mV  = v_mV;
+    r->haveLast  = 1u;
+}
+
+int PackSoc_ResGet_uOhm(const sPackSocRes *r, uint32_t *r_uOhm_out)
+{
+    int64_t v;
+
+    if ((r == NULL) || (r->steps < PACK_SOC_R_MIN_STEPS) ||
+        (r->sumII <= 0)) {
+        return 0;
+    }
+
+    /* dV in mV over dI in mA is ohms; the 1e6 carries it to micro-ohms, and
+     * is applied AFTER the division's numerator so the ratio keeps its
+     * resolution on a pack whose resistance is a few milliohms. */
+    v = (r->sumIV * 1000000) / r->sumII;
+
+    /* A negative fit fails this test by construction, which is the sign check
+     * -- charging harder must raise the terminal voltage, and a fit that says
+     * otherwise has been fed something that was not a load step. */
+    if ((v < (int64_t)PACK_SOC_R_MIN_uOhm) ||
+        (v > (int64_t)PACK_SOC_R_MAX_uOhm)) {
+        return 0;
+    }
+    if (r_uOhm_out != NULL) {
+        *r_uOhm_out = (uint32_t)v;
+    }
+    return 1;
 }
 
 int PackSoc_NoteCounter(sPackSoc *s, int32_t counter_mAh, uint32_t maxStep_mAh,
