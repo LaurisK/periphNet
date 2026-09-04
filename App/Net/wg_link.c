@@ -11,6 +11,7 @@
 #include "lwip/netif.h"
 #include "lwip/ip.h"
 #include "lwip/tcpip.h"
+#include "lwip/sys.h"
 #include "wireguardif.h"
 #include "wireguard.h"
 #include "crypto.h"
@@ -49,6 +50,16 @@ static char s_privKeyB64[WG_KEY_B64_SIZE];
 static sWgLinkCfg s_cfg;
 static uint8_t    s_cfgLoaded;
 static uint8_t    s_cfgStored;   /* active cfg came from flash */
+
+/* Liveness (see the note in wg_link.h).  s_lastAlive_ms latches the newest
+ * evidence ever sampled so the verdict does not flap in the gap between one
+ * keypair expiring and the next completing; s_haveAlive distinguishes "no
+ * evidence yet" from "evidence at sys_now() == 0", which matters in the first
+ * seconds after boot when a raw age would look plausibly small. */
+static uint32_t   s_lastAlive_ms;
+static uint8_t    s_haveAlive;
+static uint32_t   s_downSince_ms; /* sys_now() when it was last judged up   */
+static uint32_t   s_recoveries;
 
 /* --------------------------------------------------------------------------
  * Configuration loading
@@ -98,6 +109,56 @@ int WgLink_HasIdentity(void)
     return (s_cfg.hasPrivateKey && s_cfg.hasPeerKey) ? 1 : 0;
 }
 
+/* Sample the port's peer state and latch anything that proves the hub
+ * answered.  Caller must NOT hold the tcpip core lock.
+ *
+ * Both sources are sys_now() stamps, so sampling is idempotent and a missed
+ * poll costs nothing as long as we look more often than a keypair lives
+ * (180 s) — the 5 s housekeeping tick and every status request are ample.
+ * Unsigned arithmetic keeps this correct across the sys_now() wrap at 49.7
+ * days. */
+static void liveness_sample(void)
+{
+    struct wireguard_device *dev;
+    struct wireguard_peer   *peer;
+    uint32_t                 evidence = 0u;
+    uint8_t                  haveEvidence = 0u;
+
+    if (!s_running || s_peerIndex == WIREGUARDIF_INVALID_INDEX) {
+        return;
+    }
+
+    LOCK_TCPIP_CORE();
+    dev = (struct wireguard_device *)s_wgNetif.state;
+    if (dev != NULL && s_peerIndex < WIREGUARD_MAX_PEERS) {
+        peer = &dev->peers[s_peerIndex];
+
+        /* A valid current keypair means the handshake response authenticated
+         * against the hub's public key.  prev_keypair is pointedly not
+         * consulted: it is the field that never expires. */
+        if (peer->curr_keypair.valid) {
+            evidence     = peer->curr_keypair.keypair_millis;
+            haveEvidence = 1u;
+        }
+        /* Data in is proof too, and may be newer than the keypair. */
+        if (peer->last_rx != 0u &&
+            (!haveEvidence || (uint32_t)(peer->last_rx - evidence) < 0x80000000u)) {
+            evidence     = peer->last_rx;
+            haveEvidence = 1u;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    if (!haveEvidence) {
+        return;
+    }
+    if (!s_haveAlive ||
+        (uint32_t)(evidence - s_lastAlive_ms) < 0x80000000u) {
+        s_lastAlive_ms = evidence;
+        s_haveAlive    = 1u;
+    }
+}
+
 int WgLink_GetPeerStats(sWgPeerStats *out)
 {
     struct wireguard_device *dev;
@@ -118,8 +179,12 @@ int WgLink_GetPeerStats(sWgPeerStats *out)
         peer = &dev->peers[s_peerIndex];
 
         out->sessionValid = peer->curr_keypair.valid ? 1u : 0u;
+        out->prevValid    = peer->prev_keypair.valid ? 1u : 0u;
         out->lastRx_ms    = peer->last_rx;
         out->lastTx_ms    = peer->last_tx;
+        out->keypairAge_ms = peer->curr_keypair.valid
+                           ? (uint32_t)(sys_now() - peer->curr_keypair.keypair_millis)
+                           : 0u;
         out->txPackets    = (uint32_t)peer->curr_keypair.sending_counter;
         out->rxCounter    = (uint32_t)peer->curr_keypair.replay_counter;
 
@@ -134,6 +199,9 @@ int WgLink_GetPeerStats(sWgPeerStats *out)
         out->endpointPort  = peer->port;
     }
     UNLOCK_TCPIP_CORE();
+
+    liveness_sample();
+    out->aliveAge_ms = WgLink_AliveAge();
 
     return 0;
 }
@@ -387,6 +455,14 @@ int WgLink_Start(const sWgLinkCfg *cfg)
     UNLOCK_TCPIP_CORE();
 
     s_running = 1u;
+
+    /* A rebuilt peer has proved nothing yet, and inheriting the old verdict
+     * would either hide a still-dead hub or start the recovery clock from the
+     * wrong instant. */
+    s_haveAlive    = 0u;
+    s_lastAlive_ms = 0u;
+    s_downSince_ms = sys_now();
+
     TRice("WG: up, %d.%d.%d.%d -> %d.%d.%d.%d:%d, %u range(s)\n",
           s_cfg.tunnelIp[0], s_cfg.tunnelIp[1],
           s_cfg.tunnelIp[2], s_cfg.tunnelIp[3],
@@ -417,6 +493,9 @@ void WgLink_Stop(void)
     netif_set_down(&s_wgNetif);
     UNLOCK_TCPIP_CORE();
 
+    s_haveAlive    = 0u;
+    s_lastAlive_ms = 0u;
+
     TRice("WG: tunnel stopped\n");
 }
 
@@ -425,19 +504,74 @@ int WgLink_IsRunning(void)
     return (int)s_running;
 }
 
+uint32_t WgLink_AliveAge(void)
+{
+    if (!s_running || !s_haveAlive) {
+        return WG_LINK_AGE_NEVER;
+    }
+    return (uint32_t)(sys_now() - s_lastAlive_ms);
+}
+
 int WgLink_IsUp(void)
 {
-    err_t err;
+    uint32_t age;
 
     if (!s_running || s_peerIndex == WIREGUARDIF_INVALID_INDEX) {
         return 0;
     }
 
-    LOCK_TCPIP_CORE();
-    err = wireguardif_peer_is_up(&s_wgNetif, s_peerIndex, NULL, NULL);
-    UNLOCK_TCPIP_CORE();
+    liveness_sample();
 
-    return (err == ERR_OK) ? 1 : 0;
+    age = WgLink_AliveAge();
+    return (age != WG_LINK_AGE_NEVER && age <= WG_LINK_STALE_MS) ? 1 : 0;
+}
+
+int WgLink_Restart(void)
+{
+    WgLink_Stop();
+    return WgLink_Start(NULL);
+}
+
+uint32_t WgLink_RecoveryCount(void)
+{
+    return s_recoveries;
+}
+
+int WgLink_Housekeep(void)
+{
+    uint32_t now = sys_now();
+
+    if (!s_running) {
+        s_downSince_ms = now;
+        return 0;
+    }
+
+    if (WgLink_IsUp()) {          /* samples as a side effect */
+        s_downSince_ms = now;
+        return 0;
+    }
+
+    if ((uint32_t)(now - s_downSince_ms) < WG_LINK_RECOVER_MS) {
+        return 0;
+    }
+
+    /* Down long enough that waiting is not going to help.  Everything the
+     * port would have to unstick by itself — a prev_keypair it can no longer
+     * expire, a half-finished handshake, an endpoint it roamed to — is state
+     * only a rebuild clears. */
+    TRice("WG: no response for %us, rebuilding peer (recovery #%u)\n",
+          (unsigned)((now - s_downSince_ms) / 1000u),
+          (unsigned)(s_recoveries + 1u));
+
+    s_recoveries++;
+    s_downSince_ms = now;         /* set before the restart: a failed start
+                                   * must not retry every 5 s */
+
+    if (WgLink_Restart() != 0) {
+        TRice("WG: rebuild failed, will retry\n");
+        return 0;
+    }
+    return 1;
 }
 
 /* Re-create the netif so new parameters take effect.  Changing a running

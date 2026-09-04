@@ -36,6 +36,48 @@
 #define WG_KEY_B64_SIZE   45u
 
 /* --------------------------------------------------------------------------
+ * Liveness
+ *
+ * "Is the tunnel up?" cannot be answered by asking the port, and getting that
+ * wrong once cost a board 13 hours of silence.  wireguardif_peer_is_up() is
+ * `curr_keypair.valid || prev_keypair.valid`, and NOTHING in the port ever
+ * invalidates prev_keypair: should_reset_peer(), the only thing that would,
+ * is itself gated on curr_keypair.valid, so once the current keypair expires
+ * the reset can never fire again.  The predicate is therefore incapable of
+ * going false after the first successful handshake, whatever happens on the
+ * wire afterwards.  (The same expression drives the port's netif_set_link_down
+ * decision, so the netif's link flag is unreliable for the same reason.)
+ *
+ * What IS evidence, and why:
+ *
+ *  - A **fresh current keypair**.  A keypair only becomes valid when the
+ *    handshake RESPONSE has been received and authenticated with the hub's
+ *    public key, so it is proof the hub answered.  It is also a heartbeat on
+ *    its own: the port destroys the current keypair at REJECT_AFTER_TIME
+ *    (180 s) and immediately re-initiates, so a healthy peer rotates roughly
+ *    every three minutes whether or not any data is flowing.  Measured on the
+ *    bench: sending_counter restarts from 1 every ~180 s on an idle tunnel.
+ *
+ *  - **A data packet in** (`last_rx`).  Proof, but not a heartbeat — an idle
+ *    tunnel receives nothing for hours, and the hub does not answer our
+ *    keepalives.  So it may confirm liveness, never deny it.
+ *
+ * Deliberately NOT evidence: `last_tx` (keepalives keep advancing it while
+ * prev_keypair is valid, i.e. exactly during the failure), and prev_keypair.
+ */
+
+/** No authenticated evidence for this long and the tunnel is judged DOWN.
+ *  Two keypair rotations plus room for lost initiations — a healthy peer
+ *  never gets near it. */
+#define WG_LINK_STALE_MS       360000u
+
+/** Judged down for this long and the peer is torn down and rebuilt.  This is
+ *  the one action known to clear the stuck state above; it costs no memory
+ *  (the netif is reused, see the note in wg_link.c) and no other subsystem
+ *  depends on the tunnel. */
+#define WG_LINK_RECOVER_MS     900000u
+
+/* --------------------------------------------------------------------------
  * Configuration
  * -------------------------------------------------------------------------- */
 
@@ -65,13 +107,20 @@ typedef struct {
  */
 typedef struct {
     uint8_t  sessionValid;    /* a current keypair exists                   */
+    uint8_t  prevValid;       /* ...and a previous one, which never expires */
     uint32_t lastRx_ms;       /* sys_now() of the last DATA packet in, 0=never */
     uint32_t lastTx_ms;       /* sys_now() of the last DATA packet out      */
+    uint32_t keypairAge_ms;   /* age of the current keypair, 0 if none      */
+    uint32_t aliveAge_ms;     /* since the last authenticated evidence;
+                               * WG_LINK_AGE_NEVER if there has been none   */
     uint32_t txPackets;       /* encrypted packets sent on this session     */
     uint32_t rxCounter;       /* highest received counter (replay window)   */
     uint8_t  endpointIp[4];   /* where the port currently thinks the hub is */
     uint16_t endpointPort;
 } sWgPeerStats;
+
+/** Reported as aliveAge_ms when the tunnel has never had a live session. */
+#define WG_LINK_AGE_NEVER   0xFFFFFFFFu
 
 /* Opaque to callers that do not want lwIP headers. */
 struct netif;
@@ -104,9 +153,56 @@ void WgLink_Stop(void);
 /** @brief  1 if the netif exists (not necessarily handshaken). */
 int WgLink_IsRunning(void);
 
-/** @brief  1 if the peer has a valid session key, i.e. the tunnel is
- *          actually carrying traffic. */
+/**
+ * @brief  1 if the hub has proved itself alive within WG_LINK_STALE_MS.
+ *
+ * See the Liveness note above for what counts as proof and why the port's own
+ * wireguardif_peer_is_up() must not be used for this.  Latching, so it does
+ * not flap during the second or two between a keypair expiring and its
+ * replacement completing.
+ */
 int WgLink_IsUp(void);
+
+/**
+ * @brief  Age in ms of the newest evidence the hub is alive, or
+ *         WG_LINK_AGE_NEVER if there has never been any.
+ *
+ * The number behind WgLink_IsUp(): on a healthy tunnel it sawtooths up to
+ * about REJECT_AFTER_TIME and drops, so a value that only ever grows is the
+ * failure this module exists to catch.
+ */
+uint32_t WgLink_AliveAge(void);
+
+/**
+ * @brief  Stop and start the tunnel, rebuilding the peer from configuration.
+ *
+ * Wipes every scrap of session state the port holds — both keypairs, the
+ * in-flight handshake, the cookie, and any endpoint the peer had roamed to —
+ * and re-initiates.  Cheap: the netif, its UDP PCB and the port's timer are
+ * reused, so this allocates nothing (wg_link.c explains why removal is not an
+ * option).
+ *
+ * @return 0 on success, whatever WgLink_Start() returned otherwise.
+ */
+int WgLink_Restart(void);
+
+/**
+ * @brief  Periodic liveness sampling and self-recovery.  Call about every 5 s
+ *         from a task; it takes the tcpip core lock and must not run in lwIP
+ *         context.
+ *
+ * Samples the evidence WgLink_IsUp() reads, and once the tunnel has been down
+ * for WG_LINK_RECOVER_MS performs a WgLink_Restart().  A board whose hub is
+ * genuinely gone therefore rebuilds its peer every 15 minutes and does
+ * nothing else — the tunnel stays a soft dependency.
+ *
+ * @return 1 if it restarted the tunnel this call, 0 otherwise.
+ */
+int WgLink_Housekeep(void);
+
+/** @brief  How many times WgLink_Housekeep() has recovered the tunnel since
+ *          boot.  Nonzero means the link died and came back by itself. */
+uint32_t WgLink_RecoveryCount(void);
 
 /** @brief  1 once both keys are present, i.e. the tunnel can be started. */
 int WgLink_HasIdentity(void);

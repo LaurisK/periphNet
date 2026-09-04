@@ -2283,14 +2283,26 @@ static void wg_status_json(char *buf, size_t sz)
     }
 
     sWgPeerStats st;
-    char peerStats[160] = "";
+    char peerStats[320] = "";
 
     if (WgLink_GetPeerStats(&st) == 0) {
+        /* alive_age_ms is the number session_up is a threshold on, and
+         * keypair_valid/prev_valid are the raw port state it deliberately
+         * does not trust: prev_valid staying 1 while alive_age_ms climbs is
+         * exactly the stuck peer this reports on. */
         (void)snprintf(peerStats, sizeof(peerStats),
             ",\"peer_last_rx_ms\":%u,\"peer_last_tx_ms\":%u,"
+            "\"keypair_valid\":%s,\"prev_keypair_valid\":%s,"
+            "\"keypair_age_ms\":%u,\"alive_age_ms\":%d,"
+            "\"recoveries\":%u,"
             "\"tx_packets\":%u,\"rx_counter\":%u,"
             "\"live_endpoint\":\"%u.%u.%u.%u:%u\",\"now_ms\":%u",
             (unsigned)st.lastRx_ms, (unsigned)st.lastTx_ms,
+            st.sessionValid ? "true" : "false",
+            st.prevValid    ? "true" : "false",
+            (unsigned)st.keypairAge_ms,
+            (st.aliveAge_ms == WG_LINK_AGE_NEVER) ? -1 : (int)st.aliveAge_ms,
+            (unsigned)WgLink_RecoveryCount(),
             (unsigned)st.txPackets, (unsigned)st.rxCounter,
             st.endpointIp[0], st.endpointIp[1],
             st.endpointIp[2], st.endpointIp[3],
@@ -3555,8 +3567,7 @@ static void handle_wg_keygen(struct netconn *conn)
 
 static void handle_wg_restart(struct netconn *conn)
 {
-    WgLink_Stop();
-    if (WgLink_Start(NULL) != 0) {
+    if (WgLink_Restart() != 0) {
         send_json(conn, "500 Internal Server Error",
                   "{\"error\":\"tunnel restart failed\"}");
         return;

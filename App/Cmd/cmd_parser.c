@@ -988,6 +988,21 @@ static void cmd_wg(const char *args)
         TRice("WG: running=%u session=%u cfg=%s\n",
               (unsigned)WgLink_IsRunning(), (unsigned)WgLink_IsUp(),
               WgLink_CfgIsStored() ? "stored" : "built-in");
+        {
+            /* session= above is a threshold on this age, not the port's own
+             * peer-is-up flag — which never goes false once a session has
+             * existed.  A keypair that stays valid while the age climbs is
+             * the stuck peer; recoveries counts the rebuilds that fixed it. */
+            sWgPeerStats st;
+            if (WgLink_GetPeerStats(&st) == 0) {
+                TRice("WG: alive_age=%dms keypair=%u/%u age=%ums recoveries=%u\n",
+                      (st.aliveAge_ms == WG_LINK_AGE_NEVER)
+                          ? -1 : (int)st.aliveAge_ms,
+                      (unsigned)st.sessionValid, (unsigned)st.prevValid,
+                      (unsigned)st.keypairAge_ms,
+                      (unsigned)WgLink_RecoveryCount());
+            }
+        }
         TRice("WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\n",
               cfg->tunnelIp[0], cfg->tunnelIp[1],
               cfg->tunnelIp[2], cfg->tunnelIp[3],

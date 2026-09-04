@@ -782,7 +782,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/can/mode` | POST | `?mode=off\|monitor\|bridge\|bms[&bitrate=B]`. One route for start, stop and the **live break**: `off` stops the cells, anything else starts them if down and changes policy in place if up, so becoming the inverter's BMS never drops its link. Replies with the full status |
 | `/api/can/send` | POST | `?bus=N&id=HEX&data=HEX` — put one frame on a bus. How an inverter's reaction to a single frame is tried from a laptop over the tunnel, without the board pretending to be a battery first |
 | `/api/can/reset` | POST | Zero every CAN counter; the wire stays up |
-| `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base |
+| `/api/wg/status` | GET | JSON: running/session_up/provisioned, config_source+version, **public_key** (never the private one), peer_public_key, tunnel addr/mask, allowed_ips, endpoint, keepalive, RNG health, time base. **`session_up` is a threshold on `alive_age_ms`, not the port's peer-is-up flag** — `keypair_valid`/`prev_keypair_valid`/`keypair_age_ms` are the raw state it refuses to trust, and `recoveries` counts the self-rebuilds |
 | `/api/wg/config` | POST | Set `tunnel_ip`/`tunnel_mask`/`endpoint_ip`/`endpoint_port` (JSON, all optional); persists unless `"save":false`. Changing the tunnel address restarts the netif |
 | `/api/wg/config` | DELETE | Erase the stored config **including the private key** — the board becomes unprovisioned and the tunnel stops |
 | `/api/wg/keygen` | POST | Mint a new identity key on-device from the DRBG, persist it, return the public half to register with the hub |
@@ -862,10 +862,30 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
   address out of the image into per-device flash — `POST /api/wg/config` is the
   only remote way to fix it, since the CLI needs physical access.
 
+- **"The tunnel is up" cannot be asked of the port, and getting that wrong
+  cost a board 13 hours of silence** (2026-09-04). `wireguardif_peer_is_up()`
+  is `curr_keypair.valid || prev_keypair.valid`, and **nothing ever
+  invalidates `prev_keypair`**: `should_reset_peer()`, the only thing that
+  would, is itself gated on `curr_keypair.valid`, so once the current keypair
+  expires the reset can never fire. The predicate is structurally incapable of
+  going false after the first successful handshake. The same expression drives
+  the port's `netif_set_link_down()`, so the netif link flag lies for the same
+  reason. `WgLink_IsUp()` therefore judges by **evidence the hub answered**:
+  a *current* keypair (only valid once the handshake response authenticated —
+  and a heartbeat in its own right, since the port destroys and re-handshakes
+  every `REJECT_AFTER_TIME`, ~180 s, idle or not) or a data packet in.
+  `last_tx` is not evidence — keepalives keep advancing it while
+  `prev_keypair` is valid, i.e. exactly during the failure. Silent for
+  `WG_LINK_STALE_MS` (6 min) = down; down for `WG_LINK_RECOVER_MS` (15 min) =
+  `WgLink_Housekeep()` rebuilds the peer, which is the one action that clears
+  the stuck state.
+
 - **Soft dependency, always.** A dead hub costs one handshake packet every
   5 s (`REKEY_TIMEOUT`) and nothing else; `peer->active` stays set so the port
-  retries forever without app intervention. No WG path blocks a task, the
-  RS485 bus, or the IWDG kick.
+  retries forever without app intervention. The 15-minute self-rebuild above
+  keeps that property — it allocates nothing (the netif is reused; removing it
+  would leak a UDP PCB and leave a timer on freed memory) and nothing waits on
+  it. No WG path blocks a task, the RS485 bus, or the IWDG kick.
 - **Entropy:** hardware RNG (`hrng`) whitened through a SHA-256 DRBG, with a
   fresh HW word mixed into every output block. WireGuard draws ephemeral
   session keys from this, so RNG failures are counted and reported by

@@ -429,14 +429,24 @@ void App_DefaultTaskEntry(void)
             wgTick = 0U;
             WgTime_Tick();
 
+            /* Samples the tunnel's liveness evidence and, if the hub has
+             * been silent long enough, rebuilds the peer.  The judgement is
+             * WgLink_IsUp(), which is deliberately NOT the port's own
+             * peer-is-up predicate — that one cannot go false once a session
+             * has existed (see wg_link.h). */
             if (WgLink_IsRunning()) {
-                int up = WgLink_IsUp();
+                int up;
+
+                (void)WgLink_Housekeep();
+
+                up = WgLink_IsUp();
                 if (up != wgWasUp) {
                     wgWasUp = up;
                     if (up) {
-                        TRice("WG: tunnel UP (session established)\n");
+                        TRice("WG: tunnel UP (hub answering)\n");
                     } else {
-                        TRice("WG: tunnel DOWN (handshaking)\n");
+                        TRice("WG: tunnel DOWN (no response for %us)\n",
+                              (unsigned)(WG_LINK_STALE_MS / 1000u));
                     }
                 }
             }
