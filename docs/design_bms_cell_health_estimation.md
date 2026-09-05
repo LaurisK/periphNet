@@ -1,8 +1,14 @@
 # JK BMS data, and estimating per-cell health and pack SOC — Direction
 
-> Status: **observations + direction**, 2026-08-25. Nothing frozen: no
-> interfaces approved, no phase committed. §2–§4 are findings (firmware
-> evidence, cited); §5–§10 are a proposal. Related:
+> Status: **direction, partly built.** 2026-08-25. §2–§4 are findings
+> (firmware evidence, cited) and stand. §5–§10 were a proposal, and the
+> anchoring half of it has since shipped — `/api/pack/status` reports
+> `dcRes_uOhm`/`dcResSteps` and `anchorSamples`/`anchorIrSamples`, and
+> zaliakalnis has fitted an 11.46 mOhm power path over 103 steps. **Per-cell
+> capacity/SOH estimation is still unimplemented.**
+>
+> The field lesson §5 predicted and got: **a pack whose baseline load never
+> falls below C/50 cannot anchor from rest and its SOC free-runs.** Related:
 > [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md)
 > (why autonomy constrains this), [modbus.md](modbus.md) §2 (the subscription
 > surface this would consume), [pylontech_can_protocol.md](pylontech_can_protocol.md)

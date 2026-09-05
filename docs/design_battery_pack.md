@@ -1,12 +1,15 @@
 # Battery Pack module — storyline and API
 
-> Status: **Part I storyline — direction** (agreed 2026-08-25).
-> **Part II API — design**: the contract an implementation must meet. Not
-> implemented.
+> Status: **current — the module is built and running on both boards.**
+> Part I is the storyline (agreed 2026-08-25); Part II is the API, and it is
+> now the contract the shipped `App/Pack/` meets rather than one it must.
+> Host-tested: `test_pack_fsm`, `test_pack_soc`, `test_pack_cfg` all pass.
 >
-> Staged deliberately: storyline → API → details → implementation. Part I is
-> settled and should be argued with only if a decision in it is wrong. Part II
-> is what implementation will be held to.
+> Field state 2026-09-05: zaliakalnis carries one `jkbms` pack (`zaliakalnis`,
+> `cond: online`, 26,770 updates, anchoring with 26,324 samples and a fitted
+> 11.46 mOhm power path); sodas carries two (`sodas2` + one more, 24,715
+> updates, 2 stale). `pack_pylontech` still registers and refuses to bind —
+> its frame parser does not exist yet.
 >
 > Related: [design_bms_cell_health_estimation.md](design_bms_cell_health_estimation.md)
 > (what lives *inside* a pack, later), [modbus.md](modbus.md) §2/§4 (the surface

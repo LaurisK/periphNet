@@ -9,9 +9,12 @@ which inverted the device↔plan link; and **the module enforces write bounds**
 ([§4.6](#46-requests--one-array-of-items-in-and-out)). [§12](#12-undesigned) now
 holds nothing blocking.
 
-**§1-§10 is implemented as of 2026-08-13** and has not yet run on hardware —
-§11.1 says what is on the board, what departs from this document and why.
-`docs/task_modbus_implementation.md` is the step-by-step record.
+**§1-§10 is implemented and running on both boards.** Verified in the field
+2026-09-05: zaliakalnis (`10.77.0.64`) polls one JK at 14 permille bus duty;
+sodas (`10.77.0.5`) polls two JK at 115200 and the Solis at 9600 on the same
+pair — 3 devices, 132 points, 31 sequences, 75 permille duty, longest frame
+175 ms. Per-device baud multiplexing (SS2.6) is carrying that in production.
+SS11.1 says what departs from this document and why.
 
 Single source of truth for Modbus in PeriphNet.
 
@@ -2345,7 +2348,7 @@ do: bisecting a regression, surviving the migration, and measuring. Where it and
 
 ### 11.1 What ships today
 
-**§1-§10 is implemented** (2026-08-13, `docs/task_modbus_implementation.md` has
+**§1-§10 is implemented** (2026-08-13; the execution plan that tracked it has
 the step-by-step and the deviations). What is on the board:
 
 | | |

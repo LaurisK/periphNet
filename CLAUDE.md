@@ -15,7 +15,7 @@ DMA-reachable; commands and CCM buffers fall back to the polled HAL call.
 CPU at 100 % because the cost is `W25Q128_WaitReady` *waiting*, not
 transferring. Measurements, the ranked risk list for a tunnel-only board, and
 the design assessment of moving that wait to a timer + callback:
-[docs/task_dma_interrupt_audit.md](docs/task_dma_interrupt_audit.md) §7-§8 and
+[docs/reference_dma_and_cubemx_regen.md](docs/reference_dma_and_cubemx_regen.md) and
 [docs/task_flash_wait_and_ota_cost.md](docs/task_flash_wait_and_ota_cost.md).
 
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
@@ -48,13 +48,19 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — ~451 KB flash (480 KB limit), ~122 KB main
-  SRAM of 128 KB and ~58.5 KB CCM of 64 KB. **BOTH RAM regions are now tight:
-  main SRAM is at ~96 % and CCM at ~91 %**, so main SRAM is currently the
-  tighter of the two — a new multi-KB `.bss` array no longer fits without
-  taking something out. (2026-09-03; the older "~86 KB main SRAM, CCM is the
-  tight one" figure in this file was stale by ~36 KB.) The `.bin` is signed
-  in-place (IMAGE_SIZE + HMAC patched) after every build
+- `build/application.elf` / `.bin` — **all three regions are now tight, and
+  FLASH is the tightest** (measured 2026-09-05):
+
+  | Region | Used | Limit | | Free |
+  |---|---|---|---|---|
+  | Flash (`.text`+`.rodata`+`.data`) | 477,980 | 491,520 | **97.2 %** | 13.2 KB |
+  | Main SRAM (`.bss`+`.data`+heap/stack) | 126,848 | 131,072 | **96.8 %** | 4.2 KB |
+  | CCM (`.ccmram`+`.ccmheap`) | 59,824 | 65,536 | **91.3 %** | 5.6 KB |
+
+  A new multi-KB `.bss` array does not fit, and neither does a multi-KB
+  feature. Budget before adding anything — and remember OTA is the only
+  delivery path to a deployed board. The `.bin` is signed in-place
+  (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
   used for OTA (needs python3 `cryptography` + `intelhex` packages)
@@ -255,7 +261,7 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 ```
 
 **`nvDb` (`Shared/NvDb/`) now owns this address space** —
-[docs/task_nv_db.md](docs/task_nv_db.md) §1-§5, phases 0-6 of §7. Each client
+[docs/design_nv_db.md](docs/design_nv_db.md) §1-§4. Each client
 ("user", `eNvDbUser`) gets a flat bounds-checked span starting at `0x00`;
 placement, relocation and isolation live in one module and no consumer header
 mentions a sector, a page, an erase or an address. It runs on the board:
@@ -301,7 +307,8 @@ the flash mid-erase records a full log and the board is back in ~4 s by
 software reset, and a build with the busy budget cut to 1 ms writes nothing
 and still resets promptly instead of hanging 16 s for the IWDG. Design,
 results and two defects the testing exposed:
-[docs/task_fault_context_flash.md](docs/task_fault_context_flash.md) §9.
+the two defects it exposed are recorded here (`BTN1`, and the `type: Assert`
+overwrite below).
 
 **There is no way to trigger a fault remotely, deliberately.** A temporary
 `POST /api/system/fault/...` endpoint existed only long enough to run those
@@ -501,8 +508,11 @@ PeriphNet/
 
 **Ownership rules:** `Core/` is CubeMX-generated only — never hand-edit outside
 USER CODE sections; first-party code lives in `Shared/` (both targets), `App/`
-(application), `bootloader/` (BL). `Shared/` must not depend on App/, bootloader/,
-FreeRTOS, or lwIP. FWU keys (`bootloader/secrets*.c`) never link into the
+(application), `bootloader/` (BL). `Shared/` must not depend on App/,
+bootloader/ or lwIP, and must not depend on FreeRTOS **in the bootloader
+build** — `Shared/Drivers/w25q128.c` does take the RTOS mutex in the
+application, guarded by `#ifndef BOOTLOADER_BUILD`. The guard is right; an
+absolute "never" here would be a wrong rule in a file used as an authority. FWU keys (`bootloader/secrets*.c`) never link into the
 application — CMake fails the build if a secrets file leaks into App sources.
 
 ## Firmware Version (Zhaga Pattern)
@@ -667,7 +677,7 @@ golden image**, since a virgin board's erased boot-status flags read as
 unconfirmed and rebooting toward a rollback that must fail helps nobody.
 **The cost is a false rollback if the WAN is down longer than the window ×3**;
 that is the one way this violates the autonomy requirement, and the window is
-the knob. [docs/task_fwu_confirm_deadline.md](docs/task_fwu_confirm_deadline.md)
+the knob (`FWU_CONFIRM_WINDOW_DEFAULT_SEC`).
 
 ## Bootloader API (sBootloaderApi at 0x08007F00)
 
@@ -1013,7 +1023,7 @@ than a runtime placeholder. Range-check and return `"?"`, never `NULL` — the
 older `PackCfg_TypeName` NULL convention is not to be copied, since both
 adapters pass its result straight into `%s`. Names that reach JSON must
 contain no `"` or `\`, or be escaped where they are emitted; the host test
-asserts it. [docs/task_http_server_restructure.md](docs/task_http_server_restructure.md) §8
+asserts it. [docs/design_http_server_adapter.md](docs/design_http_server_adapter.md) §1
 
 ### Trice Usage
 
@@ -1066,7 +1076,7 @@ what the switch is for during bring-up.
   `Shared/Modbus` and `Shared/NvDb` this is application-only Shared code
   (`SHARED_JSON_SOURCES`), and CMake fails the build if a bootloader source
   includes a `json*` header. Details, measurements and the escape-vs-reject
-  decision: [docs/task_json_module.md](docs/task_json_module.md) §7
+  decision are recorded in `Shared/Json/json.h`.
 - **`Shared/Modbus/` is application-only Shared code** — host-testable like the rest of Shared/, but kept out of `${SHARED_SOURCES}` (own `SHARED_MODBUS_SOURCES` list) so it never bloats the 32KB bootloader
 - **`Shared/NvDb/` is application-only Shared code too** (`SHARED_NVDB_SOURCES`), and CMake **fails the build if any bootloader source includes an `nvdb*` header**. The BL has no knowledge of `nvDb` by design — it learns where the firmware blobs are from the FWU module, which is what leaves the directory format free to evolve without a bootloader in lockstep
 - **`nvDb` is the only authority over the medium, and CMake enforces that too** — no `W25Q128_*` call and no `EXT_FLASH_*_ADDR` anywhere in `App/` or `Shared/` outside the driver, `Shared/NvDb/`, and the three exempt files listed in the External Flash section
