@@ -18,6 +18,7 @@
  */
 
 #include "App/Gw/modbus_tcp.h"
+#include "App/Gw/mbap.h"
 #include "App/Modbus/modbus.h"
 #include "App/Mon/sysmon.h"
 #include "App/Net/wg_link.h"
@@ -33,18 +34,20 @@
  * Wire constants
  * -------------------------------------------------------------------------- */
 
-#define MBAP_HDR_LEN         7u    /* txnId, protoId, length, unitId        */
-#define MBAP_MAX_PDU       253u    /* FC16 with 123 registers is the worst  */
-#define MBAP_MAX_FRAME     (MBAP_HDR_LEN + MBAP_MAX_PDU)
-
-/* The codes this gateway ORIGINATES.  A slave's own exception is passed
- * through verbatim and never mapped onto these — see modbus_tcp.h. */
-#define MBEXC_ILLEGAL_FUNCTION   0x01u
-#define MBEXC_ILLEGAL_ADDRESS    0x02u
-#define MBEXC_ILLEGAL_VALUE      0x03u
+/* Framing and the shape-level exceptions live in mbap.c, which is pure and
+ * host-tested.  What is left here is everything that needs state: which
+ * device a unit id names, whether the engine can take the transfer now, and
+ * what a wire failure means to a client. */
 #define MBEXC_SLAVE_BUSY         0x06u
 #define MBEXC_GW_PATH            0x0Au
 #define MBEXC_GW_TARGET          0x0Bu
+
+/* The two headers are deliberately independent — mbap.h knows the protocol,
+ * modbus.h knows the module — so this is what keeps them agreeing. */
+_Static_assert(MBAP_MAX_READ_REGS  == MB_RAW_MAX_READ_REGS,
+               "MBAP and Modbus read limits disagree");
+_Static_assert(MBAP_MAX_WRITE_REGS == MB_RAW_MAX_WRITE_REGS,
+               "MBAP and Modbus write limits disagree");
 
 /* Accept blocks for this long, then the loop wakes to re-check the tunnel
  * address and check in with sysmon.  Nothing else needs it: an idle listener
@@ -269,144 +272,67 @@ static uint8_t do_transfer(uint8_t devOrd, uint8_t fc, uint16_t addr,
  * One request
  * -------------------------------------------------------------------------- */
 
-static uint16_t be16(const uint8_t *p)
-{
-    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-
-static void put16(uint8_t *p, uint16_t v)
-{
-    p[0] = (uint8_t)(v >> 8);
-    p[1] = (uint8_t)(v & 0xFFu);
-}
-
-/** Build an exception response over the request's own MBAP header.
- *  @return total frame length. */
+/** Build an exception response, and count it.  The counting is why this wraps
+ *  Mbap_BuildException rather than calling it at each site. */
 static uint32_t build_exception(const uint8_t *req, uint8_t code)
 {
-    s_tx[0] = req[0];                 /* transaction id, echoed */
-    s_tx[1] = req[1];
-    put16(&s_tx[2], 0u);              /* protocol id */
-    put16(&s_tx[4], 3u);              /* unit + fc + code */
-    s_tx[6] = req[6];                 /* unit id, echoed */
-    s_tx[7] = (uint8_t)(req[7] | 0x80u);
-    s_tx[8] = code;
-
     s_exceptions++;
     if (code == MBEXC_SLAVE_BUSY) {
         s_busyExceptions++;
     }
-    return 9u;
+    return Mbap_BuildException(req, code, s_tx);
 }
 
 /**
  * @brief  Answer one framed request.
  * @param  req     the whole frame: MBAP header then PDU
  * @param  pduLen  PDU bytes (function code included)
- * @return response length in s_tx, or 0 if the request is to be ignored.
+ * @return response length in s_tx.
  */
 static uint32_t handle_request(const uint8_t *req, uint16_t pduLen)
 {
-    const uint8_t *pdu  = &req[MBAP_HDR_LEN];
-    uint8_t        unit = req[6];
-    uint8_t        fc   = pdu[0];
-    uint8_t        devOrd;
-    uint16_t       addr;
-    uint16_t       count;
-    uint8_t        exc;
+    sMbapReq r;
+    uint8_t  devOrd;
+    uint8_t  exc;
 
     s_requests++;
     s_lastRequestTick = osKernelGetTickCount();
     s_hadRequest      = 1u;
 
-    if (fc != 3u && fc != 4u && fc != 6u && fc != 16u) {
-        return build_exception(req, MBEXC_ILLEGAL_FUNCTION);
-    }
-    if (pduLen < 5u) {
-        return build_exception(req, MBEXC_ILLEGAL_ADDRESS);
+    /* Shape first, and entirely in the codec (mbap.c) — this file's job
+     * starts where state does. */
+    exc = Mbap_Decode(req, pduLen, &r);
+    if (exc != 0u) {
+        return build_exception(req, exc);
     }
 
     /* THE UNIT ID IS A SLAVE ADDRESS, resolved against the device records —
      * the config still owns which pair that slave lives on and at what baud
      * (modbus.h, Modbus_DeviceBySlave). */
-    if (Modbus_DeviceBySlave(unit, &devOrd) != 0) {
+    if (Modbus_DeviceBySlave(r.unit, &devOrd) != 0) {
         return build_exception(req, MBEXC_GW_PATH);
     }
 
-    /* CHECKED HERE, NOT INSIDE do_transfer, because the write paths below fill
-     * s_regs before they call it — and s_regs is the buffer the engine may
-     * still be holding.  Refusing early is what keeps "borrowed until the
+    /* CHECKED BEFORE s_regs IS FILLED, because s_regs is the buffer the engine
+     * may still be holding.  Refusing early is what keeps "borrowed until the
      * callback fires" true rather than nearly true. */
     if (s_txnBorrowed) {
         return build_exception(req, MBEXC_SLAVE_BUSY);
     }
 
-    addr = be16(&pdu[1]);
+    /* ONE FRAME, NEVER DECOMPOSED (docs/design_solis_modbus_link.md §3.5):
+     * an FC16 goes to the wire as the client wrote it, because the Remote
+     * Dispatch block is silently dropped by the inverter if it arrives as
+     * scattered single-register writes. */
+    Mbap_TakeValues(&r, s_regs);
 
-    switch (fc) {
-    case 3u:
-    case 4u:
-        count = be16(&pdu[3]);
-        if (count == 0u || count > MB_RAW_MAX_READ_REGS) {
-            return build_exception(req, MBEXC_ILLEGAL_VALUE);
-        }
-        exc = do_transfer(devOrd, fc, addr, count);
-        if (exc != 0u) {
-            return build_exception(req, exc);
-        }
-        put16(&s_tx[0], be16(&req[0]));
-        put16(&s_tx[2], 0u);
-        put16(&s_tx[4], (uint16_t)(3u + count * 2u));   /* unit + fc + bc + data */
-        s_tx[6] = unit;
-        s_tx[7] = fc;
-        s_tx[8] = (uint8_t)(count * 2u);
-        for (uint16_t i = 0; i < count; i++) {
-            put16(&s_tx[9 + i * 2u], s_regs[i]);
-        }
-        return 9u + (uint32_t)count * 2u;
-
-    case 6u:
-        s_regs[0] = be16(&pdu[3]);
-        exc = do_transfer(devOrd, 6u, addr, 1u);
-        if (exc != 0u) {
-            return build_exception(req, exc);
-        }
-        /* FC06's response is its request, echoed. */
-        memcpy(s_tx, req, MBAP_HDR_LEN + 5u);
-        put16(&s_tx[4], 6u);
-        return MBAP_HDR_LEN + 5u;
-
-    default:      /* 16 */
-        count = be16(&pdu[3]);
-        /* The byte count is the request's own statement about itself; if it
-         * disagrees with the register count the frame is malformed, and that
-         * is a different fact from an address the slave does not have. */
-        if (pduLen < 6u || pdu[5] != (uint8_t)(count * 2u) ||
-            pduLen < (uint16_t)(6u + count * 2u)) {
-            return build_exception(req, MBEXC_ILLEGAL_ADDRESS);
-        }
-        if (count == 0u || count > MB_RAW_MAX_WRITE_REGS) {
-            return build_exception(req, MBEXC_ILLEGAL_VALUE);
-        }
-        for (uint16_t i = 0; i < count; i++) {
-            s_regs[i] = be16(&pdu[6 + i * 2u]);
-        }
-        /* ONE FRAME, NEVER DECOMPOSED (docs/design_solis_modbus_link.md §3.5):
-         * the Remote Dispatch block is silently dropped by the inverter if it
-         * arrives as scattered single-register writes. */
-        exc = do_transfer(devOrd, 16u, addr, count);
-        if (exc != 0u) {
-            return build_exception(req, exc);
-        }
-        put16(&s_tx[0], be16(&req[0]));
-        put16(&s_tx[2], 0u);
-        put16(&s_tx[4], 6u);
-        s_tx[6] = unit;
-        s_tx[7] = 16u;
-        put16(&s_tx[8], addr);
-        put16(&s_tx[10], count);
-        return 12u;
+    exc = do_transfer(devOrd, r.fc, r.addr, r.count);
+    if (exc != 0u) {
+        return build_exception(req, exc);
     }
+
+    return (r.fc == 3u || r.fc == 4u) ? Mbap_BuildReadReply(&r, s_regs, s_tx)
+                                      : Mbap_BuildWriteReply(&r, s_tx);
 }
 
 /* --------------------------------------------------------------------------
@@ -420,33 +346,28 @@ static void serve(struct netconn *conn)
     st_init(&st, conn);
 
     for (;;) {
-        uint16_t length;
-        uint16_t pduLen;
+        int pduLen;
 
         if (st_read(&st, s_rx, MBAP_HDR_LEN) != 0) {
             break;                       /* closed, or idle past IO_TIMEOUT */
         }
 
-        /* Protocol id must be zero; anything else is not Modbus TCP and the
-         * stream cannot be resynchronised, so the connection ends. */
-        if (be16(&s_rx[2]) != 0u) {
-            TRice("MBTCP: bad protocol id, closing\n");
+        /* A HEADER THIS CODEC WILL NOT PARSE ENDS THE CONNECTION, rather than
+         * being answered or skipped: a wrong protocol id or an impossible
+         * length means the byte stream is not where we think it is, and there
+         * is no resynchronisation point in Modbus TCP to hunt for. */
+        pduLen = Mbap_PduLen(s_rx);
+        if (pduLen < 0) {
+            TRice("MBTCP: unparsable MBAP header, closing\n");
             break;
         }
 
-        length = be16(&s_rx[4]);
-        if (length < 2u || length > (MBAP_MAX_PDU + 1u)) {
-            TRice("MBTCP: bad MBAP length %u, closing\n", length);
-            break;
-        }
-        pduLen = (uint16_t)(length - 1u);        /* unit id is inside length */
-
-        if (st_read(&st, &s_rx[MBAP_HDR_LEN], pduLen) != 0) {
+        if (st_read(&st, &s_rx[MBAP_HDR_LEN], (uint32_t)pduLen) != 0) {
             break;
         }
 
         {
-            uint32_t n = handle_request(s_rx, pduLen);
+            uint32_t n = handle_request(s_rx, (uint16_t)pduLen);
             if (n > 0u && send_all(conn, s_tx, n) != 0) {
                 break;
             }

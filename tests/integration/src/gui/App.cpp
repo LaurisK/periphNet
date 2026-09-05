@@ -1,10 +1,12 @@
 #include "gui/App.h"
 #include "core/ModbusTests.h"
+#include "core/GatewayTests.h"
 
 App::App()
 {
     registerAllTests(testRunner);
-    registerModbusTests(testRunner, config_.deviceIp);
+    registerModbusTests(testRunner, config.deviceIp);
+    registerGatewayTests(testRunner, config.deviceIp);
 }
 
 App::~App()

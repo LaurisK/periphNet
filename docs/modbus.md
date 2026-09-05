@@ -713,6 +713,24 @@ device and adding its bit to the plan's device set, and **no consumer changes**.
 Where a capability is split across plans (`pack_fast` / `pack_lazy`), the split is
 itself the choice being offered.
 
+**THE PLAN MASK DOES NO EVENT ROUTING — IT DECIDES WHAT IS POLLED.** This is
+the single most misreadable thing in §4, and it cost a shipped board 46 ‰ of a
+shared RS485 pair, so it is stated before the rule it qualifies. Every
+`dispatch()` call site passes `MB_PLAN_ALL` as the event's scope, so a live
+subscriber receives **every** event whatever its own mask says; scoping is
+therefore a no-op on delivery. What the mask does is enter
+`ModbusSub_PlanUnion()`, and the scheduler loads exactly that union.
+
+So `MB_PLAN_ALL` does not mean *"tell me about everything"* — the events arrive
+either way. It means **"put every plan on the wire"**. A consumer that passes
+the wildcard because it filters in its callback anyway has not written a
+harmless line: it has asked the board to poll every device in the config,
+including ones it is about to discard.
+
+That is exactly what `pack_jkbms.c` did, and what it cost is measured in
+§11a.14. A consumer must pass the plans that read the devices it wants — and
+`Modbus_PlanList()`'s `devices` bitmask is how it finds them.
+
 **A plan nobody subscribes to is not polled at all.** The config says what *may*
 be read; a subscription says what *is* read. The engine ORs the plan masks of all
 live subscriptions; a plan outside that union is not loaded and creates **no
@@ -2297,11 +2315,34 @@ against two FC06 writes, and that is precisely the bug FC16 atomicity exists to
 prevent (design_solis_modbus_link.md §3.5). A decomposed write would show as
 two 8-byte frames instead.
 
-**What is NOT covered here: the MBAP listener itself.** `App/Gw/modbus_tcp.c`
-needs a TCP client and a network, so nothing above exercises the framing, the
-unit-id map or the exception codes it originates. That is a hardware
-acceptance item, not a harness gap to close with a mock — the seam beneath it
-(§4.11) is what these cases prove, and it is the half that touches the bus.
+**The MBAP layer has its own two tests, and they share one fixture.** The
+codec was split out of `modbus_tcp.c` into `App/Gw/mbap.c` — libc only, no
+lwIP, no RTOS — precisely so half of the gateway could be tested with no board
+at all:
+
+| Test | Where | Needs a board |
+|---|---|---|
+| `test_mbap` | host, `ctest` | **no** — every frame `solis_modbus` sends, built, decoded, answered, and the answer re-parsed as pymodbus would |
+| `gw_*` | `tests/integration` | **yes** — the same 48 reads against the live `:502`, with a client shaped like `client_manager.py` |
+
+Both drive `tests/fixtures/solis_modbus_groups.h`, which is **generated** from
+upstream's own `hybrid_sensors.py` by `tools/extract_solis_groups.py` using
+upstream's own grouping rule, with register values from a real inverter
+read-out. Expectations typed out by hand would agree with a misreading of the
+protocol as happily as with the protocol.
+
+What the host test asserts is worth knowing before changing the codec: that an
+address the inverter does not implement is **accepted for the wire** rather
+than guessed at locally (§3.4's exception 2 has to come from the slave), that
+an over-limit FC16 is refused by the *header* rather than by decode, and that
+a transaction id survives every path including the exception one — pymodbus
+drops a reply whose id does not match, which is a stall rather than a visible
+error.
+
+**Still not covered, and it needs the board:** the listener's accept loop, the
+tunnel-only bind, the unit-id map, the engine budget, and the `0x06`/`0x0A`/
+`0x0B` exceptions the gateway originates. Those are the `gw_*` cases and
+[design_solis_modbus_link.md](design_solis_modbus_link.md) §10.
 
 | Event | String |
 |---|---|
@@ -2947,6 +2988,62 @@ Verified host-side by compiling both generated files through the real
 `MbCfgCompile` before deployment, and by checking every point against the
 firmware's own `quantity + (byteOffset/2) < 0x93` bound. **Not yet uploaded to
 a board.**
+
+### 11a.14 The wildcard subscription that polled a device nobody read (2026-09-05)
+
+**Found by asking why sodas still polled the Solis after MQTT was removed.**
+Nothing on the board consumed a single Solis register, yet all 45 points were
+being read at 5 s. The cause was one argument:
+
+```c
+/* pack_jkbms.c, before */
+s_sub = Modbus_Subscribe(MB_PLAN_ALL, sample|txn|config, ModbusEvent, NULL);
+```
+
+The JK pack driver — bound only to `rs485:2` and `rs485:15` — asked for every
+plan, so the engine loaded the `solis` plan too and dispatched 45 points per
+sweep into a callback that discarded every one on `in->devOrd != ev->…devOrd`.
+The comment beside it said *"planMask does no event routing today"*, which is
+true and was the trap: it does no routing, but it is the whole of what gets
+polled (§4.2). **The reason the Solis plan existed was the MQTT bridge; the
+reason it kept being polled was the wildcard.**
+
+The fix is `plans_covering(devOrd)` from `Modbus_PlanList()`'s `devices`
+bitmask, re-derived on every bind and unbind. Measured on sodas, same config,
+no gateway traffic:
+
+| | before | after |
+|---|---|---|
+| windowed duty | **74 ‰** | **28 ‰** |
+| transactions / 65 s | 104 | 62 |
+| sequences | 31 | 28 |
+| `solis` polled | true | **false** |
+| gateway worst-case latency | 1786 ms | **431 ms** |
+
+28 ‰ is two JK at 115200 — it matches zaliakalnis's 14 ‰ for one, exactly.
+The latency figure is the one that mattered most for the gateway: a `:502`
+request no longer queues behind 175 ms Solis frames.
+
+**And the first attempt at the fix broke the scheduler, which is the part worth
+remembering.** Reconciling the subscription *synchronously inside*
+`Bind()`/`Unbind()` looked obviously right and is wrong: a config swap drives
+unbind-then-bind for every instance, so one `POST /api/modbus/config/apply`
+produced four unsubscribe/resubscribe cycles, each tearing down and rebuilding
+every plan's timers. `Pd1.1.48` on sodas came out of a single apply with
+**`arm_failures: 16`, two of four clocks live, 16 of 28 sequences and both JK
+packs reading 0 mV** — the timer-queue flood of
+[issue_modbus_engine_stall.md](issue_modbus_engine_stall.md) re-entered through
+a new door, in the one module that had been rewritten to prevent it.
+
+`Pd1.1.49` defers the reconcile to the type's 250 ms `tick`, so a whole rebind
+burst collapses into one call — and because it returns early when the mask is
+unchanged, the ordinary apply now costs **no subscription change at all**.
+Verified by re-applying the same config: 28 sequences, 4/4 clocks,
+`arm_failures: 0`, packs live.
+
+**The general rule this leaves:** a subscription's scope is bus policy, so
+retuning it is a scheduler operation, not bookkeeping. Do it once per settled
+state, never once per step of getting there.
 
 ## 12. Undesigned
 

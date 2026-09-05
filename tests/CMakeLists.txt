@@ -108,6 +108,20 @@ add_executable(test_modbus_frame
 target_include_directories(test_modbus_frame PRIVATE ${UNIT_INCLUDES})
 add_test(NAME modbus_frame COMMAND test_modbus_frame)
 
+# The Modbus TCP (MBAP) codec -- the half of the gateway that needs no board,
+# no network and no inverter.  Its fixture is GENERATED from upstream's own
+# hybrid_sensors.py by tools/extract_solis_groups.py, so what is asserted is
+# what Home Assistant really sends rather than what somebody imagined it sends.
+add_executable(test_mbap
+    test_mbap.c
+    ${PROJECT_ROOT}/App/Gw/mbap.c
+)
+target_include_directories(test_mbap PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME mbap COMMAND test_mbap)
+
 add_executable(test_modbus_plans
     test_modbus_plans.c
     ${NVDB_CORE}

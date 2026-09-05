@@ -99,6 +99,7 @@ typedef struct {
     uint8_t       statDirty;
     uint8_t       boundCount;
     uint8_t       devOrd;
+    uint8_t       planMask;         /* plans that actually READ this device  */
     uint8_t       used;
     uint8_t       cmdPending;       /* a Modbus_Request is outstanding       */
     sModbusReqItem reqItem;         /* borrowed by the module until done     */
@@ -107,7 +108,9 @@ typedef struct {
 /* Private variables --------------------------------------------------------*/
 
 static sJkInst s_jk[PACK_MAX];
-static int     s_sub = -1;
+static int     s_sub     = -1;
+static uint8_t s_subMask;          /* the mask s_sub is subscribed with     */
+static uint8_t s_subDirty;         /* a bind/unbind changed what we need    */
 
 /* Private function prototypes ----------------------------------------------*/
 
@@ -304,6 +307,104 @@ static int resolve_dev(const char *bindKey, uint8_t *devOrd,
     return 0;
 }
 
+/**
+ * Which plans actually read @p devOrd.
+ *
+ * THIS IS WHY IT MATTERS, and it is not obvious from the name: a
+ * subscription's plan mask does NO event routing — every dispatch call passes
+ * MB_PLAN_ALL as the event's scope, so a subscriber receives everything
+ * whatever its mask says.  What the mask does is decide **what the engine
+ * polls**: the scheduler loads the union of every live subscription's mask
+ * (docs/modbus.md §4.2, "a plan outside that union is not loaded").
+ *
+ * So MB_PLAN_ALL here does not mean "tell me about everything" — the events
+ * arrive either way.  It means "put every plan on the wire", including plans
+ * belonging to devices this type will discard on the devOrd check below.  On
+ * the sodas board that was a 45-point Solis capability polled at 5 s and read
+ * by nobody, about 46 ‰ of a shared RS485 pair.
+ */
+static uint8_t plans_covering(uint8_t devOrd)
+{
+    sModbusPlanInfo plans[MB_MAX_PLANS];
+    uint8_t         mask = 0u;
+    int             n    = Modbus_PlanList(plans, (uint8_t)MB_MAX_PLANS);
+
+    for (int i = 0; i < n; i++) {
+        if ((plans[i].devices & (uint8_t)(1u << devOrd)) != 0u) {
+            mask |= (uint8_t)(1u << plans[i].planId);
+        }
+    }
+    return mask;
+}
+
+/**
+ * Bring the single subscription in line with what the bound instances need.
+ *
+ * ONE SUBSCRIPTION STILL SERVES EVERY INSTANCE — that part of the original
+ * design was right, because dispatch is unfiltered and the callback keys on
+ * devOrd regardless.  What changed is its SCOPE.
+ *
+ * The mask is re-derived rather than accumulated, so an unbind narrows it
+ * again; a plan is only asked for while some bound instance is actually read
+ * by it.  Changing scope means unsubscribe + resubscribe: the module offers
+ * no way to retune a live subscription, deliberately, because a consumer's
+ * timers were built from the plans it named (§4.3).
+ *
+ * THE ZERO CASE FALLS BACK TO THE WILDCARD, and that is a deliberate
+ * trade rather than an oversight.  Modbus_Subscribe rejects an empty mask, and
+ * without a live subscription this type never sees mbEvt_config — which is the
+ * only thing that triggers a rebind, so one config apply would darken every JK
+ * pack until reboot.  A bound device that no plan reads is already reported as
+ * packWhy_notPolled, and in that state there is nothing of ours to poll
+ * anyway; the cost is that any OTHER plan stays on the wire, which is exactly
+ * the old behaviour and only in a config that asks for it.
+ */
+static void sub_sync(void)
+{
+    uint8_t want  = 0u;
+    uint8_t bound = 0u;
+
+    for (uint8_t i = 0; i < PACK_MAX; i++) {
+        if (s_jk[i].used != 0u) {
+            bound = 1u;
+            want |= s_jk[i].planMask;
+        }
+    }
+
+    /* NOTHING BOUND: leave the subscription exactly as it is.  This is the
+     * state between a config swap standing every instance down and the rebind
+     * putting them back, and it is a trap in both directions — dropping the
+     * subscription costs the mbEvt_config that drives the rebind, and widening
+     * it to the wildcard puts every plan on the wire for a burst that is about
+     * to narrow again. */
+    if (bound == 0u) {
+        return;
+    }
+    if (want == 0u) {
+        want = MB_PLAN_ALL;
+    }
+
+    if ((s_sub >= 0) && (want == s_subMask)) {
+        return;
+    }
+    if (s_sub >= 0) {
+        (void)Modbus_Unsubscribe(s_sub);
+        s_sub = -1;
+    }
+
+    s_sub = Modbus_Subscribe(want,
+                             (uint32_t)mbEvt_sample | (uint32_t)mbEvt_txn |
+                             (uint32_t)mbEvt_config,
+                             ModbusEvent, NULL);
+    if (s_sub >= 0) {
+        s_subMask = want;
+        TRice("[Pack] jkbms subscribed to plans 0x%02x\n", (unsigned)want);
+    } else {
+        s_subMask = 0u;
+        TRice("[Pack] jkbms subscribe FAILED (%d)\n", s_sub);
+    }
+}
+
 /** Walk the device's points SYNCHRONOUSLY and resolve each by name.
  *
  *  Deliberately not the catalogue burst: Bind() returns a filled
@@ -453,17 +554,9 @@ static int Bind(const sPackBindInfo *info, sPackBindResult *res)
         return packErr_notFound;    /* the device carries no point we know   */
     }
 
-    in->used = 1u;
-
-    /* One subscription serves every instance: planMask does no event routing
-     * today and the shipped config names plans positionally, so this filters
-     * by devOrd regardless (§8). */
-    if (s_sub < 0) {
-        s_sub = Modbus_Subscribe(MB_PLAN_ALL,
-                                 (uint32_t)mbEvt_sample | (uint32_t)mbEvt_txn |
-                                 (uint32_t)mbEvt_config,
-                                 ModbusEvent, NULL);
-    }
+    in->planMask = plans_covering(in->devOrd);
+    in->used     = 1u;
+    s_subDirty   = 1u;      /* applied on the next Tick — see sub_sync()     */
 
     res->caps       = caps;
     res->cmds       = cmds;
@@ -499,6 +592,8 @@ static int Unbind(uint8_t idx)
      * borrowed storage intact; ReqDone finishes it and the memset happens
      * then.  Both run on the func task, so the flag is enough. */
     s_jk[idx].used = 0u;
+    s_subDirty     = 1u;    /* narrow again, on the next Tick                */
+
     if (s_jk[idx].cmdPending != 0u) {
         s_jk[idx].unbindPending = 1u;
         return packErr_ok;
@@ -600,6 +695,27 @@ static void Tick(uint8_t idx, uint32_t now_ms)
 {
     sJkInst *in;
 
+    /* THE SUBSCRIPTION IS RETUNED HERE, NOT IN Bind()/Unbind(), and that is
+     * the whole point of the flag.  A config swap drives unbind-then-bind for
+     * every instance, so reconciling inside those calls produced four
+     * unsubscribe/resubscribe cycles for one apply — and every one of them
+     * tears down and rebuilds each plan's timers.  Measured on the sodas board
+     * 2026-09-05: one `POST /api/modbus/config/apply` left the scheduler with
+     * `arm_failures: 16`, two of four clocks live, 16 of 28 sequences and both
+     * JK packs reading 0 mV.  That is the FreeRTOS timer-queue flood
+     * docs/issue_modbus_engine_stall.md is about, re-entered through a new
+     * door.
+     *
+     * Deferring collapses the whole burst into ONE call, and because sub_sync
+     * returns early when the mask is unchanged, the common apply — one whose
+     * plans still cover the same devices — costs no subscription change at
+     * all.  Tick runs on the func task at 250 ms, so the cost of waiting is
+     * a quarter second of the old scope. */
+    if (s_subDirty != 0u) {
+        s_subDirty = 0u;
+        sub_sync();
+    }
+
     if (idx >= PACK_MAX) {
         return;
     }
@@ -646,6 +762,10 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
         for (i = 0u; i < PACK_MAX; i++) {
             s_jk[i].used = 0u;
         }
+        /* The subscription is deliberately left as it is.  Retuning it means
+         * unsubscribing, and this runs INSIDE the module's dispatch loop over
+         * that very table; the rebind below reaches sub_sync() on the func
+         * task a moment later, which is the right context for it. */
         /* ...and ASK THE CORE TO RE-BIND.  Without this the instances stayed
          * down for good: only the core holds the configuration and the post
          * function, so a type standing itself down could never come back, and

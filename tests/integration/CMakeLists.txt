@@ -36,6 +36,8 @@ add_library(periphnet_core STATIC
     src/core/TestRunner.cpp
     src/core/TestCases.cpp
     src/core/ModbusTests.cpp
+    src/core/ModbusTcpClient.cpp
+    src/core/GatewayTests.cpp
     src/core/transport/SerialTriceSource.cpp
     src/core/transport/UdpTriceSource.cpp
     src/core/transport/UsbTriceSource.cpp
@@ -44,6 +46,9 @@ add_library(periphnet_core STATIC
 
 target_include_directories(periphnet_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    # The generated solis_modbus group table, shared with the host test
+    # tests/test_mbap.c so both drive the board with the SAME list of reads.
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 target_compile_definitions(periphnet_core PUBLIC

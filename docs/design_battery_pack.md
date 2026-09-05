@@ -1270,6 +1270,7 @@ the argument `http_server.c:1097-1101` actually makes.
 | Core dispatch, condition, staleness, command timeout | shared func task | **no** | |
 | `bind` / `unbind` / `submit` | shared func task | briefly | a catalogue walk is flash I/O; it is why these are task-only |
 | Consumer callbacks, `fPackCmdDone` | shared func task | **no** | post and get out |
+| `sub_sync` (Modbus subscription scope) | shared func task, from `tick` **only** | briefly | see below — never from `Bind`/`Unbind`, and never from `ModbusEvent` |
 | `Pack_GetState` / `GetCells` / `Stats` | any **task** | — | copies under a critical section; **not ISR-callable** |
 | `Pack_Command` | any task | **no** | validates and claims synchronously, posts the wire work |
 | `Pack_Config*` | caller's task (http) | yes | an upload takes seconds; posting it would stall the task |
@@ -1389,6 +1390,25 @@ scaffolding.
 | Task | Stack | Priority | Why |
 |---|---|---|---|
 | `func` | 512 words, **statically allocated in `.bss`** | `osPriorityNormal-1` (23) | Below `modbus` (24) so pack work never delays the bus |
+
+**The type asks for the plans that read ITS devices, and retunes only on the
+tick.** `pack_jkbms` used to subscribe with `MB_PLAN_ALL` on the grounds that
+the mask does no event routing and the callback filters by `devOrd` anyway.
+Both halves of that are true and the conclusion was wrong: the mask is what the
+engine POLLS, so the wildcard put every device in the config on the wire —
+45 Solis points at 5 s, read by nobody, 46 ‰ of a shared pair
+([modbus.md](modbus.md) §11a.14).
+
+Two rules came out of fixing it, and the second was learned the expensive way:
+
+- the scope is `plans_covering(devOrd)`, re-derived on bind and unbind, so a
+  plan is asked for only while something still reads it;
+- **the retune happens on the 250 ms `tick`, never inside `Bind`/`Unbind`.** A
+  config swap drives unbind-then-bind per instance, and reconciling in place
+  turned one apply into four unsubscribe/resubscribe cycles — each rebuilding
+  every timer — leaving the scheduler with `arm_failures: 16` and both packs
+  at 0 mV. It must also never run from `ModbusEvent`, which executes inside
+  the module's own dispatch loop over the subscription table.
 
 `SysMon_TaskRegister(512U, 2000U)` from inside the task body, check in once per
 loop. A 2 s deadline covers the worst legitimate iteration (a tick plus a `bind`

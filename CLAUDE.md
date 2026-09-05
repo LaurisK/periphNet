@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is now BUILT** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address) and **not yet run on hardware** — §10 of that document is the acceptance list.
+**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is BUILT AND VERIFIED IN THE FIELD** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address). `Pd1.1.47` runs on both boards, confirmed and golden, since 2026-09-05; **all 48 register groups `solis_modbus` reads returned data from the live Solis**, worst 268 ms against a 1500 ms budget, with the exception map behaving as designed. Measurements and what is still outstanding — step 6 unapplied, HA not yet pointed at the board, no write ever made — are in §10 of that document.
 
 **Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic HA bridge that was an ordinary consumer (**that bridge was MQTT and has since been removed**, §9.1 of the Solis link doc; the Trice sink is now the reference subscriber). **Not yet run on hardware.**
 
@@ -53,7 +53,7 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
   | Region | Used | Limit | | Free |
   |---|---|---|---|---|
-  | Flash (`.text`+`.rodata`+`.data`) | 463,596 | 491,520 | **94.3 %** | 27.3 KB |
+  | Flash (`.text`+`.rodata`+`.data`) | 463,892 | 491,520 | **94.4 %** | 27.0 KB |
   | Main SRAM (`.bss`+`.data`+heap/stack) | 126,000 | 131,072 | **96.1 %** | 5.0 KB |
   | CCM (`.ccmram`+`.ccmheap`) | 59,124 | 65,536 | **90.2 %** | 6.3 KB |
 
@@ -166,7 +166,9 @@ not DMA — DMA1 S3/S4 belong to the flash now):
 ```
 
 **Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
-gate, boot_status flag lifecycle, the JSON module — the writer against a
+gate, boot_status flag lifecycle, **the Modbus TCP (MBAP) codec against every
+frame `solis_modbus` sends** — `App/Gw/mbap.c` is deliberately pure so the
+gateway's framing needs no board — the JSON module — the writer against a
 guard-banded buffer, the reader's escape decode and reject matrix, and the
 round trip that only closes if both halves agree — the Modbus config machinery — record
 store/selector, JSON compiler accept+reject matrix, export round-trip,
@@ -191,6 +193,19 @@ cmake --build build_integration -j8                               # → periphne
 Drop `-DBUILD_GUI=OFF` (and install `libsdl2-dev libgl-dev`) to also build the
 Dear ImGui GUI, `build_integration/periphnet_gui`. Modbus test contracts
 live in `docs/modbus.md` §6.
+
+**The `gw_*` cases drive the Modbus TCP gateway over TCP, not over Trice/CLI**
+— the gateway has no CLI surface by design. They replay the 48 register groups
+`solis_modbus` really reads, with a client shaped like its `client_manager.py`
+(one transaction at a time, 50/100 ms spacing, 5 s timeout), and they **skip**
+cleanly when nothing answers on `:502` — which on a board with no tunnel is the
+correct state, not a fault. Writes are registered as `gw_hw_write_*` and
+skipped: they move real power, so run them by name after `confirm`.
+
+**`tests/fixtures/solis_modbus_groups.h` is GENERATED** by
+`tools/extract_solis_groups.py` from upstream's own `hybrid_sensors.py` plus a
+real inverter read-out. It is committed, so nothing needs a `solis_modbus`
+checkout; regenerate it when upstream's register map moves.
 
 ## Hardware
 
@@ -742,7 +757,7 @@ Shared code compiled into both bootloader and application.
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
 | func | 512 words | osPriorityNormal-1 (23) | The shared functionality task — one task, many clients, a packed event-ID space. Today its only client is the **pack** module: binds at start-up, drains pack events, and runs a 250 ms wall-clock tick (staleness, command expiry, each type's `tick`). Queue and stack are **static in `.bss`, not `.ccmheap`** — CCM is the tight region |
-| mbtcp | 768 words | osPriorityNormal-1 (23) | The Modbus TCP gateway on `:502`. **Below the engine deliberately** — a request arriving from the WAN must never delay the sequence that keeps the battery and inverter talking. Idle until a client connects; binds to the tunnel address only, and retries every 5 s while the board is unprovisioned rather than exiting |
+| mbtcp | 768 words | osPriorityNormal-1 (23) | The Modbus TCP gateway on `:502`. **Below the engine deliberately** — a request arriving from the WAN must never delay the sequence that keeps the battery and inverter talking. Idle until a client connects; binds to the tunnel address only, and retries every 5 s while the board is unprovisioned rather than exiting. **Measured 2026-09-05: 537 of 768 words used under load, converged — 512 would have overflowed.** The depth is lwIP's `netconn_write` path and does not scale with frame size, since the frame buffers are static in `.ccmram` |
 | nvdb | 256 words | osPriorityLow | The nvDb collector: erases deleted space in the background so erases stay off the write path. One erasable unit per lock acquisition, so a waiting writer gets in between units. Sleeps on a notify (1 s backstop); never reboots anything |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
@@ -1107,4 +1122,6 @@ what the switch is for during bring-up.
 - **`:502` IS AN UNGATED WRITE PATH, AND THE TUNNEL IS ITS ONLY AUTHORIZATION.** The Modbus TCP gateway is transparent both ways by decision, not by omission ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §7.2): a raw transfer consults no point, no access bit and no `writeMin`/`writeMax`, so anything reaching that port can write any holding register on a live inverter with a live battery behind it. Three things follow and none may be relaxed casually — the listener binds the **tunnel address and never `IP_ADDR_ANY`**; a board with no tunnel configured **serves nothing** rather than falling back to the site LAN; and §4.6's point-model protection is untouched but applies **only** to `Modbus_Request` / `POST /api/modbus/write`, never to `Modbus_RawTransfer`
 - **A gateway request is a queued client of the engine, never a second bus master** — it rides the same request FIFO as `Modbus_Request`, so it takes its turn behind scheduled sequences and cannot displace the 1 Hz Pylontech CAN obligation. That is what keeps autonomy a scheduling property rather than an access rule, and it is why the `mbtcp` task sits *below* the engine's priority
 - **FC16 is framed verbatim on the gateway path and never decomposed** — `count` registers from `addr` go out as one write-multiple frame, and the **client's** function code is passed through rather than the capability's `writeFc`. Solis's Remote Dispatch block (44100-44112) is silently dropped by the inverter if it arrives as scattered single-register writes, so this is correctness, not style. The integration suite asserts it on the **frame length**, because an outcome assertion would pass against two FC06 writes
+- **A Modbus subscription's plan mask decides WHAT IS POLLED, not what is delivered** — every `dispatch()` passes `MB_PLAN_ALL`, so a subscriber gets every event whatever its mask says, while `ModbusSub_PlanUnion()` is what the scheduler loads. `MB_PLAN_ALL` therefore means *"put every plan on the wire"*, not *"tell me everything"*. Passing it because you filter in your own callback asks the board to poll devices you are about to discard: that is what `pack_jkbms` did, and it cost sodas 46 ‰ of a shared RS485 pair polling a Solis nobody read (docs/modbus.md §4.2, §11a.14). Use `Modbus_PlanList()`'s `devices` bitmask to ask for the plans that read your devices
+- **Retuning a subscription is a SCHEDULER operation, not bookkeeping** — it destroys and rebuilds every plan's timers, so it must happen once per settled state and never once per step of reaching one. Reconciling inside `Bind()`/`Unbind()` turned one config apply into four unsubscribe/resubscribe cycles and left the engine with `arm_failures: 16`, two of four clocks live and both packs reading 0 mV. The type's 250 ms `tick` is where it belongs, so a rebind burst collapses into one call
 - **Nothing takes `LOCK_TCPIP_CORE` on the Modbus sequence path** — the rule that kept it off there was written for the MQTT bridge (its callback copied and posted to `mqttTask` rather than publishing inline, docs/modbus.md §4.10). MQTT is gone, but the constraint outlives it and binds the Modbus TCP gateway next: a subscriber callback runs on the engine's own task, so it must never take the core lock or call a raw lwIP API
