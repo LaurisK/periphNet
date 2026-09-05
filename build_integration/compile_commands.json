@@ -55,12 +55,6 @@
 },
 {
   "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
-  "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/MqttTests.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/MqttTests.cpp",
-  "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/MqttTests.cpp",
-  "output": "CMakeFiles/periphnet_core.dir/src/core/MqttTests.cpp.o"
-},
-{
-  "directory": "/home/laurynas/Projects/PeriphNet/build_integration",
   "command": "/usr/bin/c++ -DPERIPHNET_PROJECT_ROOT=\\\"/home/laurynas/Projects/PeriphNet\\\" -I/home/laurynas/Projects/PeriphNet/tests/integration/src -std=gnu++17 -o CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o -c /home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
   "file": "/home/laurynas/Projects/PeriphNet/tests/integration/src/core/transport/SerialTriceSource.cpp",
   "output": "CMakeFiles/periphnet_core.dir/src/core/transport/SerialTriceSource.cpp.o"

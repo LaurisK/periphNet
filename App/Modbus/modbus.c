@@ -44,7 +44,7 @@
  *
  * 8 entries in MAIN SRAM, not CCM — nothing about dispatch is latency-critical.
  *
- * Concurrency: consumers live in the mqtt, http and cmd tasks, the dispatcher
+ * Concurrency: consumers live in the http and cmd tasks, the dispatcher
  * lives in the modbus task, and there is no mutex.  Subscribe claims a slot in
  * a brief critical section and writes `inUse` LAST, behind a barrier, so the
  * dispatcher sees either a complete entry or no entry.  That is at most 8
@@ -120,8 +120,9 @@ static void sub_release(uint8_t i)
  * So the module replays a burst of mbEvt_pointDesc, one per point in the
  * subscription's scope, `last` on the final entry.  It is delivered after
  * Subscribe, after every config swap, and on demand — and it ALWAYS runs on
- * the modbus task, because dispatching it inline would have mqttTask reading
- * config records out of flash.
+ * the modbus task, because dispatching it inline would have the CALLER's
+ * task reading config records out of flash — which is not a cost a
+ * subscriber asked for, and on tcpip_thread would not be legal at all.
  *
  * Note that no record is RAM-resident: a catalogue call is a flash walk.  That
  * property is load-bearing and must not leak away through the API.
@@ -507,8 +508,8 @@ void ModbusPlans_Refresh(void)
 
 /* How many live subscriptions NAMED this plan.  Wildcards do not count: a
  * subscriber that asked for every plan expressed no dependency on which plans
- * exist, and without this rule the feature would be dead on arrival — the MQTT
- * bridge and the Trice sink both subscribe to everything (§3.5). */
+ * exist, and without this rule the feature would be dead on arrival — the
+ * Trice sink subscribes to everything, and so will the gateway (§3.5). */
 static uint8_t plan_subscribers(uint8_t planId)
 {
     uint8_t bit = (uint8_t)(1u << planId);

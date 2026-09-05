@@ -3,7 +3,7 @@
  * @brief   Trice subscriber — see modbus_trice_sink.h.
  *
  * A consumer, not engine code: it reaches the module only through modbus.h,
- * exactly as App/Mqtt and App/Can do.  It lives in App/Modbus/ because it is
+ * exactly as App/Can does.  It lives in App/Modbus/ because it is
  * a diagnostic of this module and nothing else uses it.
  */
 

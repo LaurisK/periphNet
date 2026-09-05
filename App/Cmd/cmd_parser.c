@@ -19,7 +19,6 @@
 #include "App/Test/modbus_test_port.h"
 #include "App/Modbus/modbus_trice_sink.h"
 #include "App/Modbus/modbus.h"
-#include "App/Mqtt/mqtt_bridge.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -83,7 +82,6 @@ static void cmd_bms(const char *args);
 static void cmd_can(const char *args);
 static int  parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen);
 static void cmd_modbus(const char *args);
-static void cmd_mqtt(const char *args);
 static void cmd_wg(const char *args);
 static void cmd_nvdb(const char *args);
 static void cmd_pack(const char *args);
@@ -95,7 +93,6 @@ static const sCmdEntry s_commands[] = {
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "can",         cmd_can,         "CAN bridge + flash trace (start|stop|mode|status|ids|trace|log|send)" },
     { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
-    { "mqtt",        cmd_mqtt,        "MQTT bridge (start|stop|save|forget|monitor|status)"  },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
     { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|stats|balance|cmd|config|erase)" },
@@ -786,116 +783,6 @@ static void cmd_modbus(const char *args)
         Modbus_LogStatus();
     } else {
         TRice("Usage: modbus read|get|set|monitor|dump|plan|inject|silence|lastreq|status\n");
-    }
-}
-
-/**
- * MQTT command: control MQTT bridge to Home Assistant.
- *
- * Usage:
- *   mqtt start [ip] [port]   — Start MQTT bridge.  With no address it uses
- *                              the saved one, or 10.42.0.1:1883 if none
- *   mqtt save                — Persist the running config across resets
- *   mqtt forget              — Discard the persisted config
- *   mqtt stop                — Stop bridge
- *   mqtt status              — Show connection state
- *   mqtt set ip <a.b.c.d>   — Change broker IP
- *   mqtt monitor <on|off>    — Trice pub/sub message monitoring
- *   mqtt inject <topic> <payload> — Process a message as if from broker
- *   mqtt publish now         — Publish all values immediately
- */
-static void cmd_mqtt(const char *args)
-{
-    if (strncmp(args, "start", 5) == 0) {
-        if (MqttBridge_IsRunning()) {
-            TRice("MQTT already running\n");
-            return;
-        }
-        sMqttBridgeCfg cfg = {
-            .brokerIp = {10, 42, 0, 1},
-            .brokerPort = 1883,
-            .prefix = "periphnet",
-            .publishIntervalMs = 5000,
-        };
-        /* A saved broker beats the compiled-in one, which is a bench
-         * address and wrong everywhere else. */
-        if (MqttBridge_LoadCfg(&cfg) == 0) {
-            TRice("MQTT: using saved broker\n");
-        }
-        /* Parse optional: mqtt start [a.b.c.d] [port] */
-        const char *p = args + 5;
-        unsigned a, b, c, d, port = 0;
-        if (sscanf(p, " %u.%u.%u.%u %u", &a, &b, &c, &d, &port) >= 4) {
-            cfg.brokerIp[0] = a;
-            cfg.brokerIp[1] = b;
-            cfg.brokerIp[2] = c;
-            cfg.brokerIp[3] = d;
-            if (port > 0) cfg.brokerPort = (uint16_t)port;
-        }
-        MqttBridge_Start(&cfg);
-    } else if (strncmp(args, "save", 4) == 0) {
-        if (MqttBridge_SaveCfg() == 0) {
-            TRice("MQTT config saved\n");
-        } else {
-            TRice("MQTT config save FAILED\n");
-        }
-    } else if (strncmp(args, "forget", 6) == 0) {
-        if (MqttBridge_ForgetCfg() == 0) {
-            TRice("MQTT config forgotten\n");
-        } else {
-            TRice("MQTT config forget FAILED\n");
-        }
-    } else if (strncmp(args, "stop", 4) == 0) {
-        MqttBridge_Stop();
-    } else if (strncmp(args, "set ip ", 7) == 0) {
-        unsigned a, b, c, d;
-        if (sscanf(args + 7, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-            MqttBridge_SetBrokerIp((uint8_t)a, (uint8_t)b,
-                                    (uint8_t)c, (uint8_t)d);
-            TRice("MQTT broker IP set to %u.%u.%u.%u\n", a, b, c, d);
-        } else {
-            TRice("Usage: mqtt set ip <a.b.c.d>\n");
-        }
-    } else if (strncmp(args, "monitor ", 8) == 0) {
-        if (strncmp(args + 8, "on", 2) == 0) {
-            MqttBridge_SetMonitor(1);
-            TRice("MQTT monitor: on\n");
-        } else if (strncmp(args + 8, "off", 3) == 0) {
-            MqttBridge_SetMonitor(0);
-            TRice("MQTT monitor: off\n");
-        } else {
-            TRice("Usage: mqtt monitor on|off\n");
-        }
-    } else if (strncmp(args, "inject ", 7) == 0) {
-        /* mqtt inject <topic> <payload — rest of line> */
-        const char *p = args + 7;
-        while (*p == ' ') p++;
-        const char *topicStart = p;
-        while (*p != '\0' && *p != ' ') p++;
-        size_t topicLen = (size_t)(p - topicStart);
-        while (*p == ' ') p++;
-
-        char topic[80];
-        if (topicLen == 0 || topicLen >= sizeof(topic) || *p == '\0') {
-            TRice("Usage: mqtt inject <topic> <payload>\n");
-            return;
-        }
-        memcpy(topic, topicStart, topicLen);
-        topic[topicLen] = '\0';
-
-        if (MqttBridge_Inject(topic, p, (uint16_t)strlen(p)) != 0) {
-            TRice("MQTT inject failed (not running or busy)\n");
-        }
-    } else if (strncmp(args, "publish now", 11) == 0) {
-        if (!MqttBridge_IsRunning()) {
-            TRice("MQTT not running\n");
-            return;
-        }
-        MqttBridge_PublishNow();
-    } else if (strncmp(args, "status", 6) == 0) {
-        MqttBridge_LogStatus();
-    } else {
-        TRice("Usage: mqtt start|stop|save|forget|status|set|monitor|inject|publish\n");
     }
 }
 

@@ -151,7 +151,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  unit;               /* DLMS/COSEM physical-unit code            */
     int32_t  writeMin;           /* scaled-int domain; valid if MB_PT_BOUNDED*/
     int32_t  writeMax;
-    char     name[MB_POINT_NAME_LEN];  /* MQTT topic suffix, NUL-terminated  */
+    char     name[MB_POINT_NAME_LEN];  /* point name/suffix, NUL-terminated  */
 } sModbusPointRecord;            /* 40 bytes */
 
 typedef struct __attribute__((packed)) {
@@ -160,7 +160,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  portId;             /* eModbusPortId                            */
     uint8_t  format;             /* eModbusLineFormat; 0 = 8N1               */
     uint16_t capId;              /* the capability this slave implements     */
-    char     topicPrefix[MB_TOPIC_PREFIX_LEN];   /* MQTT ns + HA device name */
+    char     topicPrefix[MB_TOPIC_PREFIX_LEN];   /* device namespace + name  */
 } sModbusDeviceRecord;           /* 22 bytes */
 
 /* What we WATCH: a capability, a set of its devices, and time tables.  Plans

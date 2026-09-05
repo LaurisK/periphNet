@@ -13,6 +13,15 @@
 > (why autonomy constrains this), [modbus.md](modbus.md) §2 (the subscription
 > surface this would consume), [pylontech_can_protocol.md](pylontech_can_protocol.md)
 > (where the output goes).
+>
+> **Every "published to MQTT" below has lost its route.** MQTT was removed
+> from the project on 2026-09-05
+> ([design_solis_modbus_link.md](design_solis_modbus_link.md) §9.1), and the
+> replacement — a Modbus TCP gateway `solis_modbus` polls — carries the
+> *inverter*, not pack or per-cell data. So the phase table's delivery
+> mechanism no longer exists, and battery data in Home Assistant is now an
+> open question with no answer in this document. What the estimator computes
+> is unaffected; only where it lands is.
 
 Evidence base: the decompiled JK PB-series V19.21 firmware in
 `~/Projects/JK_BMS/FW/decompiled/` (all six board images, Ghidra output,
@@ -1215,7 +1224,7 @@ and this design does not touch it.
 ## 7. How it would fit PeriphNet
 
 A new module, **`App/Pack/`**, an ordinary Modbus consumer — the same status
-the MQTT bridge now has:
+the MQTT bridge then had:
 
 | File | Role |
 |---|---|
@@ -1256,9 +1265,10 @@ Everything else is existing machinery:
   say "unprovisioned", exactly as the Modbus config does.
 - **Outputs** — `App/Can/bms_sim.c` fills `0x355` / `0x351` from
   `Pack_GetState()` instead of from raw JK fields (gated on confidence, §5.7);
-  the MQTT bridge publishes per-cell capacity, SOH, resistance and confidence
-  as ordinary HA entities; `GET /api/pack/status` and a `pack` CLI command for
-  inspection, matching `sysmon` and `nvdb`.
+  per-cell capacity, SOH, resistance and confidence were to be published as
+  ordinary HA entities by the MQTT bridge, which no longer exists (see the
+  status header); `GET /api/pack/status` and a `pack` CLI command for
+  inspection, matching `sysmon` and `nvdb`, are what shipped.
 - **`App/Data/telemetry.c`** is currently reserved with no producers or
   consumers, and this is plausibly what it was reserved for — but its
   `sEnergyTelemetry` is inverter-shaped and has no room for per-cell data.
@@ -1299,7 +1309,7 @@ Each phase is useful on its own and none commits the next.
 | # | Phase | Delivers | Risk |
 |---|---|---|---|
 | 0 | **Observe.** Upload the extended config (§2.6 — already written, compiled host-side, not yet on a board), frames assembled and logged. Persist nothing, publish nothing, change no behaviour. | Answers every §10 hardware question, including the balancer efficiency `η` (§5.5a). Data for the replay harness. | none |
-| 1 | **Resistance and balancer telemetry.** §5.4 plus the `CellWireRes` array, plus balance source/sink/current/duty (§2.5) and the §2.6 fields, published to MQTT. | A real per-cell health signal and a visible balancer, immediately — no anchors, no persistence, no estimator. | low |
+| 1 | **Resistance and balancer telemetry.** §5.4 plus the `CellWireRes` array, plus balance source/sink/current/duty (§2.5) and the §2.6 fields (delivery route now open — see the status header). | A real per-cell health signal and a visible balancer, immediately — no anchors, no persistence, no estimator. | low |
 | 2 | **Pack coulomb + anchors + offset.** Shared integrator, graded anchor gate, and the shared current-offset estimate of §5.9.2. Pack SOC with an explicit σ, published alongside the JK's, not instead of it. | A second opinion, and the offset number — the thing that actually bounds drift. Two anchors is the whole prerequisite. | low — nothing consumes it |
 | 3 | **Per-cell regression.** §5.2, §5.5, persistence. Per-cell capacity and SOH published. | The stated goal. | medium — balancer, §5.5 |
 | 4 | **Onto the control path.** CAN `0x355`/`0x351` from `Pack_GetState()`, gated on confidence with JK fallback. | The edge-controller win: CCL taper that stops the pack tripping OV. | **highest — a wrong number here drops the battery.** Requires a season of phase-2/3 agreement first |

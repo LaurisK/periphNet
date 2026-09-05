@@ -3,7 +3,8 @@
 #include <string.h>
 
 /* HA device/state class strings match the retired hardcoded s_sensors[]
- * table in mqtt_bridge.c so discovery output stays identical for the
+ * table that used to live in mqtt_bridge.c (removed with MQTT, see
+ * docs/design_solis_modbus_link.md §9.1) so unit output stays identical for the
  * built-in Solis config. "%" carries no device_class in the generic model —
  * a percentage point is not necessarily a battery. */
 static const sMbUnitInfo s_units[] = {

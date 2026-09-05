@@ -126,8 +126,7 @@ int Func_Init(void);
  * @brief  Create the shared task.
  *
  * WHEN IMPLEMENTED: xTaskCreateStatic at osPriorityNormal-1 (23) — BELOW
- * modbus (24) so pack work never delays the bus, the same slot the MQTT
- * bridge occupies for the same reason — with the .bss stack, and
+ * modbus (24) so pack work never delays the bus — with the .bss stack, and
  * SysMon_TaskRegister(FUNC_TASK_STACK_WORDS, FUNC_TASK_DEADLINE_MS) FROM
  * INSIDE THE TASK BODY plus one check-in per loop.  That is 13 of
  * SYSMON_MAX_TASKS's 16.

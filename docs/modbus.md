@@ -241,7 +241,7 @@ in §4.4.
                     ┌──────────────────────────────────────────┐
    App/Cmd ────────►│  App/Modbus/modbus.h                     │
    App/Http ───────►│  (the only header a CONSUMER includes)   │
-   App/Mqtt ───────►│                                          │
+   App/Pack ───────►│                                          │
    App/Can  ───────►│  ┌────────────────────────────────────┐  │
         ▲           │  │ scheduler   timers → events        │  │
         │ events    │  │ engine      FSM, sequences, decode │  │
@@ -348,7 +348,8 @@ between them at runtime without touching the register map.
 **Everything links by id, and every id that is referenced is a dense ordinal** —
 `capId`, `pointId`, `timeTableId`, `deviceId`, all `uint16_t`, all equal to the
 object's position in its array. Names never link anything: `name` is a display
-property exactly like `unit` or `scale`, and `topicPrefix` is MQTT's string.
+property exactly like `unit` or `scale`, and `topicPrefix` is a consumer's
+display string for the device.
 
 The JSON authors each `id` explicitly even though it equals the position, and the
 compiler **rejects a config whose ids do not run 0, 1, 2 …**. That is the whole
@@ -504,8 +505,8 @@ subscribed to and cannot silently change underneath it.
 **`MB_PLAN_ALL` does not pin anything.** A subscriber that asked for every plan
 expressed no dependency on which plans exist, so it does not make them immutable;
 a subscriber that named plan 3 did, and does. Without this rule the feature would
-be dead on arrival — the MQTT bridge and the Trice sink both subscribe to
-everything, so any plan would be frozen for as long as either is up. A wildcard
+be dead on arrival — the Trice sink subscribes to everything, and so will the
+gateway, so any plan would be frozen for as long as one of them is up. A wildcard
 subscriber sees the change the way it sees any other: `mbEvt_config` followed by a
 fresh catalogue.
 
@@ -714,8 +715,9 @@ be read; a subscription says what *is* read. The engine ORs the plan masks of al
 live subscriptions; a plan outside that union is not loaded and creates **no
 timers**, and a device covered by no live plan is not polled at all. What follows:
 
-- **A consumer controls the bus by subscribing and unsubscribing.** The MQTT
-  bridge can register when a broker connects and deregister when it drops.
+- **A consumer controls the bus by subscribing and unsubscribing.** `modbus
+  dump on` is the whole mechanism visible on the CLI: the Trice sink registers,
+  and the wire goes quiet again when it drops.
 - **Values lag a reconnect by up to one period.** The catalogue is config and
   replays immediately; samples arrive when their timers next fire.
 - **"Why is this device not polled" is a question about subscribers**, so
@@ -748,7 +750,7 @@ typedef enum {
 } eModbusEventType;
 
 typedef struct {
-    const char *topicPrefix;   /* MQTT's display string for the device     */
+    const char *topicPrefix;   /* the device's display/namespace string    */
     const char *name;          /* topic suffix; links nothing, not unique  */
     int32_t     writeMin, writeMax;   /* scaled-int; valid if MB_PT_BOUNDED*/
     uint32_t    period_sec;    /* shortest live period; 0 = unwatched      */
@@ -840,7 +842,8 @@ moment — that coincidence is a fact about today's bridge, not a property of th
 API, and the alternative to asking is caching what §1.2 says not to cache.
 
 **The replay always runs on the modbus task**, never inline in the caller's.
-Dispatching it inline would have `mqttTask` reading config records out of flash.
+Dispatching it inline would have the CALLER's task reading config records out of
+flash — a cost no subscriber asked for, and on `tcpip_thread` not legal at all.
 A consumer that subscribes before `Modbus_Init` gets its catalogue when a config
 first loads.
 
@@ -902,7 +905,7 @@ second round trip, and a per-request opt-in would have defaulted to "on" anyway.
 
 **The module enforces `writeMin`/`writeMax`, for the same reason it enforces
 `access`.** Both are statements the capability makes about what the silicon will
-accept, they sit in the same record, and there are now three requesters — MQTT, a
+accept, they sit in the same record, and there are now three requesters — HTTP, a
 fusion path, the CLI — so a caller-side rule would be three implementations of one
 thing, any of which can be forgotten. An item outside its point's range fails with
 `mbErr_outOfRange` **before a frame is formed**, and every other item still runs.
@@ -1076,12 +1079,14 @@ what "must not block" covers.
 **None of that is a contract.** A consumer that only counts, or emits one Trice
 line, does it inline and allocates nothing. Two consequences: a wedged consumer is
 invisible from `modbus status` (bus capacity is the module's business, consumer
-health is not), and the MQTT bridge publishes from `mqttTask`, which keeps
-`LOCK_TCPIP_CORE` off the sequence path.
+health is not), and a consumer that needs the network defers to its own task,
+which is what keeps `LOCK_TCPIP_CORE` off the sequence path.  That rule was
+written for the MQTT bridge and outlived it: it binds the Modbus TCP gateway
+next (design_solis_modbus_link.md §6.4).
 
 ### 4.8 Concurrency — the API is a third event source
 
-Consumers live in the mqtt, http and cmd tasks; the engine lives in the modbus
+Consumers live in the http, cmd and func tasks; the engine lives in the modbus
 task. The mechanism for meeting them already exists: timers post events and port
 completions post events into one queue the modbus task drains, so **the API is the
 third source on that queue.** Contract 1 becomes a consequence of how the API is
@@ -1188,6 +1193,16 @@ it.
 
 ### 4.10 What the consumers become
 
+> **The MQTT bridge below no longer exists.** It was removed from the project
+> on 2026-09-05 — Home Assistant is reached by being a Modbus TCP gateway that
+> `solis_modbus` polls, not by publishing
+> ([design_solis_modbus_link.md](design_solis_modbus_link.md) §6.4, §9.1).
+> This section is kept because it is the worked example of a subscriber, and
+> every rule it derives still binds: the catalogue is what an entity set is
+> built from, a sample is copied and posted rather than handled inline, and
+> device identity is `devOrd`.  Read `mqtt_modbus_cb` as *the gateway*, and
+> the Trice sink (`modbus_trice_sink.c`) as the one that exists today.
+
 ```c
 Modbus_Subscribe(MB_PLAN_ALL, mbEvt_all, trice_sink, NULL);
 
@@ -1226,8 +1241,8 @@ behind it.
 
 **Device identity is `devOrd`**, the device's position in `devices[]` — not a
 string, and deliberately not what a subscription scopes to. `topicPrefix` survives
-as exactly what it says it is: MQTT's display string, rendered into topics, HA
-`unique_id`s and the device grouping by the one consumer that needs it. The
+as exactly what it says it is: a display string, rendered into whatever naming a
+consumer needs, by the one consumer that needs it. The
 module has no name-based entry point for **data**: a reading is addressed by
 `{devOrd, ptOrd}` and nothing else. Plan names are the one place a string is
 matched, and deliberately so — a plan is a thing an operator authors and a
@@ -1557,7 +1572,7 @@ it re-serialises the records rather than replaying an uploaded file.
   `u32_le` `s32_be` `s32_le` `float32_be` `float32_le` `bitfield` `ascii`),
   `scale` (**exact power of ten**, 0.001…1000), `unit` (`""` `V` `A` `W` `VA`
   `var` `Hz` `ohm` `Wh` `kWh` `varh` `VAh` `%` `Ah` `C` `min` `s`), `name` (≤23 chars —
-  the MQTT topic suffix, and **only** that: it links nothing and need not be
+  the point's display name, and **only** that: it links nothing and need not be
   unique), `length` (registers, ASCII only), `access`, `writeMin`/`writeMax`.
   **No `offset` and no enclosing transaction.**
 - **`access`** — `"r"` (default), `"w"`, `"rw"`. It states what the **silicon
@@ -1568,8 +1583,8 @@ it re-serialises the records rather than replaying an uploaded file.
   (optional, default 9600; one of 1200 / 2400 / 4800 / 9600 / 19200 / 38400 /
   57600 / 115200), `format` (optional, default `"8N1"`; one of `8N1` `8E1` `8O1`
   `8N2`), `port` (optional, default `"rs485"`; one of the ports this firmware was
-  built with), `topicPrefix` (≤15 chars of `[A-Za-z0-9_-]`; the MQTT namespace and
-  HA device identity — **not** the module's identity, which is `id`). A device
+  built with), `topicPrefix` (≤15 chars of `[A-Za-z0-9_-]`; the device's display
+  namespace for a consumer — **not** the module's identity, which is `id`). A device
   names no plan: plans name devices.
 - **Plan** — `id` (a **slot**, 0…7, unique but not required to be contiguous —
   §3.2), `name` (≤15 chars, display only, and the string a consumer matches on to
@@ -1643,7 +1658,7 @@ capabilities**, ≤384 time-table entries total, ≤8 blocks per capability, ≤
 derived read blocks per device, ≤125 registers per read. **The caps count distinct
 records, not instances** — four packs on a 50-point capability cost 50 points, not
 200. Instances govern only what a catalogue burst and HA discovery produce, which
-costs flash reads and MQTT messages, not RAM.
+costs flash reads and consumer-side messages, not RAM.
 
 The point ceiling is a **flash** limit: a point costs its 40 bytes of stream and
 nothing in RAM, and 384 is about what a 16 KB region holds. Two counts are pinned
@@ -1707,7 +1722,7 @@ typedef struct __attribute__((packed)) {
     int8_t   scalePow10;
     uint8_t  unit;            /* DLMS/COSEM physical-unit code             */
     int32_t  writeMin, writeMax;   /* scaled-int domain                    */
-    char     name[24];        /* MQTT topic suffix, NUL-terminated        */
+    char     name[24];        /* point name/suffix, NUL-terminated        */
 } sModbusPointRecord;                                         /* 40 bytes */
 
 typedef struct __attribute__((packed)) {
@@ -1995,42 +2010,36 @@ the integration-test mechanism.
 > test peripheral over HTTP rather than a CLI line. That is an `http_server.c`
 > design question.
 
-### 8.3 MQTT topics
+### 8.3 MQTT topics — RETIRED
 
-| Topic | Content |
-|---|---|
-| `<topicPrefix>/<name>` | point value, plain text, retained, QoS 0 |
-| `<topicPrefix>/<name>/set` | inbound writes for points with `w`/`rw` access |
-| `<topicPrefix>/availability` | retained `online`/`offline` per device |
-| `<bridgePrefix>/status` | retained bridge-wide LWT |
+**Nothing on the board publishes anything.** MQTT was removed from the project
+on 2026-09-05: Home Assistant is reached by being a **Modbus TCP gateway that
+`solis_modbus` polls**
+([design_solis_modbus_link.md](design_solis_modbus_link.md) §6.4, §9.1), so the
+topic tree, the HA discovery messages, the retained per-device availability
+topics and the `<topicPrefix>/<name>/set` write route are all gone with the
+bridge that owned them.
 
-HA discovery: `homeassistant/sensor/<topicPrefix>/<name>/config` per **monitored**
-point (`period_sec > 0`), plus
-`homeassistant/number/<topicPrefix>/<name>_set/config` for `w`/`rw` points
-(`command_topic`, min/max from the write bounds, step from the scale). Entities
-carry an `availability` array (bridge status AND device availability, mode `all`).
-Discovery and subscriptions re-run automatically after a config swap.
-
-**`/availability` is deliberately not an LWT** — an LWT is a property of the one
-TCP session for the whole bridge and cannot express "this slave stopped answering
-while the bridge is fine". The suffix is `/availability` rather than `/status`
-because a device identity can equal the bridge prefix, which would collide with
-the bridge-wide LWT topic; it also matches HA's `availability_topic` convention.
-**A device answering exceptions is answering**, so exception replies must not
-count towards being offline.
+The heading stays so §8's numbering does not move. What replaces it as the
+operator's view of dispatched readings is the Trice sink in §8.4, and the write
+route is `POST /api/modbus/write`.
 
 ### 8.4 Trice landmarks
 
 ```
 Modbus: unprovisioned (no valid config)
 Modbus: started                            <- at Modbus_Init, not on command
-MQTT: device online: periphnet             <- bridge-derived
 Modbus config: staged 1 capability 1 plan 1 device 29 points
 Modbus: config swapped, active region 1
-MQTT: device offline: periphnet            <- bridge-derived
+Modbus dump: periphnet/battery_voltage = 51.2 [dev 0 pt 0 @5s]
 Modbus: missed periphnet 5s (n=1)          <- sequence still running when due again
-MQTT: set periphnet/max_charge_soc = 95 -> req 1 item
+Modbus req: dev 0 pt 7 = 95 (0)            <- emitted by the requester
 ```
+
+**Device up / down lines went with the MQTT bridge** and nothing emits them
+today. That is not an oversight: the module refuses to judge liveness (§1.2),
+so device health was always the publisher's own count, and it left when the
+publisher did.
 
 The missed line fires on **first** occurrence per timer, not every time — the
 running count belongs in `modbus status`, not in the log. It prints the period for
@@ -2169,10 +2178,14 @@ failure mode that would otherwise be found on hardware, after a swap.
 ### Integration (`tests/integration/`, live board)
 
 Host-side C++ harness driving a board over USB/UART/UDP. Cases live in
-`tests/integration/src/core/ModbusTests.cpp` and `MqttTests.cpp`, which are the
-source of truth for what is asserted. `modbus_hw_*` and `mqtt_hw_*` — anything
-needing a real slave or a real broker — are registered as immediate-skips, so the
-rest is CI-runnable with no bus and no broker.
+`tests/integration/src/core/ModbusTests.cpp`, which is the source of truth for
+what is asserted. `modbus_hw_*` — anything needing a real slave — is registered
+as an immediate-skip, so the rest is CI-runnable with no bus.
+
+**The suite's subscriber is the Trice sink, and that is load-bearing.** Since
+§4.2 the engine polls only for subscribers, so `modbus_setup` must create one or
+nothing moves; it was the MQTT bridge until MQTT was removed
+(design_solis_modbus_link.md §9.1) and is `modbus dump on`/`off` now.
 
 **The suite is not rebuilt — it is re-pointed, at step 9.** It already does the
 right thing: fabricate a reply, then assert on what comes up out of the module.
@@ -2180,7 +2193,7 @@ What changes is only where the reply enters.
 
 **Integration testing is upward-only, deliberately.** What the suite proves is
 that a reply arriving at a port becomes the right decoded value, the right event,
-the right MQTT topic and the right scheduling behaviour. What it does *not* prove
+the right dispatched event and the right scheduling behaviour. What it does *not* prove
 is that the frame the engine sent downward was correct — that is trusted, and
 checked once against real hardware at the point the module is first trusted. Two
 things follow: **timeout and malformed-frame paths become reachable without
@@ -2196,21 +2209,20 @@ feeds it.
 | Monitor on/off | `Modbus monitor: on` / `Modbus monitor: off` |
 | TX / RX frame (monitor) | `Modbus TX[N]: <hex>` / `Modbus RX[N]: <hex>` |
 | Start | `Modbus: started` |
-| Device up / down | `MQTT: device online: <id>` / `MQTT: device offline: <id>` — **bridge-emitted** |
 | Missed sequence | `Modbus: missed <id> <period> (n=N)` |
-| MQTT pub / sub (monitor) | `MQTT pub: <topic> = <value>` / `MQTT sub: …` |
-| MQTT inject ack | `MQTT inject: <topic>` |
-| Request submitted / rejected | `MQTT: set <topic> = <value>` / `MQTT: set <topic> rejected` — emitted by the requester |
+| Subscriber on/off | `Modbus dump: on` / `Modbus dump: off` |
+| Dispatched sample | `Modbus dump: <topicPrefix>/<name> = <value> [dev N pt N @Ns]` |
+| Request submitted / rejected | `Modbus req: dev N pt N = <value> (<res>)` / `Modbus req: rejected (<err>)` — emitted by the requester |
 
-MQTT monitor lines are emitted even with no broker connected, otherwise the bridge
-is unobservable in broker-less CI.
+Device up/down lines were emitted by the MQTT bridge and went with it (§8.4).
 
 Three caveats worth stating rather than discovering:
 
-- **Step 5 changes which task emits `MQTT pub:`, and therefore its ordering.**
-  Content, topics, payloads and retain flags are unchanged, but any assertion that
-  depends on interleaving rather than on the lines themselves will break there, and
-  that is expected.
+- **Step 5 changed which task published, and therefore the ordering of its
+  lines.** Moot now that the publisher is gone, and recorded only because the
+  same hazard applies to any consumer that defers its work to another task: an
+  assertion that depends on interleaving rather than on the lines themselves
+  will break when one is introduced.
 - **A test peripheral is a config binding, not a build flag.** The same image
   serves a bench board and a real one — which also means a config binding a real
   device to the test port makes that device answer when the real one would not.
@@ -2222,6 +2234,12 @@ Three caveats worth stating rather than discovering:
 ---
 
 ## 10. Sequencing
+
+> **Historical record — §1-§10 are done and running (see the status header).**
+> Step 5 below rebuilt the MQTT bridge as a subscriber; **the bridge was then
+> removed from the project entirely on 2026-09-05**
+> ([design_solis_modbus_link.md](design_solis_modbus_link.md) §9.1), so every
+> mention of it here describes a step that happened, not code that exists.
 
 The engine rewrite and the API extraction are separable, and the API goes first so
 that consumers stop moving while the insides change. The visible milestone is
@@ -2843,9 +2861,10 @@ on 2026-08-12 and are now §4.6 and §3.5 respectively.
 - **A fifth dialect fact.** The group is closed at four, which covers both slaves
   on the bench. Whatever a third slave needs must be expressible as **data on the
   capability**, never a code path, or it is refused.
-- **MQTT publish rate control.** Every sample is published today. If broker or
-  recorder load makes that a problem, the answer is a policy on the MQTT side,
-  configured on the MQTT side — not a field back in the Modbus config.
+- **Consumer-side publish rate control.** Every sample is dispatched to every
+  subscriber that asked for it. If a consumer's downstream load makes that a
+  problem, the answer is a policy on the consumer side, configured on the
+  consumer side — not a field back in the Modbus config.
 - **Sequence fairness and startup phasing.** Sequences due at the same moment are
   serviced first-come-first-served, and every device's timers start together at
   init, so periods stay phase-locked. The missed counter is the instrument that

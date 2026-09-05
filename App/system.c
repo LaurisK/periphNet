@@ -80,7 +80,7 @@ void System_EarlyInit(void)
 {
     /* Zero the .ccmram section — it is NOLOAD, so the startup code does
      * not touch it.  Must run from main() BEFORE the scheduler starts:
-     * .ccmram now also holds USB CDC / MQTT / HTTP buffers that are in
+     * .ccmram now also holds USB CDC / HTTP buffers that are in
      * use well before System_Init() runs in the default task. */
     extern uint8_t _sccmram, _eccmram;
     memset(&_sccmram, 0, (size_t)(&_eccmram - &_sccmram));

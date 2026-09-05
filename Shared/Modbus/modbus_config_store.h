@@ -190,8 +190,9 @@ typedef struct {
 
 /* There is no lookup BY NAME: a reading is addressed by {devOrd, ptOrd} and
  * nothing else (docs/modbus.md §4.10).  A consumer that starts from a string
- * — an MQTT set-topic, a CLI argument — resolves it against the catalogue it
- * was given, once, in the consumer, and never on a data path. */
+ * — a CLI argument, a name in an uploaded document — resolves it against
+ * the catalogue it was given, once, in the consumer, and never on a data
+ * path. */
 
 /* Resolve {devOrd, ptOrd} in the ACTIVE region — the ordinal addressing the
  * module's API uses.  ptOrd indexes the DEVICE'S CAPABILITY, so several

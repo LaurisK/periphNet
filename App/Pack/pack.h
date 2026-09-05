@@ -745,7 +745,7 @@ int Pack_Stats(sPackStats *out);
  * Pylontech-speaking pack will expose something else entirely.
  *
  * A GENERIC LIST, deliberately, not a union per type.  The cluster reads the
- * typed sPackState fields and ignores all of this; a UI, MQTT bridge or CLI
+ * typed sPackState fields and ignores all of this; a UI, a gateway or the CLI
  * walks the list and renders whatever is there with no per-vendor code.  That
  * is what keeps §2's rule -- a consumer never learns which vendor is behind a
  * pack -- true for the one consumer that actually aggregates.

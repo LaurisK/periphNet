@@ -3,9 +3,14 @@
  * @brief   Neutral telemetry data model between producers and consumers
  *
  * Producers (Modbus poller, CAN/BMS reader) publish snapshots; consumers
- * (MQTT bridge, HTTP status, CLI) read them. Keeps consumers independent
- * of any bus/protocol module: the MQTT bridge must not know Solis
+ * (HTTP status, CLI, a protocol gateway) read them. Keeps consumers
+ * independent of any bus/protocol module: a consumer must not know Solis
  * registers exist.
+ *
+ * RESERVED, NOT LIVE: this model has no producers and no consumers today.
+ * Its last consumer was the MQTT bridge, removed with MQTT
+ * (docs/design_solis_modbus_link.md §9.1); it is kept deliberately for the
+ * BMS-to-CAN path (see CLAUDE.md, App/Data).
  *
  * Values keep the fixed-point raw encodings used on the wire
  * (_dV = x0.1 V, _dA = x0.1 A, _cHz = x0.01 Hz, _dC = x0.1 °C,

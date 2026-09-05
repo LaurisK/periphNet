@@ -10,19 +10,21 @@
 #include <thread>
 
 /* ----------------------------------------------------------------------------
- * Modbus/MQTT bridge — software-only integration tests
+ * Modbus engine — software-only integration tests
  *
  * The whole CI sequence lives in this file so registration order preserves
  * setup → tests → teardown (contract: docs/modbus.md §6).
  *
- * No physical RS485 bus and no MQTT broker are required:
+ * No physical RS485 bus is required:
  *   - the fixture binds its device to the TEST PORT, an App-layer driver the
  *     module cannot distinguish from a UART (docs/modbus.md §5.1).  Whether a
  *     board has one is a CONFIGURATION question, not a build question.
  *   - modbus inject <hex>           → stage the reply the next frame gets
  *   - modbus silence                → stage silence instead
- *   - mqtt inject <t> <p>           → message processed as if from the broker
- *   - monitors make publishes observable via Trice without a broker
+ *   - modbus dump on                → the Trice SUBSCRIBER; it is what makes
+ *     the engine poll at all, and what makes each dispatched sample
+ *     observable.  This was the MQTT bridge until MQTT was removed from the
+ *     project (docs/design_solis_modbus_link.md §9.1)
  *
  * THE SUITE PROVISIONS ITS OWN CONFIG.  Since docs/modbus.md §4.2 there is no
  * built-in default and none is provisioned — "the board is told what it is
@@ -106,32 +108,30 @@ TestOutcome needsConfig(const std::string& name)
 void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
 {
     runner.addTest("modbus_setup",
-        "Software-only test mode: monitors on, engine + bridge running",
+        "Software-only test mode: monitors on, engine polling for a subscriber",
         [](Device& dev) -> TestOutcome {
             dev.drain(500);
 
             /* The engine has no start/stop: Modbus_Init is the entire
              * lifecycle, and what gets polled is decided by SUBSCRIPTIONS
-             * (docs/modbus.md §4.2).  Only the bridge is cycled. */
-            dev.sendCommand("mqtt stop");
-            dev.drain(1000);
-
+             * (docs/modbus.md §4.2).  The subscriber used to be the MQTT
+             * bridge; MQTT was removed from the project
+             * (docs/design_solis_modbus_link.md §9.1), so the Trice sink —
+             * which exists for exactly this, with no MQTT in the picture —
+             * is what makes the engine poll now. */
             if (!dev.sendAndExpect("modbus monitor on", "Modbus monitor: on", 1000)) {
                 return makeFail("modbus_setup", "step 'modbus monitor on' failed");
             }
-            if (!dev.sendAndExpect("mqtt monitor on", "MQTT monitor: on", 1000)) {
-                return makeFail("modbus_setup", "step 'mqtt monitor on' failed");
-            }
-            if (!dev.sendAndExpect("mqtt start", "MQTT: bridge starting", 2000)) {
-                return makeFail("modbus_setup", "step 'mqtt start' failed");
+            if (!dev.sendAndExpect("modbus dump on", "Modbus dump: on", 2000)) {
+                return makeFail("modbus_setup", "step 'modbus dump on' failed");
             }
 
             /* Since docs/modbus.md §10 step 2 the engine polls and dispatches
-             * only for SUBSCRIBERS.  The bridge is one, and it needs its
-             * catalogue before a set-topic resolves — give it a moment. */
+             * only for SUBSCRIBERS — give the subscription a moment to arm
+             * its timers. */
             dev.drain(1000);
 
-            return makePass("modbus_setup", "port=disabled, monitors on, walker+bridge running");
+            return makePass("modbus_setup", "port=disabled, monitors on, engine polling");
         });
 
     runner.addTest("modbus_provision",
@@ -210,11 +210,11 @@ void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
                 return makeFail("modbus_valid_read", "monitor showed no RX[7]");
             }
             /* A request's reads are broadcast like any other read (§4.6). */
-            if (!linesContain(lines, "MQTT pub: periphnet/battery_voltage = 51.2")) {
+            if (!linesContain(lines, "Modbus dump: periphnet/battery_voltage = 51.2")) {
                 return makeFail("modbus_valid_read",
-                                "battery_voltage = 51.2 not published");
+                                "battery_voltage = 51.2 not dispatched");
             }
-            return makePass("modbus_valid_read", "512 -> 51.2 V, published");
+            return makePass("modbus_valid_read", "512 -> 51.2 V, dispatched");
         });
 
     runner.addTest("modbus_read_second_point",
@@ -234,11 +234,11 @@ void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
                                    3000, &lines)) {
                 return makeFail("modbus_read_second_point", "no SOC result");
             }
-            if (!linesContain(lines, "MQTT pub: periphnet/battery_soc = 85")) {
+            if (!linesContain(lines, "Modbus dump: periphnet/battery_soc = 85")) {
                 return makeFail("modbus_read_second_point",
-                                "battery_soc = 85 not published");
+                                "battery_soc = 85 not dispatched");
             }
-            return makePass("modbus_read_second_point", "SOC = 85 published");
+            return makePass("modbus_read_second_point", "SOC = 85 dispatched");
         });
 
     runner.addTest("modbus_silence_times_out",
@@ -299,102 +299,25 @@ void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
             return makePass("modbus_exception_reply", "exception 2 -> -21");
         });
 
-    runner.addTest("mqtt_inject_write",
-        "Inject MQTT set message, verify a Modbus request is submitted",
-        [](Device& dev) -> TestOutcome {
-            if (!s_provisioned) {
-                return needsConfig("mqtt_inject_write");
-            }
-            dev.drain(300);
-
-            /* An rw point writes then READS BACK, so the slave must answer
-             * twice: the echo, then the read-back. */
-            dev.sendCommand(std::string("modbus inject ") + kEchoOverdis);
-            dev.drain(300);
-
-            std::vector<std::string> lines;
-            bool ok = dev.sendAndExpect("mqtt inject periphnet/overdischarge_soc/set 15",
-                                        "MQTT: set periphnet/overdischarge_soc = 15",
-                                        3000, &lines);
-            if (!ok) {
-                return makeFail("mqtt_inject_write",
-                                "No 'MQTT: set periphnet/overdischarge_soc = 15'");
-            }
-            if (!linesContain(lines, "MQTT inject: periphnet/overdischarge_soc/set")) {
-                return makeFail("mqtt_inject_write", "No MQTT inject ack for set topic");
-            }
-            return makePass("mqtt_inject_write", "set 15 -> Modbus_Request submitted");
-        });
-
-    runner.addTest("mqtt_inject_write_out_of_range",
-        "Inject out-of-range set value, verify the MODULE rejects it (§4.6)",
-        [](Device& dev) -> TestOutcome {
-            if (!s_provisioned) {
-                return needsConfig("mqtt_inject_write_out_of_range");
-            }
-            dev.drain(300);
-
-            /* The bounds live on the point record and the module enforces them
-             * BEFORE A FRAME IS FORMED; the bridge no longer checks. */
-            if (!dev.sendAndExpect("mqtt inject periphnet/overdischarge_soc/set 99",
-                                   "MQTT: set periphnet/overdischarge_soc rejected",
-                                   4000)) {
-                return makeFail("mqtt_inject_write_out_of_range",
-                                "Out-of-range set (99 > writeMax 40) was not rejected");
-            }
-            return makePass("mqtt_inject_write_out_of_range",
-                            "set 99 rejected by writeMin/writeMax range");
-        });
-
-    runner.addTest("mqtt_inject_echo",
-        "Inject second writable point, verify ack + request (max_charge_soc = 95)",
-        [](Device& dev) -> TestOutcome {
-            if (!s_provisioned) {
-                return needsConfig("mqtt_inject_echo");
-            }
-            dev.drain(300);
-
-            dev.sendCommand(std::string("modbus inject ") + kEchoMaxChg);
-            dev.drain(300);
-
-            std::vector<std::string> lines;
-            bool ok = dev.sendAndExpect("mqtt inject periphnet/max_charge_soc/set 95",
-                                        "MQTT: set periphnet/max_charge_soc = 95",
-                                        3000, &lines);
-            if (!ok) {
-                return makeFail("mqtt_inject_echo",
-                                "No 'MQTT: set periphnet/max_charge_soc = 95'");
-            }
-            if (!linesContain(lines, "MQTT inject: periphnet/max_charge_soc/set")) {
-                return makeFail("mqtt_inject_echo", "No MQTT inject ack for set topic");
-            }
-            return makePass("mqtt_inject_echo", "set 95 -> Modbus_Request submitted");
-        });
-
     runner.addTest("modbus_teardown",
-        "Stop the bridge, monitors off; the engine has no stop",
+        "Unsubscribe and monitors off; the engine has no stop",
         [](Device& dev) -> TestOutcome {
             dev.drain(500);
 
-            /* Only the BRIDGE has a lifecycle.  Stopping it unsubscribes,
-             * which destroys the timers and quiets the wire — that is what
-             * "a consumer controls the bus by subscribing" means (§4.3). */
-            if (!dev.sendAndExpect("mqtt stop", "MQTT: stopped", 5000)) {
-                return makeFail("modbus_teardown", "MQTT bridge did not stop");
+            /* Only a SUBSCRIBER has a lifecycle.  Dropping the Trice sink
+             * unsubscribes, which destroys the timers and quiets the wire —
+             * that is what "a consumer controls the bus by subscribing"
+             * means (§4.3). */
+            if (!dev.sendAndExpect("modbus dump off", "Modbus dump: off", 5000)) {
+                return makeFail("modbus_teardown", "subscriber did not drop");
             }
             dev.drain(500);
 
             if (!dev.sendAndExpect("modbus monitor off", "Modbus monitor: off", 1000)) {
                 return makeFail("modbus_teardown", "modbus monitor off failed");
             }
-            if (!dev.sendAndExpect("mqtt monitor off", "MQTT monitor: off", 1000)) {
-                return makeFail("modbus_teardown", "mqtt monitor off failed");
-            }
-            if (!dev.sendAndExpect("mqtt status", "stopped", 2000)) {
-                return makeFail("modbus_teardown", "mqtt status not showing stopped");
-            }
 
-            return makePass("modbus_teardown", "bridge stopped, monitors off");
+            return makePass("modbus_teardown", "unsubscribed, monitors off");
         });
 
 }

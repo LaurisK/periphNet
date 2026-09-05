@@ -80,7 +80,11 @@ extern "C" {
  * ========================================================================== */
 
 #define APP_FEATURE_ETHERNET         (1u << 0)
-#define APP_FEATURE_MQTT             (1u << 1)
+/* Bit 1 is RETIRED, not free: MQTT was removed from the project
+ * (docs/design_solis_modbus_link.md §9.1).  sAppInfo.features is read out of
+ * flash by the bootloader, so reusing the bit would make an old image's
+ * feature word describe a capability the new one does not have.  Never set. */
+#define APP_FEATURE_MQTT_RETIRED     (1u << 1)
 #define APP_FEATURE_MODBUS           (1u << 2)
 #define APP_FEATURE_OTA              (1u << 3)
 #define APP_FEATURE_TRACING          (1u << 4)

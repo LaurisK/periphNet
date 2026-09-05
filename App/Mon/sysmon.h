@@ -37,8 +37,11 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-/** Slots for tracked tasks.  The board runs ~12; the rest is headroom for
- *  tasks that come and go (mqtt) plus room to notice a leak. */
+/** Slots for tracked tasks.  The board runs 13; the rest is headroom for a
+ *  task that comes and goes plus room to notice a leak.  Nothing comes and
+ *  goes today — the MQTT bridge was the only one and it was removed
+ *  (docs/design_solis_modbus_link.md §9.1) — so slot recycling below is
+ *  defensive now rather than exercised. */
 #define SYSMON_MAX_TASKS        16u
 
 /** Sampling window.  Also the resolution of every CPU figure below. */
@@ -100,7 +103,7 @@ void SysMon_Init(void);
  * @brief Register the CALLING task for liveness and stack accounting.
  *
  * Call once from inside the task body — the caller's handle is what binds the
- * slot, so a task that is deleted and recreated (mqtt) gets a fresh one.
+ * slot, so a task that is deleted and recreated gets a fresh one.
  *
  * @param stackSize_words  Configured depth, in words (osThreadAttr_t
  *                         stack_size is in BYTES — divide by 4).  Only used

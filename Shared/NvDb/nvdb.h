@@ -90,7 +90,15 @@ typedef enum {
     nvdbUser_wgTime,
     nvdbUser_wgCfg,
 
-    nvdbUser_mqttCfg,           /* broker + topic prefix — RAM-only today   */
+    /* RETIRED: MQTT was removed from the project (Solis reaches HA through
+     * solis_modbus instead — docs/design_solis_modbus_link.md §9.1).  The
+     * SLOT MUST STAY.  nvdb_layout.c indexes its tables with designated
+     * initializers keyed by this enum and nvdbUser_last is a count, so
+     * deleting it renumbers every user below and a deployed board's stored
+     * directory would repoint them at each other's bytes — the 4 MB canLog
+     * and packCfg included.  Reclaiming the 4 KB belongs to the compacting
+     * layout (architecture_backlog.md §6), not here. */
+    nvdbUser_mqttCfg,           /* retired — reserved, never allocated new */
     nvdbUser_triceUdpCfg,       /* Trice UDP destination — RAM-only today   */
 
     /* Battery pack module.  TWO users, not one, and not one per pack: this

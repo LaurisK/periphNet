@@ -209,8 +209,8 @@ int Func_Init(void)
         .cb_size    = sizeof(s_taskCb),
         .stack_mem  = s_taskStack,
         .stack_size = sizeof(s_taskStack),
-        /* Below modbus (24) so pack work never delays the bus or a sequence;
-         * the slot the MQTT bridge occupies, for the same reason (§13). */
+        /* Below modbus (24) so pack work never delays the bus or a
+         * sequence (§13). */
         .priority   = (osPriority_t)(osPriorityNormal - 1),
     };
 

@@ -94,7 +94,7 @@ int main(void)
 
   /* USER CODE BEGIN SysInit */
   /* Zero the NOLOAD .ccmram section before anything uses CCM buffers
-   * (USB CDC / MQTT / HTTP / Modbus walker state lives there) */
+   * (USB CDC / HTTP / Modbus walker state lives there) */
   extern void System_EarlyInit(void);
   System_EarlyInit();
   /* Enable configurable fault handlers (BusFault, UsageFault, MemManage) */

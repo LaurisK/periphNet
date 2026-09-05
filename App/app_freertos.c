@@ -31,7 +31,6 @@
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
 #include "App/Mon/sysmon.h"
-#include "App/Mqtt/mqtt_bridge.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
 #include "App/Net/wg_time.h"
@@ -315,22 +314,6 @@ void App_DefaultTaskEntry(void)
      * through /api/trice/dest come back with it. */
     Trice_UdpInit();
     TRice("Trice UDP started on port %u\n", TRICE_UDP_PORT);
-
-    /* Bring the MQTT bridge up by itself IF this board has been told which
-     * broker to use.  A board that never has behaves exactly as before and
-     * waits for `mqtt start`, so nothing on a bench changes; a deployed one
-     * stops needing somebody with a USB cable after every reset. */
-    {
-        sMqttBridgeCfg mqttCfg;
-
-        if (MqttBridge_LoadCfg(&mqttCfg) == 0) {
-            MqttBridge_Start(&mqttCfg);
-            TRice("MQTT: auto-started from saved config (%u.%u.%u.%u:%u)\n",
-                  mqttCfg.brokerIp[0], mqttCfg.brokerIp[1],
-                  mqttCfg.brokerIp[2], mqttCfg.brokerIp[3],
-                  mqttCfg.brokerPort);
-        }
-    }
 
     /* WireGuard tunnel to the hub.  Started here rather than in MX_LWIP_Init()
      * so WgTime_Init() has already run.  A missing link or an unreachable hub

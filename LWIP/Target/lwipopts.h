@@ -192,10 +192,6 @@
 #define LWIP_NUM_NETIF_CLIENT_DATA (LWIP_MDNS_RESPONDER)
 #define MEMP_NUM_UDP_PCB          8
 
-/* MQTT client — HA auto-discovery payloads need larger buffers */
-#define MQTT_OUTPUT_RINGBUF_SIZE  1024
-#define MQTT_VAR_HEADER_BUFFER_LEN 256
-
 /* HTTP server task uses netconn with recv/send timeouts so a dead client
  * cannot stall the (single-threaded) server task */
 #define LWIP_SO_RCVTIMEO          1

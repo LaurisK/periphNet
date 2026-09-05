@@ -150,10 +150,12 @@ static void slot_reset(sSysMonSlot *slot, TaskHandle_t handle, const char *name)
 /**
  * Find the slot bound to @p handle, creating one if there is room.
  *
- * A handle can be recycled after a task is deleted (mqtt starts and stops at
- * runtime), so a slot whose stored name no longer matches is treated as a
- * different task and reset — otherwise the new task would inherit the dead
- * one's counters and, worse, its deadline.
+ * A handle can be recycled after a task is deleted, so a slot whose stored
+ * name no longer matches is treated as a different task and reset —
+ * otherwise the new task would inherit the dead one's counters and, worse,
+ * its deadline.  No task is deleted at runtime today (the MQTT bridge was
+ * the only one); this stays because the cost of getting it wrong is a
+ * deadline judged against the wrong task.
  */
 static sSysMonSlot *slot_find(TaskHandle_t handle, const char *name)
 {
@@ -234,7 +236,7 @@ static void sample(uint32_t now_ms)
         sSysMonSlot        *slot;
 
         /* Same allocator SysMon_TaskRegister() uses, and a task can register
-         * at any time (the mqtt bridge starts and stops at runtime). */
+         * at any time, so a task created after boot has no slot yet. */
         taskENTER_CRITICAL();
         slot = slot_find(st->xHandle, st->pcTaskName);
         taskEXIT_CRITICAL();

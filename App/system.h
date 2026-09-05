@@ -29,7 +29,7 @@ typedef enum {
  * @brief Zero the NOLOAD .ccmram section (startup code does not touch CCM).
  *
  * Must be called once from main() BEFORE osKernelInitialize(): .ccmram
- * holds buffers (USB CDC, MQTT, HTTP, Modbus walker) that are in use as
+ * holds buffers (USB CDC, HTTP, Modbus walker) that are in use as
  * soon as the scheduler starts.
  */
 void System_EarlyInit(void);

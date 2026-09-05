@@ -107,7 +107,7 @@ Dyness                            │
                               Pack core  ──→ state + condition + commands
                                                 │
                                                 ├→ (future) Cluster → CAN → inverter
-                                                └→ MQTT / HTTP / CLI
+                                                └→ HTTP / CLI
 ```
 
 **A pack does not know it is in a cluster.** Nothing in `pack.h` mentions
@@ -248,8 +248,10 @@ are anyway skewed ~4–5 s by the JK's own scan.
 > needs a per-field timestamp and a stated skew budget. The one group that must
 > be coherent already is.
 
-**The module refuses to judge liveness, deliberately.** `mqtt_bridge.c:353-383`
-is the reference: count consecutive failed txns, treat a Modbus **exception as
+**The module refuses to judge liveness, deliberately.** The reference was the
+MQTT bridge's own count (removed with MQTT,
+[design_solis_modbus_link.md](design_solis_modbus_link.md) §9.1), and the shape
+is what matters: count consecutive failed txns, treat a Modbus **exception as
 an answer**. **But silence is not failure** — `run_sequence` returns without
 emitting anything when the port has no driver, a lookup fails, the capability
 will not open, or `spanCount == 0`, and §11a.8 records that a config swap can
@@ -1117,7 +1119,7 @@ marker**, so a txn for this device *closes the previously open frame* (publish)
 and opens a new one; `tick` closes a frame no further txn followed.
 
 SOC and SOH arrive as packed bytes (`balsta_soc` lo, `soh_precharge` hi) because
-there is no `u8` decode type; the type splits them, as the MQTT bridge does.
+there is no `u8` decode type; the type splits them, as the MQTT bridge did.
 
 **`pack_pylontech` (push).** Accumulates into staging from the CAN RX path,
 publishes when its `rxMask` completes or when `tick` finds a set older than
@@ -1248,7 +1250,7 @@ it.
 
 **The command route returns 202, not 200-with-result**: a synchronous HTTP status
 for an asynchronous wire operation is the same category error as a synchronous
-`command()` return. The outcome appears in `/api/pack/status` and on MQTT.
+`command()` return. The outcome appears in `/api/pack/status`.
 
 `GET /api/pack/status` builds into a `pvPortMalloc` block rather than `resp_buf`
 — not because one is CCM and the other is not (**both are**: `resp_buf` is
@@ -1267,7 +1269,7 @@ the argument `http_server.c:1097-1101` actually makes.
 | `PackType_Publish` / `PublishCells` / `CommandDone` | **either** | **no** | context-correct critical section + non-blocking post |
 | Core dispatch, condition, staleness, command timeout | shared func task | **no** | |
 | `bind` / `unbind` / `submit` | shared func task | briefly | a catalogue walk is flash I/O; it is why these are task-only |
-| Consumer callbacks, `fPackCmdDone` | shared func task | **no** | post and get out, like the MQTT bridge |
+| Consumer callbacks, `fPackCmdDone` | shared func task | **no** | post and get out |
 | `Pack_GetState` / `GetCells` / `Stats` | any **task** | — | copies under a critical section; **not ISR-callable** |
 | `Pack_Command` | any task | **no** | validates and claims synchronously, posts the wire work |
 | `Pack_Config*` | caller's task (http) | yes | an upload takes seconds; posting it would stall the task |
@@ -1386,7 +1388,7 @@ scaffolding.
 
 | Task | Stack | Priority | Why |
 |---|---|---|---|
-| `func` | 512 words, **statically allocated in `.bss`** | `osPriorityNormal-1` (23) | Below `modbus` (24) so pack work never delays the bus; the same slot the MQTT bridge occupies, for the same reason |
+| `func` | 512 words, **statically allocated in `.bss`** | `osPriorityNormal-1` (23) | Below `modbus` (24) so pack work never delays the bus |
 
 `SysMon_TaskRegister(512U, 2000U)` from inside the task body, check in once per
 loop. A 2 s deadline covers the worst legitimate iteration (a tick plus a `bind`
@@ -2165,7 +2167,7 @@ clean:
 
 - **the cluster** reads the neutral `sPackState` fields and ignores statistics
   entirely — it is aggregating batteries, not describing them;
-- **a UI, MQTT bridge or CLI** walks the list generically and renders whatever
+- **a UI, a gateway or the CLI** walks the list generically and renders whatever
   is there, with no per-vendor code and no rebuild when a type gains a metric.
 
 This is the same decision the Modbus module already made with points, and it

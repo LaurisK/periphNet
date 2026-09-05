@@ -100,7 +100,7 @@ static int HexDigit(int ch)
  *
  * \uXXXX is decoded to UTF-8.  A surrogate half is passed through as U+FFFD
  * rather than paired: no schema here carries one, and a reader that silently
- * produced a lone surrogate would hand invalid UTF-8 to MQTT.
+ * produced a lone surrogate would hand invalid UTF-8 to a consumer.
  */
 static int ReadEscape(sJsonReader *r, char *out, uint32_t *outLen)
 {

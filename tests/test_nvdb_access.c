@@ -58,6 +58,10 @@ static void test_fresh_board_comes_up_on_the_built_in_layout(void)
     TEST_ASSERT(0x1000u == size);
     TEST_ASSERT(nvdbRes_ok == NvDb_GetSize(nvdbUser_fwuStored, &size));
     TEST_ASSERT(0x7A000u == size);
+    /* mqttCfg is RETIRED but its slot is reserved and must stay allocated
+     * (Shared/NvDb/nvdb.h).  Asserting on it here is deliberate: deleting the
+     * enumerator fails this test instead of silently renumbering every user
+     * below it on a deployed board. */
     TEST_ASSERT(nvdbRes_ok == NvDb_GetSize(nvdbUser_mqttCfg, &size));
     TEST_ASSERT(0x1000u == size);
 }

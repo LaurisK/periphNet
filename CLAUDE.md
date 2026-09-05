@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet/MQTT bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader.
+**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1).
 
-**Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic MQTT/HA bridge that is now an ordinary consumer. **Not yet run on hardware.**
+**Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic HA bridge that was an ordinary consumer (**that bridge was MQTT and has since been removed**, §9.1 of the Solis link doc; the Trice sink is now the reference subscriber). **Not yet run on hardware.**
 
 **External-flash DMA is done and hardware-verified** (`Pd1.1.23`, 2026-08-25,
 installed over the tunnel). SPI2 took DMA1 streams 3 and 4 from the Trice UART,
@@ -18,9 +18,9 @@ the design assessment of moving that wait to a timer + callback:
 [docs/reference_dma_and_cubemx_regen.md](docs/reference_dma_and_cubemx_regen.md) and
 [docs/task_flash_wait_and_ota_cost.md](docs/task_flash_wait_and_ota_cost.md).
 
-**Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and MQTT-side rate policy.
+**Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §7: the write path (FC06-only, one register, one pending), dialects beyond an address stride, and consumer-side rate policy.
 
-**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The CAN half of that path now exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN, HA and broker all down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
+**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The CAN half of that path now exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN and HA both down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
 
@@ -48,17 +48,22 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — **all three regions are now tight, and
-  FLASH is the tightest** (measured 2026-09-05):
+- `build/application.elf` / `.bin` — **all three regions are tight, and
+  MAIN SRAM is the tightest** (measured 2026-09-05, post-MQTT-removal):
 
   | Region | Used | Limit | | Free |
   |---|---|---|---|---|
-  | Flash (`.text`+`.rodata`+`.data`) | 477,980 | 491,520 | **97.2 %** | 13.2 KB |
-  | Main SRAM (`.bss`+`.data`+heap/stack) | 126,848 | 131,072 | **96.8 %** | 4.2 KB |
-  | CCM (`.ccmram`+`.ccmheap`) | 59,824 | 65,536 | **91.3 %** | 5.6 KB |
+  | Flash (`.text`+`.rodata`+`.data`) | 457,420 | 491,520 | **93.1 %** | 33.3 KB |
+  | Main SRAM (`.bss`+`.data`+heap/stack) | 125,560 | 131,072 | **95.8 %** | 5.4 KB |
+  | CCM (`.ccmram`+`.ccmheap`) | 58,352 | 65,536 | **89.0 %** | 7.0 KB |
 
-  A new multi-KB `.bss` array does not fit, and neither does a multi-KB
-  feature. Budget before adding anything — and remember OTA is the only
+  **Re-measured 2026-09-05 after MQTT was removed**, which returned 20.1 KB of
+  flash (97.2 % → 93.1 %), 1.3 KB of SRAM and 1.4 KB of CCM. That headroom is
+  spoken for: it is what the Modbus TCP gateway gets to spend
+  ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §9).
+  **Main SRAM is now the tightest region, not flash.**
+
+  A new multi-KB `.bss` array still does not fit. Budget before adding anything — and remember OTA is the only
   delivery path to a deployed board. The `.bin` is signed in-place
   (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
@@ -183,7 +188,7 @@ cmake -B build_integration -S tests/integration -DBUILD_GUI=OFF   # CLI only
 cmake --build build_integration -j8                               # → periphnet_cli
 ```
 Drop `-DBUILD_GUI=OFF` (and install `libsdl2-dev libgl-dev`) to also build the
-Dear ImGui GUI, `build_integration/periphnet_gui`. Modbus/MQTT test contracts
+Dear ImGui GUI, `build_integration/periphnet_gui`. Modbus test contracts
 live in `docs/modbus.md` §6.
 
 ## Hardware
@@ -332,7 +337,7 @@ both blobs at addresses compiled into it, and the FWU→BL handoff that would
 let it learn otherwise is still undesigned. So the built-in layout
 (`s_targetSizes` in `nvdb_layout.c`) reproduces the hand-assigned map exactly:
 on first boot `nvDb` adopts it (§4.4.1 first adoption), adds its two pinned
-areas plus every user this image has grown since — `mqttCfg`/`triceUdpCfg`,
+areas plus every user this image has grown since — `mqttCfg` (**retired, slot reserved — never delete the enumerator, see the Solis link doc §9.2**)/`triceUdpCfg`,
 `packCfg`/`packState`, and now `nvdbUser_canLog` (App/Can's flash trace,
 [docs/design_can_bridge.md](docs/design_can_bridge.md) §10; 4 MB, the largest
 single user on the board) — above them, and moves nothing else. `imageMeta`
@@ -379,9 +384,9 @@ PeriphNet/
                                   #   area. USER-side policy: nvDb never
                                   #   learns what a version is (Rule 3)
     Data/telemetry.c/h            # Neutral telemetry model — RESERVED, no
-                                  #   producers or consumers today (mqtt_bridge
-                                  #   stopped consuming it in the config
-                                  #   redesign); intended for the BMS→CAN path
+                                  #   producers or consumers today (its last
+                                  #   consumer was mqtt_bridge, now removed);
+                                  #   intended for the BMS→CAN path
     Fwu/fwu_control.c/h           # FWU process: install/confirm/verify/golden
     Img/image_store.c/h           # Image management: stored blob + metadata
     Http/http_server.c/h          # HTTP server task (netconn API, port 80)
@@ -410,8 +415,6 @@ PeriphNet/
     Test/modbus_test_port.c/h     # test peripheral in port slot 1, fed by
                                   #   `modbus inject`; a config binding, not a
                                   #   build flag
-    Mqtt/mqtt_bridge.c/h          # MQTT bridge + HA discovery (generated
-                                  #   from the active Modbus config)
     Func/func.c/h                 # the shared functionality task (ZhagaFW
                                   #   pattern): one task, one static queue, a
                                   #   packed event-ID space, one range per
@@ -635,7 +638,7 @@ Build:    application.bin → sign (HMAC) → package → periphnet_fwu.pnfw
 Operator: POST /api/image/upload  (blob → image store; independent of FWU)
           POST /api/fwu/install   (arms fwu_requested flag → reboot)
           ...BL installs, new FW boots UNCONFIRMED...
-          verify health via /api/fwu/status, MQTT, etc.
+          verify health via /api/fwu/status, /api/system/status, etc.
           POST /api/fwu/confirm   (REQUIRED — clears confirmed bit AND
                                    promotes stored blob → golden area)
 ```
@@ -732,7 +735,6 @@ Shared code compiled into both bootloader and application.
 | modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
 | func | 512 words | osPriorityNormal-1 (23) | The shared functionality task — one task, many clients, a packed event-ID space. Today its only client is the **pack** module: binds at start-up, drains pack events, and runs a 250 ms wall-clock tick (staleness, command expiry, each type's `tick`). Queue and stack are **static in `.bss`, not `.ccmheap`** — CCM is the tight region |
 | nvdb | 256 words | osPriorityLow | The nvDb collector: erases deleted space in the background so erases stay off the write path. One erasable unit per lock acquisition, so a waiting writer gets in between units. Sleeps on a notify (1 s backstop); never reboots anything |
-| mqtt | 512 words | osPriorityNormal-1 (23) | MQTT bridge: connect/reconnect backoff, HA discovery, set-topic resolution deferred out of tcpip_thread. Started/stopped at runtime (`mqtt start`), and **auto-started at boot when a broker has been saved** (`mqtt save`) — a board that was never configured still waits for the command |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
 | EthIf | 1024 bytes | 48 (osPriorityRealtime) | Ethernet frame receive (was 350 B CubeMX default — overflowed, see docs/issue_idle_iwdg_crashloop.md) |
 
@@ -849,7 +851,7 @@ cursor, so TCP segmentation cannot break parsing; `Expect: 100-continue` is
 answered (no curl stall). Upload does synchronous flash writes with lazy 4KB
 sector erase; on completion the blob is validated (manifest + CRC32) and
 becomes the persistent stored image. tcpip_thread is never blocked by image
-transfers (MQTT keepalives unaffected). Golden promotion runs in defaultTask
+transfers. Golden promotion runs in defaultTask
 under an image-store read hold; the W25Q128 driver serializes SPI access
 with a mutex (skipped in BL and fault-handler context).
 
@@ -954,9 +956,13 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
   bootloader-only by design — anything with SPI access to the W25Q64 can read
   it, so the guarantee is per-board isolation, not secrecy from a local
   attacker.
-- **Control stays outbound-only.** Metrics and actuation both ride MQTT over a
-  board-initiated socket; inbound (HTTP OTA UI, Trice) is debug-only. Do not
-  add an HA→board request/response path that needs inbound routing per site.
+- ~~**Control stays outbound-only.**~~ **No longer true, and deliberately so.**
+  This said metrics and actuation both ride MQTT over a board-initiated socket,
+  with inbound reserved for debug. MQTT is gone and the chosen Solis path is
+  **inbound**: `solis_modbus` polls a Modbus TCP server on the board
+  ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4).
+  That is affordable only because the tunnel already exists per board — bind
+  the listener to the tunnel address, never `IP_ADDR_ANY`.
 
 Hub facts, address plan and the WGDashboard gotchas:
 `docs/task_board_as_wireguard_peer.md`.
@@ -1044,7 +1050,7 @@ it off **nothing logged before `Trice_UdpInit()` is captured anywhere** — the
 UDP and USB sinks both hang off the auxiliary hook that init installs. That is
 what the switch is for during bring-up.
 
-**TRICE CANNOT BE USED IN lwIP CALLBACKS** (tcpip_thread context — e.g. MQTT client callbacks). Use only in FreeRTOS tasks (the netconn-based HTTP task is fine), ISRs, and fault handlers.
+**TRICE CANNOT BE USED IN lwIP CALLBACKS** (tcpip_thread context — raw-API callbacks of any kind). Use only in FreeRTOS tasks (the netconn-based HTTP task is fine), ISRs, and fault handlers.
 
 ## Key Constraints
 
@@ -1082,10 +1088,10 @@ what the switch is for during bring-up.
 - **`nvDb` is the only authority over the medium, and CMake enforces that too** — no `W25Q128_*` call and no `EXT_FLASH_*_ADDR` anywhere in `App/` or `Shared/` outside the driver, `Shared/NvDb/`, and the three exempt files listed in the External Flash section
 - **A write that only clears bits is programmed in place, never erased.** `boot_status` and the Modbus selector both keep their flags outside their CRCs precisely so a flag update is atomic; routing them through a store that only knew "erased or not" would have turned every one into an erase-and-write-back
 - **Absolute addresses leave `nvDb` only through `nvdb_exceptions.h`** — the crash handler (fault context) and the FWU module. Including `nvdb.h` cannot reach it; that is the enforcement
-- **CCM (64KB at 0x10000000) is CPU-only memory and is ~91% full** — never put DMA or peripheral-accessed buffers there. **This now includes any bulk buffer handed to the flash driver**: `w25q128.c` checks the address and silently drops to polling for anything outside main SRAM / internal flash, and FreeRTOS task stacks are `pvPortMalloc`'d from `.ccmheap`, so a **stack local is CCM too**. A new bulk flash buffer must be static/`.bss` or it quietly loses DMA (`docs/task_flash_wait_and_ota_cost.md`). It holds **two** NOLOAD sections with different lifecycles:
-  - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus MQTT bridge, HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
+- **CCM (64KB at 0x10000000) is CPU-only memory and is ~89% full** — never put DMA or peripheral-accessed buffers there. **This now includes any bulk buffer handed to the flash driver**: `w25q128.c` checks the address and silently drops to polling for anything outside main SRAM / internal flash, and FreeRTOS task stacks are `pvPortMalloc`'d from `.ccmheap`, so a **stack local is CCM too**. A new bulk flash buffer must be static/`.bss` or it quietly loses DMA (`docs/task_flash_wait_and_ota_cost.md`). It holds **two** NOLOAD sections with different lifecycles:
+  - `.ccmram` (~11KB) — Modbus engine scratch (one sequence's spans and derived blocks), compiler/plan-rewrite state, plus HTTP server and image-store upload buffers. Zeroed by `System_Init()`.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
 - **One file owns the bxCAN cells, and CMake enforces it** — no `HAL_CAN_*` name and no CAN handle anywhere in `App/` except `App/Can/can_bus.c`. The HAL offers ONE weak RX-FIFO-pending callback for both cells, so whoever defines it takes a link-level monopoly: that is how `bms_reader.c` came to block `pack_pylontech` outright. Consumers subscribe by `(bus, id, mask)`, and **every subscriber callback runs in the RX ISR** — copy, count, enqueue, return
 - **The CAN bridge is store-and-forward, not a wire** — each side is its own collision domain and the board ACKs on both, arbitration is per side (the TX FIFO is chronological so a burst is not re-sorted by identifier), error frames do not cross, one frame time of latency is added, and **both sides must run the same bitrate**; a rate that does not divide PCLK1/14 exactly is refused rather than rounded. Free for the 1 Hz one-way Pylontech dialect, and stated in [docs/design_can_bridge.md](docs/design_can_bridge.md) §3 because none of it is academic for a different protocol
 - **There is no persisted CAN configuration** — mode, bitrate and bus roles are compile-time defaults, so a change made over the tunnel lasts until the next reset. **This is now a known defect, not just a simplification** — zaliakalnis is wired with the battery on CAN1, which the image asserts is the inverter side, and `bms` mode would take over the wrong cell silently ([docs/issue_can_bus_roles_not_configurable.md](docs/issue_can_bus_roles_not_configurable.md)). Adding one means a new nvDb user, which means moving the layout that is still pinned to the bootloader
-- **MQTT publishes happen on `mqttTask` only** — the bridge's Modbus callback copies and posts, so `LOCK_TCPIP_CORE` is off the Modbus sequence path entirely (docs/modbus.md §4.10); never call the raw lwIP MQTT API from app tasks without the core lock
+- **Nothing takes `LOCK_TCPIP_CORE` on the Modbus sequence path** — the rule that kept it off there was written for the MQTT bridge (its callback copied and posted to `mqttTask` rather than publishing inline, docs/modbus.md §4.10). MQTT is gone, but the constraint outlives it and binds the Modbus TCP gateway next: a subscriber callback runs on the engine's own task, so it must never take the core lock or call a raw lwIP API

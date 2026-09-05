@@ -576,6 +576,15 @@ file(GLOB_RECURSE LWIP_SOURCES
     "Middlewares/Third_Party/LwIP/system/*.c"
 )
 
+# The lwIP MQTT client is vendor code and stays on disk, but nothing links it
+# any more: MQTT was removed from the project when the Solis path became a
+# Modbus TCP gateway to solis_modbus, which supplies the HA entities instead
+# (docs/design_solis_modbus_link.md §9.1).  The glob above is recursive, so it
+# has to be dropped by name rather than by not listing it.
+list(REMOVE_ITEM LWIP_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/LwIP/src/apps/mqtt/mqtt.c"
+)
+
 # --- FreeRTOS ---
 
 file(GLOB_RECURSE FREERTOS_SOURCES

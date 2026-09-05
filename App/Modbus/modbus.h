@@ -152,7 +152,7 @@ int Modbus_Init(void);
  * capability, so four battery packs produce four samples with the same ptOrd
  * and different devOrd.  A consumer keying on ptOrd alone collapses them. */
 typedef struct {
-    const char *topicPrefix;   /* MQTT's display string for the device      */
+    const char *topicPrefix;   /* the device's display/namespace string     */
     const char *name;          /* topic suffix; links nothing, not unique   */
     int32_t     writeMin, writeMax;   /* scaled-int; valid if MB_PT_BOUNDED */
     uint32_t    period_sec;    /* shortest live period; 0 = unwatched       */
