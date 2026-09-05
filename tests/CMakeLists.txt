@@ -149,7 +149,11 @@ target_include_directories(test_modbus_compiler PRIVATE ${UNIT_INCLUDES})
 # what stops a broken fixture from being discovered over HTTP.
 target_compile_definitions(test_modbus_compiler PRIVATE
     MB_FIXTURE_PATH="${PROJECT_ROOT}/tests/fixtures/modbus_solis.json"
-    MB_JK_FIXTURE_PATH="${PROJECT_ROOT}/tests/fixtures/modbus_jk_pb.json")
+    MB_JK_FIXTURE_PATH="${PROJECT_ROOT}/tests/fixtures/modbus_jk_pb.json"
+    # A config meant for a DEPLOYED board, proven here rather than over the
+    # tunnel: an upload consumes the inactive region on failure as well as on
+    # success, and that region holds the config the board would fall back to.
+    MB_DEPLOY_CONFIG_PATH="${PROJECT_ROOT}/configs/solis_sodas_gateway.json")
 add_test(NAME modbus_compiler COMMAND test_modbus_compiler)
 
 add_executable(test_modbus_export

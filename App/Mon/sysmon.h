@@ -37,7 +37,7 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-/** Slots for tracked tasks.  The board runs 13; the rest is headroom for a
+/** Slots for tracked tasks.  The board runs 14; the rest is headroom for a
  *  task that comes and goes plus room to notice a leak.  Nothing comes and
  *  goes today — the MQTT bridge was the only one and it was removed
  *  (docs/design_solis_modbus_link.md §9.1) — so slot recycling below is

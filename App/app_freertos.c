@@ -30,6 +30,7 @@
 #include "App/Log/trice_consumer.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
+#include "App/Gw/modbus_tcp.h"
 #include "App/Mon/sysmon.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
@@ -331,6 +332,17 @@ void App_DefaultTaskEntry(void)
              * handshake above does. */
             TRice("WG: WARNING entropy not fully from hardware RNG\n");
         }
+    }
+
+    /* Modbus TCP gateway on :502 — how Home Assistant's solis_modbus reaches
+     * the inverter (docs/design_solis_modbus_link.md §6.4).  AFTER WgLink_Start
+     * because it binds to the TUNNEL address and never IP_ADDR_ANY: an
+     * unprovisioned board serves nothing rather than exposing an ungated write
+     * path on whatever LAN it landed on.  It does not need the tunnel to be UP,
+     * only configured — and it retries by itself if it is configured later, so
+     * this is not a boot-order dependency. */
+    if (MbTcp_Init() != 0) {
+        TRice("MBTCP: gateway task did not start\n");
     }
 
     uint32_t btnDebounce[3]  = {0U, 0U, 0U};

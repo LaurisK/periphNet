@@ -644,6 +644,57 @@ static void test_reject_budgets(void)
  * only fails on hardware, so it is compiled here too.
  * ============================================================================ */
 
+/* The config the sodas board is meant to carry once the Modbus TCP gateway is
+ * serving: same three devices, minus the `solis` plan, because HA polls the
+ * inverter through :502 now and the board polling it again for nobody is pure
+ * RS485 duty (docs/design_solis_modbus_link.md §9, step 6).
+ *
+ * THE SOLIS DEVICE RECORD AND ITS CAPABILITY MUST SURVIVE, and that is what
+ * this test is really guarding: the gateway resolves unit id 1 to a devOrd
+ * through the device records, so a config that dropped the device would leave
+ * the inverter unreachable from both directions at once. */
+static void test_deployable_gateway_config_compiles(void)
+{
+    static char json[32768];
+    FILE       *f = fopen(MB_DEPLOY_CONFIG_PATH, "rb");
+    size_t      n;
+
+    TEST_ASSERT(f != NULL);
+    if (f == NULL) {
+        return;
+    }
+    n = fread(json, 1, sizeof(json) - 1, f);
+    fclose(f);
+    json[n] = '\0';
+    TEST_ASSERT(n > 0 && n < sizeof(json) - 1);
+
+    sModbusCompileResult res;
+    mock_flash_reset();
+    TEST_ASSERT(NvDb_Init() == nvdbRes_ok);
+    if (compile_str(json, 0, &res) != 0) {
+        printf("  deployable config rejected: %s / %s\n", res.field, res.reason);
+        test_failures++;
+        return;
+    }
+
+    TEST_ASSERT(res.counts.capabilities == 2);
+    TEST_ASSERT(res.counts.devices == 3);
+    TEST_ASSERT(res.counts.plans == 2);     /* jk0, jk1 — no solis plan */
+
+    /* devOrd 2 is the Solis at slave 1: the record the gateway needs. */
+    sModbusDeviceRecord dev;
+    TEST_ASSERT(MbCfg_FindDevice(nvdbUser_modbusLutA, 2, &dev) == 0);
+    TEST_ASSERT(dev.slaveAddr == 1);
+    TEST_ASSERT(strcmp(dev.topicPrefix, "solis") == 0);
+
+    /* And its capability is still there with its points, which is what keeps
+     * `modbus get` and POST /api/modbus/write working as a LOCAL diagnostic
+     * while HA is down — the reason they were not stripped along with the
+     * plan. */
+    sModbusPointRecord pt;
+    TEST_ASSERT(MbCfg_FindPoint(nvdbUser_modbusLutA, dev.capId, 0, &pt) == 0);
+}
+
 static void test_integration_fixture_compiles(void)
 {
     static char json[8192];
@@ -963,6 +1014,7 @@ int main(void)
     RUN_TEST(test_region_budget_is_the_real_ceiling);
     RUN_TEST(test_integration_fixture_compiles);
     RUN_TEST(test_jk_fixture_compiles);
+    RUN_TEST(test_deployable_gateway_config_compiles);
     RUN_TEST(test_jk_fixture_derives_blocks);
     RUN_TEST(test_failed_compile_invalidates_previous);
     return test_failures ? EXIT_FAILURE : EXIT_SUCCESS;

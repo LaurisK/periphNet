@@ -242,7 +242,7 @@ in §4.4.
    App/Cmd ────────►│  App/Modbus/modbus.h                     │
    App/Http ───────►│  (the only header a CONSUMER includes)   │
    App/Pack ───────►│                                          │
-   App/Can  ───────►│  ┌────────────────────────────────────┐  │
+   App/Gw  ────────►│  ┌────────────────────────────────────┐  │
         ▲           │  │ scheduler   timers → events        │  │
         │ events    │  │ engine      FSM, sequences, decode │  │
         └───────────┤  │ port table  slots + frame buffers  │  │
@@ -259,6 +259,9 @@ in §4.4.
 
 - Files in `App/Modbus/` must not include `App/Mqtt`, `App/Http`, `App/Can`,
   `App/Data`, or any lwIP header.
+- **`App/Gw/` (the Modbus TCP gateway) is a CONSUMER like any other**, and it
+  lives outside `App/Modbus/` for exactly the rule above: it includes lwIP.
+  It reaches the module only through `modbus.h`, at the §4.11 seam.
 - A **consumer** includes only `App/Modbus/modbus.h`. Scheduler, engine and
   framing are module-internal, and there is no way to select a port for a device
   from outside — a port is where a device lives, and that is config.
@@ -1251,6 +1254,65 @@ once, in the consumer, and never on a data path.
 
 ---
 
+### 4.11 The gateway seam — raw registers, and why it is not §4.6
+
+**Added 2026-09-05 for the Modbus TCP gateway**
+([design_solis_modbus_link.md](design_solis_modbus_link.md) §6.4). It is a
+SECOND seam, not an extension of the first, and confusing the two is the
+mistake this section exists to prevent.
+
+```c
+Modbus_RawTransfer(&txn, timeout_ms, cb, ctx);   /* fc 3/4/6/16, by address */
+Modbus_DeviceBySlave(slaveAddr, &devOrd);        /* the unit-id map          */
+```
+
+|  | `Modbus_Request` (§4.6) | `Modbus_RawTransfer` |
+|---|---|---|
+| addresses | a `ptOrd` in the device's capability | a **wire register** |
+| what it means | **the config decides** — r reads, w writes, rw writes and reads back | whatever the function code says |
+| bounds | `writeMin`/`writeMax` enforced before a frame is formed | **none** |
+| access bits | enforced; a read-only point cannot be written | **not consulted** |
+| decoding | scaled value in and out | raw registers, both ways |
+| what the config still owns | everything | **the line only**: port, slave, baud, format |
+
+**§1.2 said this module would not offer a raw bus write. That rule is now
+amended rather than quietly broken.** Its stated reason was that a raw path
+invites consumers to re-implement decoding and get word order, scaling or
+ASCII subtly wrong. A gateway is not decoding anything — it is carrying
+somebody else's frames to a slave and back, and the authority on what those
+registers mean is at the far end, which is the whole finding behind Shape A.
+The rule still governs every consumer that wants *values*: there is exactly
+one raw caller and it is not a subscriber.
+
+**The write protection of §4.6 is untouched, and is not present here.** Both
+statements are true at once because they are different seams:
+`POST /api/modbus/write`, `modbus set` and every point requester still cannot
+reach a read-only register by asking differently. Anything that reaches the
+gateway can write any holding register the slave accepts. That was decided,
+not overlooked (design_solis_modbus_link.md §7.2), and the **WireGuard tunnel
+is the authorization boundary** — which is why the listener binds the tunnel
+address and a board without one serves nothing.
+
+**It rides the same request FIFO, tagged by kind.** Not a shortcut: it is what
+makes a gateway request take its turn behind scheduled sequences, spend its own
+deadline from submission, and be *completed* by a config swap rather than
+dropped. The module has one bus master and a gateway is not a second one.
+
+One deliberate difference from the point path: **a raw transfer caught by a
+config swap is abandoned, not retried.** `devOrd` is a position in `devices[]`,
+so after a swap the record behind it may be a different slave on a different
+pair; putting somebody's write on that wire is worse than not writing it.
+
+**FC16 is framed verbatim** — `count` registers from `addr` as one
+write-multiple frame, never decomposed — and the **client's** function code is
+passed through, not the capability's `writeFc`. A capability declaring
+`writeFc: 6` still carries a gateway FC16 as FC16, because the dialect setting
+is a fact about the point path. The Remote Dispatch block `44100-44112` is
+silently dropped by the inverter if it arrives as scattered single-register
+writes, so this is a correctness property and §9 asserts it on the **frame**.
+
+---
+
 ## 5. The engine — ports, scheduling, dispatch
 
 ### 5.1 The port contract
@@ -1954,6 +2016,19 @@ curl      http://10.42.0.203/api/modbus/config/status
 curl      http://10.42.0.203/api/modbus/config/download -o modbus_config.json
 curl -X DELETE http://10.42.0.203/api/modbus/config          # erase -> unprovisioned
 
+# The Modbus TCP gateway (§4.11) -- is Home Assistant reaching this board?
+curl      http://10.42.0.203/api/modbus/gw
+# {"listening":true,"port":502,"bind_ip":"10.77.0.5","connected":true,
+#  "connections":1,"requests":8421,"exceptions":12,"busy_exceptions":3,
+#  "last_request_age_ms":214,"budget_ms":1500,"transparent":true,
+#  "bound_to":"tunnel"}
+#
+# listening:false with a zero bind_ip means NO TUNNEL IS CONFIGURED, and that
+# is deliberate -- the gateway is transparent, so the tunnel is its whole
+# authorization and it will not fall back to the site LAN.  busy_exceptions
+# counts 0x06 answers: a few are healthy back-pressure, a rising count is a
+# bus-budget question.
+
 # Plans, without re-uploading a config (§3.5)
 curl      http://10.42.0.203/api/modbus/plans                # slots, names, device sets,
                                                              #   time tables, subscriber counts
@@ -1994,13 +2069,22 @@ in a later download without anything having to remember it.
 | `modbus monitor <on\|off>` | raw TX/RX frame dump via Trice |
 | `modbus dump <on\|off>` | the Trice subscriber — every decoded reading |
 | `modbus inject …` | byte source of the **test peripheral driver** in port slot 1 |
+| `modbus raw <dev> <fc> <addr> <count> [values]` | **the §4.11 gateway seam** — one PDU by wire address, no point model |
 
-**No command touches the bus.** There is no `modbus write` (no raw write path), no
-`modbus probe` (no direct bus access at all), no `modbus start`/`stop` (no such
-lifecycle), no `modbus set baud` (a device parameter), no `modbus port` (a device
-lives on a port; that is config), and no `jk` tree. Reading a register that is in
-no plan is a `Modbus_Request` against a capability that declares it; reading one
-that is in no *capability* is a bench job with a USB-RS485 adapter.
+**One command touches the bus by address, and it is new.** `modbus raw` reaches
+`Modbus_RawTransfer` (§4.11): it consults no point, no access bit and no
+bounds, so it can write any holding register the slave accepts. It is here
+because an operator and the integration harness need that seam without a
+Modbus TCP client — not because the CLI grew a bus. **Reading a register in no
+capability is no longer a bench job with a USB-RS485 adapter**; that sentence
+was true until this landed.
+
+Everything else still holds: there is no `modbus probe`, no
+`modbus start`/`stop` (no such lifecycle), no `modbus set baud` (a device
+parameter), no `modbus port` (a device lives on a port; that is config), and no
+`jk` tree. Reading a register that is in a capability is still a
+`Modbus_Request` against the point that declares it — and that path, unlike
+`raw`, is the one that decodes, scales and enforces write bounds.
 
 `modbus inject` is **not** a hole beneath the port — it feeds an App-layer driver
 the module cannot distinguish from a UART. Feeding replies in through a port *is*
@@ -2204,6 +2288,21 @@ too, which is a bonus rather than the reason the mechanism exists.
 **RTU line framing is never covered by a test peripheral**, whatever transport
 feeds it.
 
+**The gateway seam is tested through `modbus raw`, and one of those cases
+asserts on a FRAME LENGTH rather than an outcome** — deliberately.
+`modbus_raw_write_is_one_fc16_frame` drives `modbus raw 0 16 3009 2 95 15` and
+requires the monitor to show `Modbus TX[13]:`, i.e. one write-multiple frame
+carrying both registers. An outcome assertion would pass just as happily
+against two FC06 writes, and that is precisely the bug FC16 atomicity exists to
+prevent (design_solis_modbus_link.md §3.5). A decomposed write would show as
+two 8-byte frames instead.
+
+**What is NOT covered here: the MBAP listener itself.** `App/Gw/modbus_tcp.c`
+needs a TCP client and a network, so nothing above exercises the framing, the
+unit-id map or the exception codes it originates. That is a hardware
+acceptance item, not a harness gap to close with a mock — the seam beneath it
+(§4.11) is what these cases prove, and it is the half that touches the bus.
+
 | Event | String |
 |---|---|
 | Monitor on/off | `Modbus monitor: on` / `Modbus monitor: off` |
@@ -2211,6 +2310,7 @@ feeds it.
 | Start | `Modbus: started` |
 | Missed sequence | `Modbus: missed <id> <period> (n=N)` |
 | Subscriber on/off | `Modbus dump: on` / `Modbus dump: off` |
+| Raw transfer (§4.11) | `Modbus raw: <regs…>` / `Modbus raw: … written` / `Modbus raw: rejected (<err>)` |
 | Dispatched sample | `Modbus dump: <topicPrefix>/<name> = <value> [dev N pt N @Ns]` |
 | Request submitted / rejected | `Modbus req: dev N pt N = <value> (<res>)` / `Modbus req: rejected (<err>)` — emitted by the requester |
 
@@ -2873,6 +2973,21 @@ on 2026-08-12 and are now §4.6 and §3.5 respectively.
   cost 80 B, so an operator could fix four problems in one cycle. Not free: the
   compiler aborts at the first failure today, and continuing means separating
   semantic errors it can skip past from structural ones it cannot.
+- **Rate-limiting the gateway seam.** Nothing bounds how fast a client on
+  `:502` may submit raw transfers; what bounds it today is the request FIFO
+  (depth 8) and the fact that the far end is single-in-flight by construction
+  (design_solis_modbus_link.md §3.3). A *different* client — `mbpoll` in a
+  loop, node-red — has no such manners, and the failure mode is bus starvation
+  of the JK poll, not a crash. The instrument already exists: `duty_permille`
+  in `/api/modbus/bus` and `busy_exceptions` in `/api/modbus/gw`. Design a
+  policy when one of those says it is needed, and put it in the gateway, not
+  in the engine — the engine's job is to be fair between queued clients, not
+  to judge who deserves the wire.
+- **A second gateway client.** The listener serves one connection at a time
+  because `solis_modbus` keeps exactly one per `host:port`. A second concurrent
+  client waits in the listen backlog rather than being refused, which is
+  correct but untested and would interleave two clients' transaction ids
+  across one RS485 line's latency.
 
 JK PB-series integration is otherwise a config problem, not a firmware one, and
 **the config now exists**: `tests/fixtures/modbus_jk_pb.json`, compiled by the

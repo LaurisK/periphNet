@@ -27,6 +27,7 @@
 #include "App/Can/can_log.h"
 #include "App/Can/can_bus.h"
 #include "App/Can/can_monitor.h"
+#include "App/Gw/modbus_tcp.h"
 #include "App/Mon/sysmon.h"
 #include "usart.h"
 #include "usbd_cdc_if.h"
@@ -1592,6 +1593,58 @@ static void handle_modbus_bus(struct netconn *conn)
     }
 
     (void)Json_Cat(resp_buf, sizeof(resp_buf), off, "]}");
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* GET /api/modbus/gw -- is Home Assistant actually talking to this board?
+ *
+ * The one reading that matters is `listening` together with `bind_ip`: a board
+ * whose tunnel was never provisioned serves NOTHING by design, and from the
+ * outside that is indistinguishable from a firewall problem unless the board
+ * says so itself.  `busy_exceptions` is the back-pressure counter -- non-zero
+ * means the far end was told to come back, which is healthy in small numbers
+ * and a bus-budget question in large ones. */
+static void handle_modbus_gw(struct netconn *conn)
+{
+    sMbTcpStats g;
+
+    if (MbTcp_GetStats(&g) != 0) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"gateway state unavailable\"}");
+        return;
+    }
+
+    size_t off = Json_Cat(resp_buf, RESP_BODY_CAP, 0u,
+                          "{\"listening\":%s,\"port\":%u,"
+                          "\"bind_ip\":\"%u.%u.%u.%u\","
+                          "\"connected\":%s,\"connections\":%lu,"
+                          "\"requests\":%lu,\"exceptions\":%lu,"
+                          "\"busy_exceptions\":%lu,",
+                          g.listening ? "true" : "false",
+                          (unsigned)MBTCP_PORT,
+                          g.bindIp[0], g.bindIp[1], g.bindIp[2], g.bindIp[3],
+                          g.connected ? "true" : "false",
+                          (unsigned long)g.connections,
+                          (unsigned long)g.requests,
+                          (unsigned long)g.exceptions,
+                          (unsigned long)g.busyExceptions);
+
+    if (g.lastRequestAge_ms == MBTCP_AGE_NEVER) {
+        off = Json_Cat(resp_buf, RESP_BODY_CAP, off,
+                       "\"last_request_age_ms\":null,");
+    } else {
+        off = Json_Cat(resp_buf, RESP_BODY_CAP, off,
+                       "\"last_request_age_ms\":%lu,",
+                       (unsigned long)g.lastRequestAge_ms);
+    }
+
+    /* Said in the payload rather than left to be inferred: the gateway is
+     * transparent, so this port is an ungated write path and the tunnel is
+     * the whole of its authorization (design_solis_modbus_link.md §7.2). */
+    (void)Json_Cat(resp_buf, RESP_BODY_CAP, off,
+                   "\"budget_ms\":%u,\"transparent\":true,"
+                   "\"bound_to\":\"tunnel\"}",
+                   (unsigned)MBTCP_TXN_BUDGET_MS);
     send_json(conn, "200 OK", resp_buf);
 }
 
@@ -3803,6 +3856,8 @@ static void handle_connection(struct netconn *conn)
         handle_modbus_monitor(conn, 1);
     } else if (route_is("POST /api/modbus/monitor/off")) {
         handle_modbus_monitor(conn, 0);
+    } else if (route_is("GET /api/modbus/gw")) {
+        handle_modbus_gw(conn);
     } else if (route_is("GET /api/modbus/bus")) {
         handle_modbus_bus(conn);
     } else if (route_is("POST /api/modbus/bus/reset")) {

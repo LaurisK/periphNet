@@ -835,15 +835,29 @@ void ModbusPlans_Service(void)
 
 #define REQ_FIFO_DEPTH   8u
 
+/* TWO KINDS RIDE ONE FIFO, and that is the point rather than a shortcut: the
+ * gateway's raw transfers must take their turn behind scheduled sequences and
+ * point requests on the same wire, spend their own deadline waiting like
+ * everything else, and be completed rather than dropped by a config swap.  A
+ * second queue would have had to reproduce all of that and then arbitrate
+ * between the two — which is a bus master, and the module has exactly one. */
+typedef enum {
+    reqKind_points = 0,   /* sModbusReqItem[] addressed by ptOrd (§4.6)     */
+    reqKind_raw,          /* one PDU addressed by wire address (§4.11)      */
+} eReqKind;
+
 typedef struct {
-    sModbusReqItem  *items;
+    sModbusReqItem  *items;         /* reqKind_points                       */
+    sModbusRawTxn   *raw;           /* reqKind_raw                          */
     uint16_t         count;
     uint8_t          devOrd;
+    uint8_t          kind;          /* eReqKind                             */
     uint32_t         submitTick;
     uint32_t         timeout_ms;
     uint32_t         gen;            /* config generation at submission */
     fModbusReqDone   cb;
     void            *ctx;
+    fModbusRawDone   rawCb;
 } sReqEntry;
 
 /* A SUBMISSION CARRIES THE CONFIG GENERATION IT WAS MADE AGAINST, which is
@@ -911,6 +925,21 @@ static void params_from(const sMbPointLookup *lk, sModbusPortParams *p,
 
     p->baud               = MbRecords_BaudFromCode(lk->baudCode);
     p->format             = lk->format;
+    p->responseTimeout_ms = (budget_ms < portTimeout) ? budget_ms
+                                                      : portTimeout;
+}
+
+/* The same three line facts, taken from a DEVICE record instead of a point
+ * lookup.  A raw transfer never resolves a point, so this is the only thing
+ * standing between "unit id 1" and a frame at the right baud on the right
+ * pair. */
+static void params_from_dev(const sModbusDeviceRecord *d, sModbusPortParams *p,
+                            uint32_t budget_ms)
+{
+    uint32_t portTimeout = ModbusEngine_ResponseTimeoutMs();
+
+    p->baud               = MbRecords_BaudFromCode(d->baudCode);
+    p->format             = d->format;
     p->responseTimeout_ms = (budget_ms < portTimeout) ? budget_ms
                                                       : portTimeout;
 }
@@ -1011,20 +1040,68 @@ static void req_run_item(uint8_t devOrd, sModbusReqItem *it,
 }
 
 /* --------------------------------------------------------------------------
+ * One raw transfer (§4.11)
+ *
+ * NOTHING IS CHECKED AGAINST THE CONFIG HERE EXCEPT THE LINE.  No point is
+ * resolved, no access bit consulted, no bound applied — see the block comment
+ * over Modbus_RawTransfer in modbus.h for why that was decided rather than
+ * overlooked.  What the device record still supplies is port, slave, baud and
+ * format, because a frame cannot be formed without them.
+ * -------------------------------------------------------------------------- */
+
+static void raw_run(sReqEntry *e, uint32_t budget_ms)
+{
+    sModbusRawTxn      *t = e->raw;
+    sModbusDeviceRecord dev;
+    sModbusPortParams   params;
+
+    if (MbCfg_FindDevice(MbCfgStore_ActiveRegion(), t->devOrd, &dev) != 0) {
+        t->result = mbErr_idNotFound;
+        return;
+    }
+    params_from_dev(&dev, &params, budget_ms);
+
+    if (t->fc == 3u || t->fc == 4u) {
+        t->result = ModbusPort_Read(dev.portId, &params, dev.slaveAddr,
+                                    t->fc, t->addr, t->count, t->regs);
+        return;
+    }
+
+    /* FC16 GOES OUT AS ONE FRAME (§7.3).  ModbusPort_Write takes the
+     * capability's `writeFc` on the point path; here the CLIENT's function
+     * code is passed through instead, because a gateway that silently
+     * rewrote FC16 into FC06 would break exactly the atomicity its far end
+     * asked for. */
+    t->result = ModbusPort_Write(dev.portId, &params, dev.slaveAddr,
+                                 t->fc, t->addr, t->regs, t->count);
+}
+
+/* --------------------------------------------------------------------------
  * Completion — the one moment the caller may reclaim its array
  * -------------------------------------------------------------------------- */
 
 static void req_complete(void)
 {
-    sModbusReqReply rep = { s_req.items, s_req.count, s_req.devOrd };
-    fModbusReqDone  cb  = s_req.cb;
-    void           *ctx = s_req.ctx;
+    sModbusReqReply rep    = { s_req.items, s_req.count, s_req.devOrd };
+    fModbusReqDone  cb     = s_req.cb;
+    fModbusRawDone  rawCb  = s_req.rawCb;
+    sModbusRawTxn  *raw    = s_req.raw;
+    void           *ctx    = s_req.ctx;
+    uint8_t         kind   = s_req.kind;
 
     s_req.items = NULL;
+    s_req.raw   = NULL;
     s_req.cb    = NULL;
+    s_req.rawCb = NULL;
     s_requestsDone++;
     s_reqActive = 0u;           /* released BEFORE the callback, so a
                                    re-submission from inside it is accepted */
+    if (kind == (uint8_t)reqKind_raw) {
+        if (rawCb != NULL) {
+            rawCb(raw, ctx);
+        }
+        return;
+    }
     if (cb != NULL) {
         cb(&rep, ctx);
     }
@@ -1059,10 +1136,40 @@ void ModbusReq_Service(void)
     if (s_req.gen != s_configGen) {
         sMbPointLookup lk;
 
+        /* A RAW TRANSFER IS ABANDONED OUTRIGHT ON A SWAP, not retried against
+         * the new config: `devOrd` is a position in devices[], so the record
+         * behind it may now be a different slave on a different pair, and
+         * putting somebody's write on that wire would be worse than not
+         * writing it at all. */
+        if (s_req.kind == (uint8_t)reqKind_raw) {
+            s_req.raw->result = mbErr_notAttempted;
+            req_complete();
+            return;
+        }
+
         for (uint16_t i = 0; i < s_req.count; i++) {
             s_req.items[i].result =
                 (MbCfg_ResolvePoint(s_req.devOrd, s_req.items[i].id, &lk) == 0)
                     ? mbErr_notAttempted : mbErr_idNotFound;
+        }
+        req_complete();
+        return;
+    }
+
+    if (s_req.kind == (uint8_t)reqKind_raw) {
+        uint32_t spent = HAL_GetTick() - s_req.submitTick;
+
+        if (spent >= s_req.timeout_ms) {
+            s_req.raw->result = mbErr_notAttempted;
+        } else {
+            raw_run(&s_req, s_req.timeout_ms - spent);
+            /* Same distinction the point path makes: a frame that was ON THE
+             * WIRE when the deadline arrived may have landed on the slave; a
+             * never-started one certainly did not. */
+            if (s_req.raw->result == mbErr_timeout &&
+                HAL_GetTick() - s_req.submitTick >= s_req.timeout_ms) {
+                s_req.raw->result = mbErr_timedOut;
+            }
         }
         req_complete();
         return;
@@ -1147,12 +1254,15 @@ int Modbus_Request(uint8_t devOrd, sModbusReqItem *items, uint16_t count,
         uint8_t tail = (uint8_t)((s_fifoHead + s_fifoCount) % REQ_FIFO_DEPTH);
 
         s_fifo[tail].items      = items;
+        s_fifo[tail].raw        = NULL;
+        s_fifo[tail].kind       = (uint8_t)reqKind_points;
         s_fifo[tail].count      = count;
         s_fifo[tail].devOrd     = devOrd;
         s_fifo[tail].submitTick = HAL_GetTick();
         s_fifo[tail].timeout_ms = timeout_ms;
         s_fifo[tail].gen        = s_configGen;
         s_fifo[tail].cb         = cb;
+        s_fifo[tail].rawCb      = NULL;
         s_fifo[tail].ctx        = ctx;
         s_fifoCount++;
     }
@@ -1163,6 +1273,104 @@ int Modbus_Request(uint8_t devOrd, sModbusReqItem *items, uint16_t count,
     }
     ModbusEngine_Poke();
     return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * Public API — the gateway seam (§4.11)
+ * -------------------------------------------------------------------------- */
+
+int Modbus_RawTransfer(sModbusRawTxn *txn, uint32_t timeout_ms,
+                       fModbusRawDone cb, void *ctx)
+{
+    if (txn == NULL || cb == NULL || txn->regs == NULL ||
+        timeout_ms < MB_REQ_TIMEOUT_MIN_MS ||
+        timeout_ms > MB_REQ_TIMEOUT_MAX_MS) {
+        return mbErr_badArg;
+    }
+
+    /* THE ONLY THING VALIDATED HERE IS THE SHAPE OF A MODBUS PDU, because
+     * that is all this seam knows about (§7.2).  The limits are the
+     * protocol's, not the config's: what the ADDRESS means is the slave's
+     * business, and a slave that does not have it answers exception 2 —
+     * which is information the far end acts on, and better than anything a
+     * guess here could produce. */
+    switch (txn->fc) {
+    case 3u:
+    case 4u:
+        if (txn->count == 0u || txn->count > MB_RAW_MAX_READ_REGS) {
+            return mbErr_badArg;
+        }
+        break;
+    case 6u:
+        if (txn->count != 1u) {
+            return mbErr_badArg;
+        }
+        break;
+    case 16u:
+        if (txn->count == 0u || txn->count > MB_RAW_MAX_WRITE_REGS) {
+            return mbErr_badArg;
+        }
+        break;
+    default:
+        return mbErr_badArg;
+    }
+
+    /* Same reason as Modbus_Request: nothing would service it, and a callback
+     * that never fires is the one failure this API may not have. */
+    if (!ModbusEngine_IsRunning()) {
+        return mbErr_config;
+    }
+
+    taskENTER_CRITICAL();
+    if (s_fifoCount >= REQ_FIFO_DEPTH) {
+        taskEXIT_CRITICAL();
+        return mbErr_full;
+    }
+    {
+        uint8_t tail = (uint8_t)((s_fifoHead + s_fifoCount) % REQ_FIFO_DEPTH);
+
+        s_fifo[tail].items      = NULL;
+        s_fifo[tail].raw        = txn;
+        s_fifo[tail].kind       = (uint8_t)reqKind_raw;
+        s_fifo[tail].count      = 1u;
+        s_fifo[tail].devOrd     = txn->devOrd;
+        s_fifo[tail].submitTick = HAL_GetTick();
+        s_fifo[tail].timeout_ms = timeout_ms;
+        s_fifo[tail].gen        = s_configGen;
+        s_fifo[tail].cb         = NULL;
+        s_fifo[tail].rawCb      = cb;
+        s_fifo[tail].ctx        = ctx;
+        s_fifoCount++;
+    }
+    taskEXIT_CRITICAL();
+
+    txn->result = mbErr_pending;
+    ModbusEngine_Poke();
+    return 0;
+}
+
+int Modbus_DeviceBySlave(uint8_t slaveAddr, uint8_t *devOrdOut)
+{
+    sMbCfgCursor        c;
+    sModbusDeviceRecord d;
+    uint8_t             ord = 0;
+
+    if (devOrdOut == NULL) {
+        return mbErr_badArg;
+    }
+    if (MbCfg_SeekDevices(MbCfgStore_ActiveRegion(), &c) != 0) {
+        return mbErr_config;
+    }
+    /* A flash walk, like every other lookup here — a control-path call, never
+     * one per frame.  The gateway resolves a unit id once per connection. */
+    while (MbCfg_NextDevice(&c, &d) == 1) {
+        if (d.slaveAddr == slaveAddr) {
+            *devOrdOut = ord;
+            return 0;
+        }
+        ord++;
+    }
+    return mbErr_idNotFound;
 }
 
 int Modbus_PointInfo(uint8_t devOrd, uint16_t ptOrd, sModbusPointMeta *out)

@@ -24,8 +24,16 @@
  *
  * WHAT THIS MODULE WILL NOT DO, so nobody proposes it again (§1.2): carry
  * publish policy, remember a previous value, judge whether a slave is alive,
- * offer a raw bus write, or take a start/stop/baud/port knob.  Each of those
- * is either config or the consumer's judgement.
+ * or take a start/stop/baud/port knob.  Each of those is either config or the
+ * consumer's judgement.
+ *
+ * THAT LIST USED TO INCLUDE "offer a raw bus write", AND NO LONGER DOES.
+ * Modbus_RawTransfer below is a second seam, added deliberately for the
+ * Modbus TCP gateway (docs/design_solis_modbus_link.md §6.4).  The reason the
+ * old rule existed — a raw path invites consumers to re-implement decoding —
+ * does not apply to a gateway, which is not decoding anything: it is carrying
+ * somebody else's frames to a slave and back.  Read the block comment over
+ * Modbus_RawTransfer before using it; it is not the API for reading values.
  *
  * SURFACE MAP — the whole of §4 lands across §10's steps; this file grows with
  * them and never shrinks:
@@ -490,6 +498,108 @@ typedef struct {
  * @return 0, or mbErr_badArg / mbErr_idNotFound.
  */
 int Modbus_PointInfo(uint8_t devOrd, uint16_t ptOrd, sModbusPointMeta *out);
+
+/* ==========================================================================
+ * Raw register access — THE GATEWAY SEAM, not the reading seam
+ * (docs/design_solis_modbus_link.md §6.4, §7.2; docs/modbus.md §4.11)
+ *
+ * This carries ONE Modbus PDU to one device and brings its answer back, by
+ * wire address, with no config lookup between: no point, no ptOrd, no decode
+ * type, no scale, no access bits, no writeMin/writeMax.  What the config still
+ * decides is everything about the LINE — which port the device lives on, its
+ * slave address, its baud and format — because that is what a device record
+ * is, and the gateway has no way to learn it otherwise.
+ *
+ * WHY IT IS NOT Modbus_Request.  The two are different seams and must not be
+ * confused:
+ *
+ *   Modbus_Request   addresses a ptOrd.  THE CONFIG decides what the item
+ *                    means (§4.6): r reads, w writes, rw writes and reads
+ *                    back, and a requester cannot reach a read-only register
+ *                    by asking differently.  Bounds are enforced.
+ *   Modbus_RawTransfer  addresses a REGISTER.  Nothing is enforced, because
+ *                    there is nothing to enforce against — the caller is
+ *                    speaking Modbus, not naming a point.
+ *
+ * SO THIS IS AN UNGATED WRITE PATH TO A LIVE SLAVE, AND THAT WAS DECIDED
+ * RATHER THAN OVERLOOKED (§7.2, decided 2026-09-05: transparent both ways).
+ * The authorization boundary is the WireGuard tunnel and nothing else, which
+ * is why the gateway that uses this binds to the tunnel address and never
+ * IP_ADDR_ANY.  A caller that wants the point model's protection must use
+ * Modbus_Request; §4.6 is untouched and still governs POST /api/modbus/write.
+ *
+ * FC16 IS FRAMED VERBATIM, and that is the whole answer to §7.3: `count`
+ * registers from `addr` go out as ONE write-multiple frame, never decomposed
+ * into per-register FC06 writes.  solis_modbus's Remote Dispatch block
+ * (44100-44112) depends on that atomicity — scattered single-register writes
+ * are silently dropped by the inverter.
+ *
+ * IT IS A QUEUED CLIENT OF THE ENGINE, NEVER A SECOND BUS MASTER.  It rides
+ * the same FIFO as Modbus_Request, so it takes its turn behind scheduled
+ * sequences, spends its own deadline waiting, and cannot displace the 1 Hz
+ * CAN obligation (design_remote_access_and_autonomy.md §1).  A caller that
+ * cannot wait gets mbErr_full and should say "busy" to its own far end rather
+ * than retry.
+ * ========================================================================== */
+
+/* The Modbus limits, not ours: FC03/04 read at most 125 registers, FC16
+ * writes at most 123, and both are far above solis_modbus's largest group
+ * (43).  One buffer of this size is 250 B, which is why the caller owns it. */
+#define MB_RAW_MAX_READ_REGS   125u
+#define MB_RAW_MAX_WRITE_REGS  123u
+
+typedef struct {
+    uint16_t *regs;    /* in: values to write (fc 6/16) · out: registers read
+                          (fc 3/4).  BORROWED until the callback fires.      */
+    uint16_t  addr;    /* wire address, verbatim — no stride arithmetic      */
+    uint16_t  count;   /* registers; must be 1 for fc 6                      */
+    uint8_t   fc;      /* 3, 4, 6 or 16 — the wire code, passed through      */
+    uint8_t   devOrd;  /* which device record supplies port/slave/baud       */
+    int16_t   result;  /* out: eModbusErr; mbErr_pending until decided       */
+} sModbusRawTxn;
+
+typedef void (*fModbusRawDone)(sModbusRawTxn *txn, void *ctx);
+
+/**
+ * @brief  Carry one raw PDU to one device and bring the answer back.
+ *
+ *         Same contract as Modbus_Request in every respect that matters: the
+ *         callback ALWAYS fires, within timeout_ms, runs on the modbus task,
+ *         must not block, and is the only moment the caller may reuse `txn`
+ *         or its `regs` buffer.  The deadline runs from SUBMISSION, so a
+ *         transfer that waited out its own timeout completes
+ *         mbErr_notAttempted without ever reaching the wire.  A config swap
+ *         completes it rather than dropping it.
+ *
+ *         A slave that answers an exception IS answering: the code comes back
+ *         as mbErr_excIllegalAddress and friends, not as a failure of the
+ *         transfer.  That distinction is what lets a gateway pass an
+ *         exception through instead of turning it into silence — upstream
+ *         learns from exception 2 and merely retries a timeout.
+ *
+ * @param  txn         borrowed by the module until `cb` fires
+ * @param  timeout_ms  1..MB_REQ_TIMEOUT_MAX_MS; 0 is rejected
+ * @return 0 on acceptance (result set to mbErr_pending), or a negative
+ *         eModbusErr — mbErr_badArg / mbErr_full / mbErr_config.  On a
+ *         negative return `cb` does NOT fire and nothing was borrowed.
+ */
+int Modbus_RawTransfer(sModbusRawTxn *txn, uint32_t timeout_ms,
+                       fModbusRawDone cb, void *ctx);
+
+/**
+ * @brief  Find the device record carrying a slave address.
+ *
+ *         The gateway's unit-id map: a Modbus TCP client addresses a slave,
+ *         the module addresses a devOrd, and this is the only thing that
+ *         knows both.  FIRST MATCH WINS and that is deliberate — a slave
+ *         address is unique per line, not per board, so two devices may share
+ *         one address on different ports and no rule here could pick between
+ *         them better than the config's own order.
+ *
+ * @return 0 with *devOrdOut set, or mbErr_idNotFound / mbErr_badArg /
+ *         mbErr_config.
+ */
+int Modbus_DeviceBySlave(uint8_t slaveAddr, uint8_t *devOrdOut);
 
 /* ==========================================================================
  * Configuration (docs/modbus.md §4.9)

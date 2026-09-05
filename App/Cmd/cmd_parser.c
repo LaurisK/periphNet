@@ -92,7 +92,7 @@ static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "can",         cmd_can,         "CAN bridge + flash trace (start|stop|mode|status|ids|trace|log|send)" },
-    { "modbus",      cmd_modbus,      "Modbus (read|get|set|monitor|dump|plan|inject|status)" },
+    { "modbus",      cmd_modbus,      "Modbus (read|get|set|raw|monitor|dump|plan|inject|status)" },
     { "wg",          cmd_wg,          "WireGuard tunnel (start|stop|status|endpoint)" },
     { "nvdb",        cmd_nvdb,        "Non-volatile store (status|layout|usage|wear)" },
     { "pack",        cmd_pack,        "Battery packs (status|list|show|cells|stats|balance|cmd|config|erase)" },
@@ -601,15 +601,105 @@ static void cli_request(const char *args, int isWrite)
     }
 }
 
+/* One raw transfer from the CLI.  Same borrow rule as above, and the same
+ * static-and-guarded shape — this is the OPERATOR's and the integration
+ * harness's way onto the gateway seam without a Modbus TCP client, which is
+ * what makes docs/modbus.md §9's raw cases runnable against the test port
+ * (docs/design_solis_modbus_link.md §9, step 2). */
+static sModbusRawTxn s_cliRaw;
+static uint16_t      s_cliRawRegs[MB_RAW_MAX_READ_REGS];
+static volatile int  s_cliRawBusy;
+
+static void cli_raw_done(sModbusRawTxn *t, void *ctx)
+{
+    (void)ctx;
+
+    if (t->result != mbErr_ok) {
+        TRice("Modbus raw: dev %u fc %u @%u failed (%d)\n",
+              t->devOrd, t->fc, t->addr, (int)t->result);
+    } else if (t->fc == 3u || t->fc == 4u) {
+        char     line[110];
+        uint32_t at = 0;
+
+        for (uint16_t i = 0; i < t->count && at < sizeof(line) - 1u; i++) {
+            at = Json_Cat(line, sizeof(line), at, "%s%u",
+                          (i == 0u) ? "" : " ", t->regs[i]);
+        }
+        TRiceS("Modbus raw: %s\n", line);
+    } else {
+        TRice("Modbus raw: dev %u fc %u @%u x%u written\n",
+              t->devOrd, t->fc, t->addr, t->count);
+    }
+    s_cliRawBusy = 0;
+}
+
+/* modbus raw <devOrd> <fc> <addr> <count> [v0 v1 ...] */
+static void cli_raw(const char *args)
+{
+    unsigned    dev = 0, fc = 0, addr = 0, count = 0;
+    int         consumed = 0;
+    const char *p;
+
+    if (sscanf(args, "%u %u %u %u%n", &dev, &fc, &addr, &count, &consumed) < 4) {
+        TRice("Usage: modbus raw <devOrd> <fc 3|4|6|16> <addr> <count> [values]\n");
+        return;
+    }
+    if (count == 0u || count > MB_RAW_MAX_READ_REGS) {
+        TRice("Modbus raw: count 1..%u\n", MB_RAW_MAX_READ_REGS);
+        return;
+    }
+    if (s_cliRawBusy) {
+        TRice("Modbus raw: busy\n");
+        return;
+    }
+
+    /* A write needs its values on the same line; a short list is a typo, not
+     * a request to write zeros into an inverter. */
+    if (fc == 6u || fc == 16u) {
+        unsigned v = 0;
+        p = args + consumed;
+        for (unsigned i = 0; i < count; i++) {
+            int n = 0;
+            if (sscanf(p, " %u%n", &v, &n) != 1) {
+                TRice("Modbus raw: fc %u needs %u values, got %u\n",
+                      fc, count, i);
+                return;
+            }
+            s_cliRawRegs[i] = (uint16_t)v;
+            p += n;
+        }
+    }
+
+    s_cliRaw.regs   = s_cliRawRegs;
+    s_cliRaw.addr   = (uint16_t)addr;
+    s_cliRaw.count  = (uint16_t)count;
+    s_cliRaw.fc     = (uint8_t)fc;
+    s_cliRaw.devOrd = (uint8_t)dev;
+    s_cliRaw.result = mbErr_pending;
+    s_cliRawBusy    = 1;
+
+    int r = Modbus_RawTransfer(&s_cliRaw, 3000u, cli_raw_done, NULL);
+    if (r != 0) {
+        s_cliRawBusy = 0;
+        TRice("Modbus raw: rejected (%d)\n", r);
+    }
+}
+
 /**
  * Modbus command: drive the module.
  *
  * There is no start/stop (Modbus_Init is the entire lifecycle and what gets
- * polled is decided by SUBSCRIPTIONS), no `set baud` (a device parameter), no
- * `port` (a device lives on a port; that is config), no raw `write` (there is
- * no raw write path) and no `probe` (no direct bus access at all) — each was a
- * knob on something that is now either config or nobody's business outside the
- * module (docs/modbus.md §8.2).
+ * polled is decided by SUBSCRIPTIONS), no `set baud` (a device parameter) and
+ * no `port` (a device lives on a port; that is config) — each was a knob on
+ * something that is now either config or nobody's business outside the module
+ * (docs/modbus.md §8.2).
+ *
+ * `raw` IS THE ONE EXCEPTION, and it is new: there IS a raw path now, added
+ * for the Modbus TCP gateway (docs/design_solis_modbus_link.md §6.4).  It
+ * bypasses the point model entirely — no access bit, no bounds — so it can
+ * write any holding register the slave accepts.  It is here because an
+ * operator and the integration harness need the seam without a Modbus TCP
+ * client, not because the CLI grew a bus.
  *
  * Usage:
  *   modbus read / status         — Log engine/config status
@@ -621,6 +711,8 @@ static void cli_request(const char *args, int isWrite)
  *                                  time tables, subscriber count
  *   modbus plan show <id>        — one plan's time tables and point ids
  *   modbus plan del <id>         — free a slot (refused while subscribed)
+ *   modbus raw <dev> <fc> <addr> <count> [values]
+ *                                — one PDU, by WIRE ADDRESS, no point model
  *   modbus inject <hexbytes>     — Stage the reply the next frame gets
  *   modbus silence               — Stage silence for the next frame
  *   modbus lastreq               — The last frame the engine formed
@@ -633,6 +725,8 @@ static void cmd_modbus(const char *args)
         cli_request(args + 4, 0);
     } else if (strncmp(args, "set ", 4) == 0) {
         cli_request(args + 4, 1);
+    } else if (strncmp(args, "raw ", 4) == 0) {
+        cli_raw(args + 4);
     } else if (strncmp(args, "read", 4) == 0) {
         Modbus_LogStatus();
     } else if (strncmp(args, "monitor ", 8) == 0) {
@@ -782,7 +876,7 @@ static void cmd_modbus(const char *args)
         TRiceS("Modbus %s\n", buf);
         Modbus_LogStatus();
     } else {
-        TRice("Usage: modbus read|get|set|monitor|dump|plan|inject|silence|lastreq|status\n");
+        TRice("Usage: modbus read|get|set|raw|monitor|dump|plan|inject|silence|lastreq|status\n");
     }
 }
 

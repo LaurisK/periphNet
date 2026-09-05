@@ -20,7 +20,7 @@ memory map, HTTP API, task table, coding standards.
 
 | Doc | Status | Covers |
 |-----|--------|--------|
-| [design_solis_modbus_link.md](design_solis_modbus_link.md) | **direction — active work** | **The one missing link in `Solis → PeriphNet → solis_modbus → sunSale`.** Why sunSale cannot bypass `solis_modbus` and PeriphNet cannot replace it; the far end's contract (five calls, one transaction at a time, exception-2 as an adaptation signal, FC16 atomicity); the four mismatches against what the board has; and the two candidate shapes. §7 is what is undecided |
+| [design_solis_modbus_link.md](design_solis_modbus_link.md) | **BUILT, not yet on hardware** | **The missing link in `Solis → PeriphNet → solis_modbus → sunSale`, now closed in code.** Why sunSale cannot bypass `solis_modbus` and PeriphNet cannot replace it; the far end's contract (five calls, one transaction at a time, exception-2 as an adaptation signal, FC16 atomicity); the shape chosen (a Modbus TCP server on `:502`) and all six implementation steps. **§7.2 — the gateway is transparent both ways and the tunnel is its only authorization — is the section to read before touching the bind address.** §10 is the hardware acceptance list |
 | [design_remote_access_and_autonomy.md](design_remote_access_and_autonomy.md) | direction | Why autonomy is a hard requirement (the 1 Hz CAN obligation), the two-site topology, and the register-map generator idea. Its WireGuard and MQTT-vs-Modbus sections are superseded — the header says by what |
 | [architecture_backlog.md](architecture_backlog.md) | direction | Everything not being worked. Undeclared context contracts, vocabulary duplication, and §6 **the pinned storage layout** — the largest piece of undesigned architecture in the project |
 

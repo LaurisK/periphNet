@@ -77,6 +77,21 @@ const char* kEchoMaxChg   = "01060bc1005f9a2a"; /* FC06 echo 3009 = 95      */
 /* Same shape, corrupted CRC (valid would end b850) */
 const char* kBadCrcFrame  = "0104020200dead";
 
+/* The GATEWAY SEAM's frames (docs/design_solis_modbus_link.md §9 step 2).
+ * These address REGISTERS, not points, so they are the only replies here whose
+ * shape the config has no say in. */
+const char* kRawRead2     = "010404020000553a03";   /* FC04 x2 = 512, 85    */
+const char* kRawWrite16Ack= "01100bc100021210";     /* FC16 echo, 3009 x2   */
+
+/* ASSERT ON THE FRAME LENGTH, NOT THE OUTCOME.  `modbus raw 0 16 3009 2 95 15`
+ * must put ONE write-multiple frame on the wire —
+ * 01 10 0b c1 00 02 04 00 5f 00 0f 3d 15, thirteen bytes.  An outcome
+ * assertion would pass just as happily against two FC06 writes, which is
+ * exactly the failure the Remote Dispatch block suffers from (§3.5); a
+ * 13-byte frame to slave 1 carrying two registers can only be FC16, while a
+ * decomposed write would show as two 8-byte frames. */
+#define MB_FC16_TX_LEN "Modbus TX[13]:"
+
 /* The fixture config lives in tests/fixtures/modbus_solis.json so that
  * test_modbus_compiler can prove it compiles WITHOUT a board: a config the
  * board would reject is a broken fixture, and finding that out over HTTP is
@@ -297,6 +312,87 @@ void registerModbusTests(TestRunner& runner, const std::string& deviceIp)
                                 "exception 2 not reported as -21");
             }
             return makePass("modbus_exception_reply", "exception 2 -> -21");
+        });
+
+    runner.addTest("modbus_raw_read",
+        "Raw FC04 by wire address: no point, no ptOrd, no decode (§4.11)",
+        [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_raw_read");
+            }
+            dev.drain(300);
+
+            dev.sendCommand(std::string("modbus inject ") + kRawRead2);
+            dev.drain(300);
+
+            /* 3132 is inside the fixture's declared block, but that is
+             * incidental: the raw seam consults no block and no point.  What
+             * comes back is registers, undecoded -- 512 stays 512 and does
+             * not become 51.2 V. */
+            std::vector<std::string> lines;
+            if (!dev.sendAndExpect("modbus raw 0 4 3132 2",
+                                   "Modbus raw: 512 85", 3000, &lines)) {
+                return makeFail("modbus_raw_read",
+                                "no 'Modbus raw: 512 85' -- registers should "
+                                "come back undecoded");
+            }
+            return makePass("modbus_raw_read", "2 registers, undecoded");
+        });
+
+    runner.addTest("modbus_raw_write_is_one_fc16_frame",
+        "FC16 is framed VERBATIM, never decomposed into FC06 writes (§7.3)",
+        [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_raw_write_is_one_fc16_frame");
+            }
+            dev.drain(300);
+
+            dev.sendCommand(std::string("modbus inject ") + kRawWrite16Ack);
+            dev.drain(300);
+
+            /* The fixture's capability declares writeFc 6.  A raw transfer
+             * passes the CLIENT's function code through anyway -- rewriting a
+             * client's FC16 into per-register FC06 writes is the one thing a
+             * gateway may not do here. */
+            std::vector<std::string> lines;
+            if (!dev.sendAndExpect("modbus raw 0 16 3009 2 95 15",
+                                   "Modbus raw:", 3000, &lines)) {
+                return makeFail("modbus_raw_write_is_one_fc16_frame",
+                                "raw FC16 produced no result line");
+            }
+            if (!linesContain(lines, MB_FC16_TX_LEN)) {
+                return makeFail("modbus_raw_write_is_one_fc16_frame",
+                                "the wire did not carry ONE FC16 frame with "
+                                "both registers");
+            }
+            return makePass("modbus_raw_write_is_one_fc16_frame",
+                            "3009..3010 written as a single FC16");
+        });
+
+    runner.addTest("modbus_raw_rejects_bad_shape",
+        "The raw seam validates the PDU's shape and nothing else",
+        [](Device& dev) -> TestOutcome {
+            if (!s_provisioned) {
+                return needsConfig("modbus_raw_rejects_bad_shape");
+            }
+            dev.drain(300);
+
+            /* FC05 is not one of 3/4/6/16 -- refused before a frame is
+             * formed, so no reply needs staging. */
+            if (!dev.sendAndExpect("modbus raw 0 5 3132 1",
+                                   "Modbus raw: rejected", 2000)) {
+                return makeFail("modbus_raw_rejects_bad_shape",
+                                "fc 5 was not rejected");
+            }
+            /* FC06 lands exactly one register; asking for two is a shape
+             * error, not something to try on the wire. */
+            if (!dev.sendAndExpect("modbus raw 0 6 3009 2 95 15",
+                                   "Modbus raw: rejected", 2000)) {
+                return makeFail("modbus_raw_rejects_bad_shape",
+                                "fc 6 with count 2 was not rejected");
+            }
+            return makePass("modbus_raw_rejects_bad_shape",
+                            "fc 5 and fc 6 x2 both refused");
         });
 
     runner.addTest("modbus_teardown",
