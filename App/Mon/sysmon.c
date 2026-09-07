@@ -301,7 +301,14 @@ static void sample(uint32_t now_ms)
             if (slot->sinceCheckin_ms > slot->deadline_ms) {
                 staleCnt++;
                 if (!slot->stale) {
-                    char line[64];
+                    /* 80, not 64: a task name plus two 10-digit millisecond
+                     * counts is 72 bytes worst case, and this is the line that
+                     * names WHICH task stalled and by how much -- truncating
+                     * the deadline off the end of the one message that
+                     * explains a stall is the wrong 16 bytes to save.  The
+                     * optimiser is what surfaced it (-Wformat-truncation
+                     * needs value-range propagation to fire). */
+                    char line[80];
                     slot->stale = 1u;
                     slot->staleCnt++;
                     snprintf(line, sizeof(line), "%s: no check-in for %u ms "

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is BUILT AND VERIFIED IN THE FIELD** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address). `Pd1.1.47` runs on both boards, confirmed and golden, since 2026-09-05; **all 48 register groups `solis_modbus` reads returned data from the live Solis**, worst 268 ms against a 1500 ms budget, with the exception map behaving as designed. Measurements and what is still outstanding — step 6 unapplied, HA not yet pointed at the board, no write ever made — are in §10 of that document.
+**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is BUILT AND VERIFIED IN THE FIELD** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address). `Pd1.1.49` was left running, confirmed and golden, on both boards on 2026-09-05 (board 1 has since moved to `Pd1.1.51`); **sodas has been off the tunnel since 2026-09-06 02:01 and its state is unobserved — see [docs/issue_wg_sodas_offline_2026-09-06.md](docs/issue_wg_sodas_offline_2026-09-06.md)**; **all 48 register groups `solis_modbus` reads returned data from the live Solis**, worst 268 ms against a 1500 ms budget, with the exception map behaving as designed. Measurements and what is still outstanding — step 6 unapplied, HA not yet pointed at the board, no write ever made — are in §10 of that document.
 
 **Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic HA bridge that was an ordinary consumer (**that bridge was MQTT and has since been removed**, §9.1 of the Solis link doc; the Trice sink is now the reference subscriber). **Not yet run on hardware.**
 
@@ -25,7 +25,8 @@ the design assessment of moving that wait to a timer + callback:
 ## Build and Flash
 
 ```bash
-# First time
+# First time -- defaults to the `mixed` optimisation profile (vendor -Os,
+# first-party -Og, crypto -O2).  -DPERIPHNET_OPT=debug|mixed|size|speed.
 cmake -B build -S .
 
 # Build both targets
@@ -47,44 +48,82 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 **Prerequisites:** ARM GCC toolchain, CMake 3.22+, JLinkExe
 
 **Build output:**
-- `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
-- `build/application.elf` / `.bin` — **all three regions are tight, and
-  FLASH IS NOW THE TIGHTEST** (measured 2026-09-07, with the cluster module in):
+- `build/bootloader.elf` / `.bin` — **~14.8 KB flash of 32 KB (45 %)**, ~2.9 KB
+  RAM. It was ~24 KB until the optimisation profile landed
+- `build/application.elf` / `.bin` — **FLASH IS NO LONGER THE CONSTRAINT; SRAM
+  IS** (measured 2026-09-07 with the cluster module in, on the default `mixed`
+  profile):
 
   | Region | Used | Limit | | Free |
   |---|---|---|---|---|
-  | Flash (`.text`+`.rodata`+`.data`) | 490,796 | 491,520 | **99.85 %** | **724 B** |
-  | Main SRAM (`.bss`+`.data`+heap/stack) | 128,216 | 131,072 | **97.8 %** | 2.9 KB |
+  | Flash (`.text`+`.rodata`+`.data`+vectors+header) | 307,940 | 491,520 | **62.7 %** | **183.6 KB** |
+  | Main SRAM (`.bss`+`.data`+heap/stack) | 128,700 | 131,072 | **98.2 %** | 2.3 KB |
   | CCM (`.ccmram`+`.ccmheap`) | 59,124 | 65,536 | **90.2 %** | 6.3 KB |
 
-  **`CMAKE_BUILD_TYPE` IS UNSET, SO THE DEFAULT BUILD CARRIES NO `-O` FLAG AT
-  ALL** — every flash figure above, and every one this file has ever recorded,
-  is `-O0` code. The identical tree built with `-DCMAKE_BUILD_TYPE=Release`
-  (`-O2`) is **353,988 bytes, 72.0 %, 134 KB free**, and its SRAM is unchanged
-  at 97.7 %. So the next feature is budgeted against **2.8 KB**, or against
-  134 KB with one CMake flag — a project decision, not a per-module one.
-  Turning optimisation on changes what a debugger shows and what a stack
-  high-water mark reads, so it is not a change to make silently.
+  **THE BUILD IS OPTIMISED PER BUCKET, NOT PER BUILD TYPE.** Until 2026-09-07
+  `CMAKE_BUILD_TYPE` was unset while `CMAKE_C_FLAGS_DEBUG` and
+  `CMAKE_C_FLAGS_RELEASE` were both defined, so **neither applied** and every
+  image this project ever shipped or measured was `-O0` — which is how flash
+  reached 99.85 % with 724 bytes free. `PERIPHNET_OPT` replaces that:
 
-  **AT 724 BYTES THE DEFAULT BUILD IS EFFECTIVELY FULL.** `Pd1.1.51` links,
-  packages and is confirmed on board 1, but the next feature of any size will
-  not fit at `-O0`. Note also that `CMAKE_C_FLAGS_DEBUG` and
-  `CMAKE_C_FLAGS_RELEASE` are both defined while `CMAKE_BUILD_TYPE` is unset,
-  so neither applies — which looks like an oversight rather than a decision,
-  since nobody writes both flag sets in order to use neither.
+  ```bash
+  cmake -B build -S .                       # mixed (default)
+  cmake -B build -S . -DPERIPHNET_OPT=debug # everything -O0, the old behaviour
+  cmake -B build -S . -DPERIPHNET_OPT=size  # everything -Os
+  cmake -B build -S . -DPERIPHNET_OPT=speed # everything -O2
+  ```
+
+  | profile | app | vendor | crypto | app flash | free | BL flash |
+  |---|---|---|---|---|---|---|
+  | `debug` | `-O0` | `-O0` | `-O0` | 478,216 (97.3 %) | 13.0 KB | 24,380 |
+  | **`mixed`** | **`-Og`** | **`-Os`** | **`-O2`** | **307,940 (62.7 %)** | **183.6 KB** | **14,780** |
+  | `size` | `-Os` | `-Os` | `-Os` | 277,076 (56.4 %) | 209.4 KB | 13,708 |
+  | `speed` | `-O2` | `-O2` | `-O2` | 329,728 (67.1 %) | 158.0 KB | 14,816 |
+
+  **SRAM and CCM are the same to within 64 bytes in all four** — optimisation
+  buys flash and nothing else here, so the profile is not a way out of the
+  `.bss` budget.
+
+  Why mixed rather than a whole-tree `-O2`: **vendor code** (HAL, lwIP,
+  FreeRTOS, USB, BSP, wireguard-lwip, trice) is the majority of the image,
+  nobody steps through it and nobody is going to fix it, so it goes at `-Os`;
+  **first-party `App/`, `Shared/`, `Core/`, `bootloader/`** stay at `-Og`,
+  which is the level GCC documents as not interfering with debugging — locals
+  and stack frames stay recognisable and the LR-scan backtrace in
+  `App/Log/crash.c` still resolves; **`Shared/Crypto`** goes at `-O2` because
+  the OTA install streams the whole image through GCM three times and the BL
+  HMACs it again at every boot. `-fno-strict-aliasing` is global and not
+  optional — this tree reads flash records, Modbus frames, `.pnfw` manifests
+  and JSON straight out of byte buffers. `-flto` is deliberately NOT enabled:
+  weak HAL callbacks, `__attribute__((section))` placement and the in-place
+  HMAC patch each need their own verification.
+
+  **Optimisation changes what a debugger shows and what a stack high-water
+  mark reads.** The sysmon percentages and any stack figure recorded before
+  2026-09-07 were measured at `-O0`; re-measure rather than compare. Build
+  with `-DPERIPHNET_OPT=debug` when stepping through something that has been
+  optimised away. Note also that the **STM32CubeIDE managed build has its own
+  `-O` flags** and no longer matches CMake.
+
+  Two vendor warnings appear only once the optimiser runs
+  (`x25519.c` `-Wstringop-overread`, `triceDoubleBuffer.c`
+  `-Wmaybe-uninitialized`); both were analysed as false positives and are
+  silenced per file in `CMakeLists.txt`, with the reasoning there. The 22
+  host unit tests pass built at `-O2 -fno-strict-aliasing`.
 
   **Measured 2026-09-05 with the Modbus TCP gateway in.** Removing MQTT
   returned 20.1 KB of flash (97.2 % → 93.1 %), 1.3 KB of SRAM and 1.4 KB of
   CCM; the gateway then spent **6.0 KB of flash, 440 B of SRAM and 772 B of
   CCM** of it, plus 3 KB of `.ccmheap` for the `mbtcp` task stack at runtime.
-  Net against the pre-MQTT-removal image: 14.1 KB of flash still in hand.
-  *(That 2026-09-05 note is superseded above: the cluster module spent
-  24.4 KB of `-O0` flash and 2.1 KB of SRAM, and flash overtook SRAM.)*
+  *(Those percentages are `-O0` and are superseded by the table above; the
+  SRAM and CCM figures still stand.)*
 
-  A new multi-KB `.bss` array still does not fit, and at `-O0` neither does a
-  new multi-KB `.text`. Budget before adding anything — and remember OTA is the only
-  delivery path to a deployed board. The `.bin` is signed in-place
-  (IMAGE_SIZE + HMAC patched) after every build
+  A new multi-KB `.bss` array still does not fit — budget SRAM before adding
+  anything, and remember OTA is the only delivery path to a deployed board.
+  The blob shrank with the image: `periphnet_fwu.pnfw` is **308 KB, down from
+  478 KB**, which is directly less time with the CPU pinned at 100 % during an
+  upload. The `.bin` is signed in-place (IMAGE_SIZE + HMAC patched) after
+  every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
   used for OTA (needs python3 `cryptography` + `intelhex` packages)
@@ -127,7 +166,10 @@ sources, includes, defines (`APPLICATION_BUILD`), linker script
 (`App/application.ld`), Trice insert/clean pre/post steps and post-build
 `dfu_image_tool.py sign`, so `Debug/application.bin` is a signed, flashable
 image. It cannot build the bootloader or the `.pnfw` blob — use CMake for
-those. Headless check:
+those. **It does NOT carry the `PERIPHNET_OPT` buckets**: its Debug/Release
+configurations have their own `-O` flags, so a CubeIDE image is a different
+size from the CMake one and neither its flash figures nor its stack high-water
+marks are comparable. Headless check:
 ```bash
 /opt/st/stm32cubeide_1.17.0/headless-build.sh \
     -data /tmp/ws -import . -cleanBuild PeriphNet/Debug

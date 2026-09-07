@@ -33,12 +33,105 @@ set(MCU_FLAGS "-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard")
 # the call path now comes from the stack LR scan in App/Log/crash.c, which needs
 # no frame chain (the ZhagaFW crash_handler.c approach, commit 3130846).
 set(COMMON_FLAGS
-    "${MCU_FLAGS} -Wall -fdata-sections -ffunction-sections"
+    "${MCU_FLAGS} -Wall -fdata-sections -ffunction-sections -g3 -fno-strict-aliasing"
 )
 set(CMAKE_C_FLAGS          "${COMMON_FLAGS}")
-set(CMAKE_C_FLAGS_DEBUG    "-g3 -O0")
-set(CMAKE_C_FLAGS_RELEASE  "-O2")
+
+# EMPTY ON PURPOSE.  These used to hold the -O flags while CMAKE_BUILD_TYPE was
+# unset, so neither ever applied -- nobody writes both flag sets in order to use
+# neither, and the result was an accidental -O0 ship.  Optimisation now comes
+# from PERIPHNET_OPT below; CMAKE_BUILD_TYPE keeps only its defines.  -g3 moved
+# into COMMON_FLAGS so debug info does not depend on a build type either (it
+# costs nothing in flash -- objcopy does not carry .debug_* into the .bin).
+set(CMAKE_C_FLAGS_DEBUG    "")
+set(CMAKE_C_FLAGS_RELEASE  "")
 set(CMAKE_ASM_FLAGS        "${MCU_FLAGS} -x assembler-with-cpp")
+
+# ==============================================================================
+# Optimisation — the MIXED profile
+# ==============================================================================
+#
+# WHY THIS IS NOT ONE -O FLAG.  Until now CMAKE_BUILD_TYPE was unset while both
+# CMAKE_C_FLAGS_DEBUG and CMAKE_C_FLAGS_RELEASE were defined, so NEITHER
+# applied and every image this project ever measured was built with no -O flag
+# at all.  That put the default build at 99.85 % of flash with 724 bytes free.
+# The whole-tree answer (-DCMAKE_BUILD_TYPE=Release) gets it to 72 %, but it
+# also optimises the code that is under active development, which changes what
+# the debugger shows and what a stack high-water mark reads — the two things
+# this project diagnoses field failures with.
+#
+# So optimisation is chosen PER BUCKET, not per build:
+#
+#   OPT_VENDOR  third-party and generated code — the HAL, lwIP, FreeRTOS, the
+#               USB device library, the BSP PHY driver, wireguard-lwip, trice.
+#               Nobody steps through it and nobody is going to fix it, so it
+#               is compiled for size.  It is also the majority of the image,
+#               which is why this bucket is where the flash comes back.
+#
+#   OPT_APP     first-party App/, Shared/, Core/ and bootloader/ — the code
+#               that gets debugged.  -Og, which is the level GCC documents as
+#               "optimise without interfering with debugging": no inlining of
+#               everything, stack frames and locals stay recognisable, and the
+#               LR-scan backtrace in App/Log/crash.c still resolves.
+#
+#   OPT_HOT     Shared/Crypto — AES-128, GCM, SHA-256, HMAC.  Pure computation
+#               on the OTA install path (the bootloader streams the whole image
+#               through it three times), tested against NIST vectors, and small
+#               enough that -O2 costs little.  Speed, not size.
+#
+# PROFILES.  PERIPHNET_OPT selects the set; `mixed` is the default.
+#
+#   debug   everything -O0          — what this project shipped by accident
+#   mixed   vendor -Os, app -Og     — the default
+#   size    everything -Os          — for when flash is the only question
+#   speed   everything -O2          — fastest, least debuggable
+#
+# CMAKE_BUILD_TYPE NO LONGER PICKS AN OPTIMISATION LEVEL.  It still selects the
+# DEBUG / USE_FULL_ASSERT defines below, but the -O flags come from here, so
+# setting it can no longer silently do nothing (and can no longer silently
+# undo a bucket).  Per-source options are appended after CMAKE_C_FLAGS and the
+# per-config flags on the command line, and GCC honours the LAST -O it sees —
+# that ordering is what makes the buckets authoritative.
+#
+# -fno-strict-aliasing IS NOT OPTIONAL HERE.  At -O0 the aliasing rules are
+# unenforced; from -Og upward GCC assumes objects of different types do not
+# overlap.  This firmware reads flash records, Modbus frames, .pnfw manifests
+# and JSON straight out of byte buffers, and the crash recorder walks a stack
+# as words.  Turning that assumption on across a tree written without it is
+# how a build starts miscompiling one function in a way no test reproduces.
+# The flag costs almost nothing and it is bought once, here, for every bucket.
+#
+# NOT DONE, DELIBERATELY: -flto.  The image depends on weak HAL callbacks being
+# overridden at link time, on __attribute__((section)) placement for
+# .app_header / .bl_api / .ccmram, and on a .bin whose HMAC is patched in
+# place afterwards.  LTO is a separate piece of work with its own verification,
+# not a flag to add alongside this one.
+
+set(PERIPHNET_OPT "mixed" CACHE STRING
+    "Optimisation profile: debug | mixed | size | speed")
+set_property(CACHE PERIPHNET_OPT PROPERTY STRINGS debug mixed size speed)
+
+if(PERIPHNET_OPT STREQUAL "debug")
+    set(OPT_APP    "-O0")
+    set(OPT_VENDOR "-O0")
+    set(OPT_HOT    "-O0")
+elseif(PERIPHNET_OPT STREQUAL "mixed")
+    set(OPT_APP    "-Og")
+    set(OPT_VENDOR "-Os")
+    set(OPT_HOT    "-O2")
+elseif(PERIPHNET_OPT STREQUAL "size")
+    set(OPT_APP    "-Os")
+    set(OPT_VENDOR "-Os")
+    set(OPT_HOT    "-Os")
+elseif(PERIPHNET_OPT STREQUAL "speed")
+    set(OPT_APP    "-O2")
+    set(OPT_VENDOR "-O2")
+    set(OPT_HOT    "-O2")
+else()
+    message(FATAL_ERROR
+            "PERIPHNET_OPT must be debug, mixed, size or speed "
+            "(got '${PERIPHNET_OPT}')")
+endif()
 
 # ==============================================================================
 # Global compile definitions (shared by both targets)
@@ -235,6 +328,12 @@ target_include_directories(bootloader.elf PRIVATE
 target_compile_definitions(bootloader.elf PRIVATE
     BOOTLOADER_BUILD
 )
+
+# The bootloader is first-party except for the HAL it drags in, so it takes the
+# OPT_APP baseline here and the HAL/crypto buckets are applied to those sources
+# further down (source-level options come last on the command line, so they win
+# over this one).  Its 32 KB ceiling makes this the target that benefits most.
+target_compile_options(bootloader.elf PRIVATE ${OPT_APP})
 
 set_target_properties(bootloader.elf PROPERTIES
     LINK_FLAGS "${BL_LINK_FLAGS}"
@@ -778,6 +877,83 @@ add_executable(application.elf
 add_dependencies(application.elf trice-insert)
 
 # ------------------------------------------------------------------------------
+# The optimisation buckets (see PERIPHNET_OPT at the top of this file)
+#
+# OPT_APP is the target baseline: everything in App/, Shared/, Core/ compiles
+# at the level chosen for code that is still debugged.  The two lists below
+# then override it per source.  GCC honours the LAST -O on the command line and
+# CMake emits source-level options after target-level ones, so an entry in
+# OPT_VENDOR_SOURCES or SHARED_CRYPTO_SOURCES wins over the baseline without
+# either list having to know about the other.
+#
+# These are COMPILE_OPTIONS on the source, which is a different property from
+# the COMPILE_DEFINITIONS on wireguardif.c and from the -Werror=switch /
+# float-purity options set on the cluster and enum-name sources below -- those
+# carry no -O, so the baseline still reaches them.  Nothing here clobbers
+# anything there.
+
+target_compile_options(application.elf PRIVATE ${OPT_APP})
+
+# Third-party and generated code.  Not debugged, not ours to fix, and the
+# majority of the image.  Core/ is NOT here: CubeMX generates it but main.c,
+# stm32f4xx_it.c and the MSP are stepped through like any other first-party
+# file.
+set(OPT_VENDOR_SOURCES
+    ${HAL_SOURCES}
+    ${BSP_SOURCES}
+    ${LWIP_SOURCES}
+    ${FREERTOS_SOURCES}
+    ${USB_DEVICE_SOURCES}
+    ${WIREGUARD_SOURCES}
+)
+set_source_files_properties(${OPT_VENDOR_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "${OPT_VENDOR}"
+)
+
+# trice is its own static library target, so it takes the bucket as a target
+# option rather than per source.
+target_compile_options(trice PRIVATE ${OPT_VENDOR})
+
+# TWO VENDOR WARNINGS THAT ONLY EXIST ONCE THE OPTIMISER RUNS.  Both were
+# analysed when this profile landed and both are false positives; they are
+# silenced per file, with the reasoning here, so that a clean build stays a
+# meaningful signal instead of two lines everyone learns to scroll past.
+#
+#  * x25519.c -Wstringop-overread on `mul(z2, x2, a24, 1)`.  `mul`'s third
+#    parameter is declared `const fe b` (limb_t[8]) but the function only ever
+#    reads b[0..nb-1], and every caller passes the matching nb -- here a24 is
+#    limb_t[1] with nb = 1.  GCC checks the DECLARED bound, not the used one.
+#    Passing a shorter array with an explicit length is the upstream idiom and
+#    it is correct; changing the signature would mean patching the submodule.
+#
+#  * triceDoubleBuffer.c -Wmaybe-uninitialized on `readBuf`.  It is assigned
+#    under `if (tLen32)` and read under a second `if (tLen32)` on the same
+#    local, which nothing between them can modify (its address is never taken;
+#    the critical-section macros are barriers, not writes).  The warning only
+#    appears after TriceOut is inlined into TriceTransfer, which is the
+#    classic shape of a conservative -Wmaybe-uninitialized.
+#
+# Both are scoped to the one file.  Never global: a real uninitialised read in
+# App/ or Shared/ is exactly the kind of bug -Og is worth having.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/wireguard-lwip/src/crypto/refc/x25519.c
+    PROPERTIES COMPILE_OPTIONS "${OPT_VENDOR};-Wno-stringop-overread"
+)
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/trice/src/triceDoubleBuffer.c
+    TARGET_DIRECTORY trice
+    PROPERTIES COMPILE_OPTIONS "-Wno-maybe-uninitialized"
+)
+
+# The hot bucket: the OTA install path streams the whole image through GCM
+# three times (CRC pass, verify pass, program pass) and the bootloader HMACs it
+# again at every boot.  Directory-scoped rather than target-scoped on purpose
+# -- the bootloader wants this more than the application does.
+set_source_files_properties(${SHARED_CRYPTO_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "${OPT_HOT}"
+)
+
+# ------------------------------------------------------------------------------
 # -Werror=switch, SCOPED to the files that carry an enum->string accessor
 #
 # Each of these files answers "what is this enumerator called" with a switch
@@ -1019,6 +1195,7 @@ message(STATUS "")
 message(STATUS "=== PeriphNet Phase 3 – Bootloader + Application ===")
 message(STATUS "MCU:            STM32F407VET6")
 message(STATUS "Build type:     ${CMAKE_BUILD_TYPE}")
+message(STATUS "Optimisation:   ${PERIPHNET_OPT}  (app ${OPT_APP}, vendor ${OPT_VENDOR}, crypto ${OPT_HOT})")
 message(STATUS "Bootloader LD:  ${BL_LINKER_SCRIPT}")
 message(STATUS "Application LD: ${APP_LINKER_SCRIPT}")
 message(STATUS "")
