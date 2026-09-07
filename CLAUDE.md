@@ -157,7 +157,15 @@ curl http://10.42.0.203/api/image/info                 # stored image (name/vers
 curl http://10.42.0.203/api/fwu/status                 # FWU state (running/golden/confirmed)
 curl http://10.42.0.203/api/system/status              # tasks, stacks, heap, CPU, IWDG margin
 
-# Full OTA cycle (blob only — plaintext .bin uploads are rejected)
+# THE SCRIPT: firmware and/or web UI, with the confirm/rollback semantics
+# built in (docs/reference_deploy.md).  It deliberately does NOT confirm
+# unless asked -- confirming disarms the only rollback the board has.
+./tools/deploy.sh sodas                 # full cycle, stops before confirm
+./tools/deploy.sh sodas --ui-only       # just the page: no reboot, safe
+./tools/deploy.sh zaliakalnis --fw-only --confirm   # health-gated confirm
+# sodas = 10.77.0.5, zaliakalnis = 10.77.0.64; any host/IP also works
+
+# Full OTA cycle by hand (blob only — plaintext .bin uploads are rejected)
 curl -X POST -H "X-Filename: periphnet_fwu.pnfw" \
   --data-binary @build/periphnet_fwu.pnfw \
   http://10.42.0.203/api/image/upload
