@@ -71,6 +71,12 @@ typedef struct {
     uint16_t balanceEnable;
     uint16_t chargeLimit;
     uint16_t dischargeLimit;
+    /* THE OTHER HALF OF A PYLONTECH 0x351.  The JK states these PER CELL, so
+     * a pack-level limit needs a cell count as well -- which is why all three
+     * are here and why the capability is confirmed on all three. */
+    uint16_t chargeVoltage;         /* reg 4128, mV PER CELL                 */
+    uint16_t powerOffVoltage;       /* reg 4136, mV PER CELL                 */
+    uint16_t cellCount;             /* reg 4204, the JK's OWN count          */
     uint16_t cell[PACK_CELLS_MAX];
     uint16_t leadRes[PACK_CELLS_MAX];
 } sJkPoints;
@@ -82,6 +88,15 @@ typedef struct {
     uint32_t      cellGroups;
     uint32_t      frameOpen_ms;     /* when the open frame started, for Tick  */
     uint32_t      cellOpen_ms;
+    /* THE THREE INPUTS TO A PACK-LEVEL VOLTAGE LIMIT, kept because they
+     * arrive in different samples and possibly different transactions: a
+     * per-cell voltage is useless until a cell count has landed, and vice
+     * versa.  `cellsCfg` is the operator's declaration, used only when the
+     * JK's own count is not polled. */
+    uint16_t      chgVoltCell_mV;
+    uint16_t      dsgVoltCell_mV;
+    uint8_t       cellsLive;        /* the JK's own cell_count, once seen     */
+    uint8_t       cellsCfg;         /* from the pack configuration            */
     uint8_t       tempSeen;         /* a temperature landed in THIS frame     */
     uint8_t       balanceState;     /* hi byte of balsta_soc                  */
     uint8_t       unbindPending;    /* Unbind waited for a borrowed reqItem   */
@@ -176,6 +191,46 @@ static void PublishStats(uint8_t idx)
     in->statDirty = 0u;
 }
 
+/**
+ * @brief  Recompute the two PACK-LEVEL voltage limits from their three
+ *         per-cell / count inputs.
+ *
+ * Called after any of the three lands, because they arrive in different
+ * samples and may arrive in different transactions -- a per-cell voltage is
+ * useless until a cell count has landed, and a cell count is useless until a
+ * voltage has.
+ *
+ * IT WRITES NOTHING UNTIL ALL THREE ARE REAL.  A zero charge-voltage limit is
+ * not "no limit", it is an instruction to stop charging
+ * (docs/design_battery_cluster.md, contract 2), so publishing a plausible-
+ * looking zero while waiting for a sample would be worse than publishing
+ * nothing: the consumer gates on the capability bit and the group age, and
+ * both say "not yet" on their own.
+ *
+ * The JK's OWN count wins over the operator's declaration whenever it has
+ * been polled -- a measurement beats a statement about the same fact.
+ */
+static void UpdateVoltLimits(sJkInst *in, sPackRaw *raw)
+{
+    const uint8_t cells = (in->cellsLive > 0u) ? in->cellsLive : in->cellsCfg;
+
+    if ((raw == NULL) || (cells == 0u) || (cells > (uint8_t)PACK_CELLS_MAX)) {
+        return;
+    }
+    if (in->chgVoltCell_mV > 0u) {
+        raw->chargeVoltLimit_mV = (uint32_t)in->chgVoltCell_mV * cells;
+    }
+    if (in->dsgVoltCell_mV > 0u) {
+        /* THE DISCHARGE LIMIT IS THE FLOOR, and power_off_voltage is what the
+         * JK itself stops at -- not float_voltage, which is a charge-side
+         * setting, and not vol_soc0, which is an SOC calibration point. */
+        raw->dischargeVoltLimit_mV = (uint32_t)in->dsgVoltCell_mV * cells;
+    }
+    if ((in->chgVoltCell_mV > 0u) || (in->dsgVoltCell_mV > 0u)) {
+        in->groups |= PACK_GRP_BIT(packGrp_limits);
+    }
+}
+
 static void CloseCellFrame(uint8_t idx)
 {
     sPackCells *cells = PackType_CellStaging(idx);
@@ -215,6 +270,7 @@ static const sPackType s_jkBmsType = {
                                (uint32_t)packCap_soh           |
                                (uint32_t)packCap_temperatures  |
                                (uint32_t)packCap_currentLimits |
+                               (uint32_t)packCap_voltageLimits |
                                (uint32_t)packCap_switchState   |
                                (uint32_t)packCap_cellSummary   |
                                (uint32_t)packCap_cellDetail    |
@@ -467,6 +523,9 @@ static void walk_points(uint8_t devOrd, sJkInst *in, uint32_t *caps,
         JK_MAP(balanceEnable,   "balance_enable")
         JK_MAP(chargeLimit,     "charge_current_max")
         JK_MAP(dischargeLimit,  "discharge_current_max")
+        JK_MAP(chargeVoltage,   "charge_voltage")
+        JK_MAP(powerOffVoltage, "power_off_voltage")
+        JK_MAP(cellCount,       "cell_count")
 #undef JK_MAP
         else {
             continue;
@@ -514,6 +573,22 @@ static void walk_points(uint8_t devOrd, sJkInst *in, uint32_t *caps,
         (in->pt.dischargeLimit != JK_PT_NONE)) {
         *caps |= (uint32_t)packCap_currentLimits;
     }
+    /* packCap_voltageLimits NEEDS A CELL COUNT AS WELL AS TWO VOLTAGES, and
+     * that is the whole reason this capability went unproduced while its two
+     * fields sat in sPackState: the JK states charge_voltage and
+     * power_off_voltage PER CELL, and a pack-level limit is the per-cell
+     * figure times the number of cells.  A WRONG CVL IS THE SINGLE MOST
+     * DANGEROUS NUMBER IN A BMS FRAME -- it is what an inverter charges the
+     * bus up to -- so the count must be known, never assumed: either the JK
+     * publishes its own (reg 4204) or the operator declared one.  With
+     * neither, the capability is not advertised and the consumer treats the
+     * fields as absent rather than as zero, which is what
+     * docs/design_battery_cluster.md §7.4 requires of it. */
+    if ((in->pt.chargeVoltage != JK_PT_NONE) &&
+        (in->pt.powerOffVoltage != JK_PT_NONE) &&
+        ((in->pt.cellCount != JK_PT_NONE) || (in->cellsCfg > 0u))) {
+        *caps |= (uint32_t)packCap_voltageLimits;
+    }
     if (in->pt.chgDsgState != JK_PT_NONE) {
         *caps |= (uint32_t)packCap_switchState;
     }
@@ -541,6 +616,10 @@ static int Bind(const sPackBindInfo *info, sPackBindResult *res)
     in = &s_jk[info->idx];
     (void)memset(in, 0, sizeof(*in));
     points_clear(&in->pt);
+    /* Set BEFORE walk_points, which confirms packCap_voltageLimits against
+     * it: the operator's declaration is the fallback cell count when the JK's
+     * own is not polled. */
+    in->cellsCfg = info->cellCount;
 
     if (resolve_dev(info->bindKey, &in->devOrd, &polled) != 0) {
         /* Zero matches or several: the instance stays absent with a stated
@@ -1014,6 +1093,22 @@ static void ModbusEvent(const sModbusEvent *ev, void *ctx)
         } else if (pt == in->pt.dischargeLimit) {
             raw->dischargeLimit_mA = (uint32_t)ev->u.sample.value;
             in->groups |= PACK_GRP_BIT(packGrp_limits);
+        } else if (pt == in->pt.chargeVoltage) {
+            in->chgVoltCell_mV = (uint16_t)ev->u.sample.value;
+            UpdateVoltLimits(in, raw);
+        } else if (pt == in->pt.powerOffVoltage) {
+            in->dsgVoltCell_mV = (uint16_t)ev->u.sample.value;
+            UpdateVoltLimits(in, raw);
+        } else if (pt == in->pt.cellCount) {
+            const int32_t v = ev->u.sample.value;
+
+            /* RANGE-CHECKED BEFORE IT IS BELIEVED.  It multiplies a per-cell
+             * voltage into the number an inverter charges the bus up to, so a
+             * garbage decode here is a garbage CVL. */
+            if ((v > 0) && (v <= (int32_t)PACK_CELLS_MAX)) {
+                in->cellsLive = (uint8_t)v;
+                UpdateVoltLimits(in, raw);
+            }
         } else {
             cells = PackType_CellStaging(i);
             if (cells == NULL) {

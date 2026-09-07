@@ -68,13 +68,19 @@ typedef struct {                                    /* 112 B                 */
     uint16_t lastLoadMaxChg_pm, lastLoadMaxDsg_pm;
     uint8_t  chgForbidden, dsgForbidden;         /* forbidden->allowed edge  */
     uint8_t  chgBindSeen, dsgBindSeen;
+    /* WAS THE SLEW STILL RATE-LIMITING WHEN IT PRODUCED THE VALUE THE NEXT
+     * TICK WILL MEASURE AGAINST?  Carried per direction, because the gate
+     * needs LAST tick's answer: the measurement it is about to take was made
+     * against last tick's emitted value. */
+    uint8_t  chgSlewing, dsgSlewing;
     uint8_t  started;
     uint8_t  pendingRestart;                     /* eClusterRestart the
                                                     CALLER saw — adoption is
                                                     the one trigger the pure
                                                     core cannot observe       */
-    uint8_t  rsvd[2];
-} sClusterCalcState;
+} sClusterCalcState;                             /* exactly 112 B, no tail
+                                                    padding: the two slew
+                                                    flags took the reserve   */
 
 /** CALLER-OWNED WORKING MEMORY.  Without this the pure core would need file
  *  statics and "the state is the only thing carried" would be unprovable. */

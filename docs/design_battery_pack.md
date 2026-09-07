@@ -11,6 +11,18 @@
 > updates, 2 stale). `pack_pylontech` still registers and refuses to bind —
 > its frame parser does not exist yet.
 >
+> **2026-09-07 — two gaps filled.** `packCap_voltageLimits` finally has a
+> PRODUCER: `pack_jkbms` reads `charge_voltage` (4128) and `power_off_voltage`
+> (4136), both stated PER CELL, and multiplies by a cell count taken from the
+> JK's own `cell_count` (4204) or, failing that, the operator's declaration.
+> All three points were already in both deployed configs and already polled.
+> Measured on board 1: `caps 0x2fd -> 0xafd`, **56 000 mV / 43 200 mV** on a
+> 16S pack — 3500 and 2700 mV per cell. The capability is confirmed on ALL
+> THREE inputs, because a pack-level limit without a cell count is a guess and
+> a wrong CVL is the most dangerous number in a BMS frame. Also:
+> `Pack_AlarmName()` now exists (§8 item 12), so `ePackAlarm` no longer reaches
+> HTTP as a bare integer.
+>
 > Related: [design_bms_cell_health_estimation.md](design_bms_cell_health_estimation.md)
 > (what lives *inside* a pack, later), [modbus.md](modbus.md) §2/§4 (the surface
 > `pack_jkbms` consumes), [pylontech_can_protocol.md](pylontech_can_protocol.md)

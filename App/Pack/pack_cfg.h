@@ -247,6 +247,14 @@ const char *PackCfg_WhyName(uint8_t why);
  */
 const char *PackCfg_SwitchName(uint8_t sw);
 
+/**
+ * @brief  The word for ONE ePackAlarm bit.
+ * @param  bit - a mask with exactly one bit set, not an index
+ * @retval the word, or "?" for an unknown or multi-bit mask.  Never NULL.
+ * @note   Pure.  Any task.
+ */
+const char *PackCfg_AlarmName(uint32_t bit);
+
 #ifdef __cplusplus
 }
 #endif

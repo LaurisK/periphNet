@@ -48,6 +48,7 @@ typedef struct {
     uint16_t *lastLoadMax_pm;
     uint8_t  *forbidden;
     uint8_t  *bindSeen;
+    uint8_t  *slewing;
     uint16_t  derate_pm;
     uint8_t   charge;           /* 1 = charge, 0 = discharge                 */
     uint8_t   bindFlag;         /* eClusterMemberFlag                        */
@@ -371,7 +372,28 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
      * settles at loadTarget x min(L_i/f_i) and the emitted value at
      * loadTarget x derate x min(L_i/f_i), both at or below the binding pack's
      * own limit for EVERY derate (defect L1). */
+    /* AND NOT WHILE THE SLEW WAS STILL CLIMBING TOWARD THE LOOP.  A value the
+     * rate limiter is still moving is not a limit the inverter is respecting
+     * — it is a number this board is walking upward through the bus current —
+     * so `|S| >= published x bindFrac` is satisfied for a reason that has
+     * nothing to do with the battery being at its limit, and the update
+     * ratchets the loop DOWN to wherever the ramp happened to cross the load.
+     *
+     * IT IS A TRAP, NOT A TRANSIENT, because it then latches: the loop lands
+     * low, the emitted value follows it, and the gate can never re-open —
+     * reopening needs a bus draw at 90 % of a limit the loop has just made
+     * too small to reach.  MEASURED ON BOARD 1 (Pd1.1.50, 2026-09-07): a
+     * 150 A pack ramping in against a steady 1.007 A charge settled at a
+     * published limit of 4.1 A, `why: notBinding`, and stayed there — a 36x
+     * throughput loss in the safe direction.
+     *
+     * The condition is LAST tick's, because the current this tick measures
+     * was drawn against last tick's emitted value.  Skipping an update is
+     * unconditionally safe: it can only leave a limit lower than it might
+     * have been.  Downward corrections are untouched — a fall is instant and
+     * is never slew-limited. */
     if ((partCount > 0u) && (loadMax_pm > 0u) && (*d->slewed > 0u) &&
+        (*d->slewing == 0u) &&
         ((absS_mA * 1000u) >=
          ((uint64_t)*d->slewed * (uint64_t)tune->bindFrac_pm))) {
         uint32_t target = (uint32_t)(((uint64_t)*d->slewed *
@@ -450,6 +472,9 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
                 *d->slewed    += step;
                 o->slewLimited = 1u;
             }
+            /* A rise the limiter had to bound means the emitted value is
+             * BELOW what the loop is asking for, so the next tick must not
+             * learn from it. */
         }
     }
     o->slewed_mA = *d->slewed;
@@ -457,6 +482,7 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
     /* PERMISSION AND LIMIT AGREE, ALWAYS.  The zeroing applies to the EMITTED
      * value and never to the loop: a transient alarm must not destroy what the
      * loop learned. */
+    *d->slewing        = o->slewLimited;
     o->published_mA    = (o->allowed != 0u) ? *d->slewed : 0u;
     *d->forbidden      = (uint8_t)((o->allowed != 0u) ? 0u : 1u);
     o->partCount       = partCount;
@@ -616,6 +642,7 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     dChg.lastLoadMax_pm = &st->lastLoadMaxChg_pm;
     dChg.forbidden      = &st->chgForbidden;
     dChg.bindSeen       = &st->chgBindSeen;
+    dChg.slewing        = &st->chgSlewing;
     dChg.derate_pm      = tune->chargeDerate_pm;
     dChg.charge         = 1u;
     dChg.bindFlag       = (uint8_t)cluMemFlag_bindingCharge;
@@ -628,6 +655,7 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     dDsg.lastLoadMax_pm = &st->lastLoadMaxDsg_pm;
     dDsg.forbidden      = &st->dsgForbidden;
     dDsg.bindSeen       = &st->dsgBindSeen;
+    dDsg.slewing        = &st->dsgSlewing;
     dDsg.derate_pm      = tune->dischargeDerate_pm;
     dDsg.charge         = 0u;
     dDsg.bindFlag       = (uint8_t)cluMemFlag_bindingDischarge;

@@ -377,6 +377,68 @@ static void test_loop_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit(voi
     TEST_ASSERT(f.out.pub.chargeLoop_mA <= 6827u);
 }
 
+/** THE RAMP-IN TRAP, found on hardware and not by any of the cases above.
+ *
+ *  The slew starts at zero and walks upward.  While it is walking, the emitted
+ *  value is not a limit the inverter is respecting — it is a number the board
+ *  is moving through the bus current — so the gate opens for a reason that has
+ *  nothing to do with the battery being at its limit, and the update ratchets
+ *  the loop DOWN to wherever the ramp crossed the load.
+ *
+ *  IT THEN LATCHES: re-opening the gate needs a bus draw at 90 % of a limit
+ *  the loop has just made too small to reach.
+ *
+ *  MEASURED ON BOARD 1 (Pd1.1.50, 2026-09-07), and these are its real numbers:
+ *  a 150 A pack, a steady 1.007 A charge, the default 5 A/s rise.  It settled
+ *  at a published charge limit of 4.112 A with `why: notBinding` and stayed
+ *  there — a 36x throughput loss.  This test reproduces it exactly and must
+ *  FAIL against the pre-fix loop. */
+static void test_loop_does_not_learn_while_the_slew_is_still_ramping_in(void)
+{
+    sFix     f;
+    unsigned t;
+
+    fix_init(&f);
+    f.tune.riseRate_mA_per_s = CLUSTER_DFLT_RISE_MA_PER_S;   /* 5 A/s        */
+    pack_online(&f.in[0], 0u, 150000u, 150000u);
+    f.in[0].current_mA = 1007;                  /* the board's real reading  */
+
+    /* 40 s of 250 ms ticks: long enough for the ramp to cross 1.007 A many
+     * times over and to reach the derated start value. */
+    for (t = 0u; t < 160u; t++) {
+        step(&f, 1u, 250u);
+    }
+
+    /* The loop must still be holding the SAFE OPENING VALUE, min(L_i) — it
+     * has been given no measurement worth learning from. */
+    TEST_ASSERT(f.out.pub.chargeLoop_mA == 150000u);
+    /* And the emitted value is that, derated: 150 A x 0.80 = 120 A, which is
+     * what the JK itself would have sent.  NOT 4.1 A. */
+    TEST_ASSERT(f.out.pub.chargeLimit_mA == 120000u);
+    TEST_ASSERT(f.st.chgBindSeen == 0u);
+}
+
+/** The other half of the same rule: once the slew HAS settled, a genuine
+ *  measurement at the limit is still learned from.  Without this the fix
+ *  above could be "never learn anything" and pass. */
+static void test_loop_still_learns_once_the_slew_has_settled(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
+    settle(&f, 1u);                             /* ramp in, no current       */
+    TEST_ASSERT(f.out.pub.chargeLimit_mA == 100000u);
+    TEST_ASSERT(f.st.chgSlewing == 0u);
+
+    f.in[0].current_mA = 100000;                /* the bus really is at it   */
+    step(&f, 1u, BIG_DT);
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 1000u);
+    TEST_ASSERT(f.out.pub.chargeLoop_mA == 90000u);      /* 0.9 x 100 A      */
+    TEST_ASSERT(f.st.chgBindSeen == 1u);
+}
+
 /** Review B5, and the reason it is not merely a division guard: a zero limit
  *  with current flowing is a pack ALREADY over its rating.  It saturates at
  *  1000 per-mille, which makes the loop reduce. */
@@ -1369,6 +1431,8 @@ int main(void)
     RUN_TEST(test_loop_converges_in_one_step_identical);
     RUN_TEST(test_loop_does_not_update_when_the_bus_is_not_binding);
     RUN_TEST(test_loop_never_exceeds_min_limit_over_share);
+    RUN_TEST(test_loop_does_not_learn_while_the_slew_is_still_ramping_in);
+    RUN_TEST(test_loop_still_learns_once_the_slew_has_settled);
     RUN_TEST(test_loop_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit);
     RUN_TEST(test_loop_saturates_load_for_a_zero_limit_pack);
     RUN_TEST(test_loop_ignores_a_zero_loadmax);

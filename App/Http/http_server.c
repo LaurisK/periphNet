@@ -2524,6 +2524,32 @@ static void wg_status_json(char *buf, size_t sz)
 #define PACK_NAME_ESC_LEN       (((PACK_NAME_LEN - 1u) * 6u) + 1u)
 #define PACK_STAT_NAME_ESC_LEN  (((PACK_STAT_NAME_LEN - 1u) * 6u) + 1u)
 
+/** An ePackAlarm mask as an array of names.
+ *
+ *  THE ALARM VOCABULARY BELONGS TO App/Pack, so this calls Pack_AlarmName
+ *  rather than growing a second spelling here -- which is exactly the mistake
+ *  this file and cmd_parser.c made with ePackCondition, and the reason
+ *  ePackAlarm reached the tunnel as a bare integer until 2026-09-07.
+ *
+ *  Emitted unescaped: pack_cfg.c states as a constraint on its table that no
+ *  name contains a quote or a backslash. */
+static size_t pack_alarm_names(char *js, size_t cap, size_t pos, uint32_t bits)
+{
+    uint32_t b;
+    int      first = 1;
+
+    pos = Json_Cat(js, cap, pos, "[");
+    for (b = 1u; b <= (uint32_t)packAlarm_protectionOpen; b <<= 1) {
+        if ((bits & b) == 0u) {
+            continue;
+        }
+        pos = Json_Cat(js, cap, pos, "%s\"%s\"", first ? "" : ",",
+                       Pack_AlarmName(b));
+        first = 0;
+    }
+    return Json_Cat(js, cap, pos, "]");
+}
+
 /** Close a pack document, saying so if a loop had to stop early. */
 static void pack_json_close(char *js, size_t cap, size_t pos, int truncated)
 {
@@ -2601,7 +2627,7 @@ static void handle_pack_status(struct netconn *conn)
             "\"cellMin_mV\":%u,\"cellMax_mV\":%u,"
             "\"cellMinIdx\":%u,\"cellMaxIdx\":%u,"
             "\"alarms\":%u,\"vendorAlarms\":[%u,%u],"
-            "\"age_ms\":[",
+            "\"alarmNames\":",
             firstPack ? "" : ",",
             (unsigned)st.idx, nameEsc, Pack_TypeName(st.typeId),
             Pack_CondName(st.cond),
@@ -2634,6 +2660,13 @@ static void handle_pack_status(struct netconn *conn)
             (unsigned)st.cellMinIdx, (unsigned)st.cellMaxIdx,
             (unsigned)st.alarms,
             (unsigned)st.vendorAlarms[0], (unsigned)st.vendorAlarms[1]);
+
+        /* The numeric `alarms` stays for compatibility; `alarmNames` is what
+         * makes an alarm diagnosable over the tunnel, on the `why`/`whyText`
+         * precedent above.  Until 2026-09-07 the ONLY rendering of ePackAlarm
+         * anywhere was this bare integer. */
+        pos = pack_alarm_names(js, bodyCap, pos, st.alarms);
+        pos = Json_Cat(js, bodyCap, pos, ",\"age_ms\":[");
 
         /* PER-GROUP AGES.  A consumer applies its own staleness policy, and
          * on a JK the cell group runs 4-5 s behind the electrical one by
@@ -3133,7 +3166,14 @@ static void handle_cluster_status(struct netconn *conn, int withPacks)
         o.dischargeAllowed ? "true" : "false",
         (unsigned)o.alarms);
 
-    pos = Json_Cat(js, bodyCap, pos, "\"clusterAlarms\":");
+    /* `alarms` is the PACK MODULE'S vocabulary, OR'd over online packs and
+     * republished as a mask.  The cluster is forbidden to spell ePackAlarm
+     * (design constraint 13) and does not; this adapter renders it through
+     * the owning module's accessor, which is what the constraint was waiting
+     * for. */
+    pos = Json_Cat(js, bodyCap, pos, "\"alarmNames\":");
+    pos = pack_alarm_names(js, bodyCap, pos, o.alarms);
+    pos = Json_Cat(js, bodyCap, pos, ",\"clusterAlarms\":");
     pos = cluster_json_bits(js, bodyCap, pos, o.clusterAlarms,
                             (uint32_t)cluAlarm_packCfgChanged,
                             Cluster_AlarmName);

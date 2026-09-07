@@ -416,7 +416,6 @@ static int parse_pack(sCfgReader *r, sPackCfg *cfg, int idx,
     char           c;
     int            haveType = 0;
     int            haveStale = 0;
-    int            haveCellStale = 0;
     uint8_t        i;
 
     memset(e, 0, sizeof(*e));
@@ -552,8 +551,6 @@ static int parse_pack(sCfgReader *r, sPackCfg *cfg, int idx,
     if (!haveStale) {
         e->staleAfter_ms = (e->typeId == (uint8_t)packType_pylontech)
                          ? PACK_CFG_PYLON_STALE_MS : PACK_CFG_JK_STALE_MS;
-    }
-    if (!haveCellStale) {
     }
     return 1;
 }
@@ -912,6 +909,35 @@ const char *PackCfg_WhyName(uint8_t why)
     case packWhy_notPolled:       return "resolved, but no live plan reads it";
     case packWhy_noReply:         return "never answered";
     case packWhy_last:            break;
+    }
+    return "?";
+}
+
+/** ONE BIT OF ePackAlarm, by name.
+ *
+ *  A MASK WITH ONE BIT SET, not an index: ePackAlarm is a bit-flag enum with
+ *  no _last sentinel and never will have one, so an index would be a second
+ *  numbering to keep in step with the first.
+ *
+ *  This existed nowhere until 2026-09-07 and `alarms` reached HTTP and the CLI
+ *  as a bare integer -- the identical defect ePackAbsentReason had, where the
+ *  most diagnostic field the module publishes was readable only by someone
+ *  holding the header.  On a tunnel-only board that is backwards.
+ */
+const char *PackCfg_AlarmName(uint32_t bit)
+{
+    switch ((ePackAlarm)bit) {
+    case packAlarm_cellOverVoltage:   return "cellOverVoltage";
+    case packAlarm_cellUnderVoltage:  return "cellUnderVoltage";
+    case packAlarm_packOverVoltage:   return "packOverVoltage";
+    case packAlarm_packUnderVoltage:  return "packUnderVoltage";
+    case packAlarm_overTemperature:   return "overTemperature";
+    case packAlarm_underTemperature:  return "underTemperature";
+    case packAlarm_chargeOverCurrent: return "chargeOverCurrent";
+    case packAlarm_dischargeOverCur:  return "dischargeOverCurrent";
+    case packAlarm_cellImbalance:     return "cellImbalance";
+    case packAlarm_internalFault:     return "internalFault";
+    case packAlarm_protectionOpen:    return "protectionOpen";
     }
     return "?";
 }

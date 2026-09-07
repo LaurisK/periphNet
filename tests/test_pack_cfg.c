@@ -588,6 +588,50 @@ static void test_runtime_enum_names(void)
     TEST_ASSERT(strcmp(PackCfg_SwitchName(packSwitch_closed), "closed") == 0);
 }
 
+/** ePackAlarm HAD NO NAME AT ALL until 2026-09-07 and reached both the CLI and
+ *  /api/pack/status as a bare integer -- the identical defect
+ *  ePackAbsentReason had, where the most diagnostic field the module publishes
+ *  was readable only by somebody holding the header.  On a tunnel-only board
+ *  that is backwards.
+ *
+ *  IT IS A BIT-FLAG ENUM, so it has no _last sentinel to walk and never will:
+ *  the accessor takes a MASK WITH ONE BIT SET, and an index would be a second
+ *  numbering to keep in step with the first.  This walks the bits instead, and
+ *  it is the only thing that can catch a new alarm added without a name --
+ *  -Werror=switch protects the switch, but only if somebody adds the
+ *  enumerator to ePackAlarm, which is exactly the case a test is for. */
+static void test_alarm_names_cover_every_bit(void)
+{
+    uint32_t b;
+
+    for (b = 1u; b <= (uint32_t)packAlarm_protectionOpen; b <<= 1) {
+        const char *n = PackCfg_AlarmName(b);
+
+        TEST_ASSERT(n != NULL);
+        if (n == NULL) {
+            continue;
+        }
+        TEST_ASSERT(n[0] != '\0');
+        TEST_ASSERT(strcmp(n, "?") != 0);
+        /* Interpolated into JSON unescaped by http_server.c. */
+        TEST_ASSERT(strchr(n, '"') == NULL);
+        TEST_ASSERT(strchr(n, '\\') == NULL);
+    }
+
+    /* Range-checked and never NULL: both adapters pass the result straight
+     * into a %s. */
+    TEST_ASSERT(strcmp(PackCfg_AlarmName(1u << 30), "?") == 0);
+    TEST_ASSERT(strcmp(PackCfg_AlarmName(0u), "?") == 0);
+    /* A mask with two bits set names neither. */
+    TEST_ASSERT(strcmp(PackCfg_AlarmName(3u), "?") == 0);
+
+    /* The wording the cluster republishes and HA will eventually read. */
+    TEST_ASSERT(strcmp(PackCfg_AlarmName(packAlarm_cellOverVoltage),
+                       "cellOverVoltage") == 0);
+    TEST_ASSERT(strcmp(PackCfg_AlarmName(packAlarm_protectionOpen),
+                       "protectionOpen") == 0);
+}
+
 /** These strings are interpolated into /api/pack/status unescaped, which is
  *  only safe while none of them contains a '"' or a '\\'.  Nothing else would
  *  catch a later wording like `bind key "x" matched nothing` -- it would
@@ -733,6 +777,7 @@ int main(void)
 
     RUN_TEST(test_name_tables_round_trip);
     RUN_TEST(test_runtime_enum_names);
+    RUN_TEST(test_alarm_names_cover_every_bit);
     RUN_TEST(test_names_need_no_json_escaping);
 
     /* review regressions */

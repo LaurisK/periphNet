@@ -244,7 +244,8 @@ typedef enum {
 } ePackFlag;
 
 /* ==========================================================================
- * The state (§10.6) — 132 bytes
+ * The state (§10.6) — 136 bytes (the header said 132 until 2026-09-07;
+ * tests/test_pack_fsm.c asserts the real figure and always did)
  * ========================================================================== */
 
 typedef struct {
@@ -979,6 +980,23 @@ const char *Pack_WhyName(uint8_t why);
  * @note   Pure.  Any task.
  */
 const char *Pack_SwitchName(uint8_t sw);
+
+/**
+ * @brief  The word for ONE ePackAlarm bit.
+ *
+ * A MASK WITH ONE BIT SET, not an index: ePackAlarm is a bit-flag enum with no
+ * _last sentinel, so an index would be a second numbering to keep in step.
+ *
+ * THE ALARM VOCABULARY BELONGS TO THIS MODULE.  A consumer that renders
+ * sPackState.alarms -- or republishes it, as a cluster does -- must call this
+ * rather than grow a second spelling, which is exactly the mistake
+ * http_server.c and cmd_parser.c made with ePackCondition.
+ *
+ * @param  bit - a mask with exactly one bit set
+ * @retval the word, or "?" for an unknown or multi-bit mask.  Never NULL.
+ * @note   Pure.  Any task.
+ */
+const char *Pack_AlarmName(uint32_t bit);
 
 /**
  * @brief  Log one line per instance plus the counters — `pack status` on the

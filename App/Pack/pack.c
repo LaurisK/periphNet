@@ -1440,6 +1440,11 @@ const char *Pack_SwitchName(uint8_t sw)
     return PackCfg_SwitchName(sw);
 }
 
+const char *Pack_AlarmName(uint32_t bit)
+{
+    return PackCfg_AlarmName(bit);
+}
+
 int Pack_StatCount(uint8_t idx)
 {
     if ((idx >= PACK_MAX) || (s_inst[idx].used == 0u)) {

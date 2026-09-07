@@ -222,10 +222,20 @@ static int CopySnapshot(sClusterOutput *out, sClusterMember *members,
             *out = s_res[a].pub;
         }
         if ((members != NULL) && (maxMembers > 0u)) {
-            n = (maxMembers < CLUSTER_PACK_MAX) ? maxMembers
-                                                : (uint8_t)CLUSTER_PACK_MAX;
-            (void)memcpy(members, s_res[a].member,
-                         (size_t)n * sizeof(members[0]));
+            /* BOUNDED BY THE SNAPSHOT'S OWN memberCnt, not by the array size.
+             * Slots above the configured count were never written by the
+             * arithmetic, so copying them out hands a reader eight members
+             * where one exists — and their zeroed `why` renders as
+             * "participating", which is the most misleading word available.
+             * Taking the count from the SAME snapshot keeps it coherent with
+             * the payload under the generation check. */
+            n = s_res[a].pub.memberCnt;
+            if (n > maxMembers)                { n = maxMembers; }
+            if (n > (uint8_t)CLUSTER_PACK_MAX) { n = (uint8_t)CLUSTER_PACK_MAX; }
+            if (n > 0u) {
+                (void)memcpy(members, s_res[a].member,
+                             (size_t)n * sizeof(members[0]));
+            }
         }
         __DMB();
         if (s_gen == g0) {
