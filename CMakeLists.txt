@@ -502,6 +502,94 @@ foreach(_f ${_pack_consumers})
     endif()
 endforeach()
 
+# --- Cluster module boundaries (docs/design_battery_cluster.md §4) ------------
+# SIX RULES, split by WHAT IS CHECKED.  Includes and RTOS calls are source
+# facts and are checked with a line-anchored grep; floating point and
+# Pack_Command are OBJECT-FILE facts and are checked after the link, because a
+# source grep cannot tell a rule from a sentence describing the rule -- and
+# cluster.h's own preamble contains the words "float", "double" and
+# "Pack_Command".  The object-file check is also strictly stronger: it catches
+# a `(float)` cast and a `1.0f` literal, which the pack module's
+# declaration-anchored regex misses entirely.
+
+# 1/6b. Nothing in App/Cluster reaches a consumer, a protocol, lwIP or the HAL.
+file(GLOB _clu_srcs CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/*.h")
+foreach(_f ${_clu_srcs})
+    file(STRINGS "${_f}" _hits
+         REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<](App/(Can|Http|Gw|Data|Modbus)/|lwip/|stm32f4xx_hal)")
+    if(_hits)
+        message(FATAL_ERROR
+                "Cluster boundary: ${_f} must not know a consumer, a protocol "
+                "or the HAL: ${_hits}")
+    endif()
+endforeach()
+
+# 2. Consumers see cluster.h and nothing else from the module.
+file(GLOB_RECURSE _clu_consumers CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/*.h")
+foreach(_f ${_clu_consumers})
+    if(_f MATCHES "App/Cluster/")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hits
+         REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<](App/Cluster/)?cluster_(calc|cfg)\\.h")
+    if(_hits)
+        message(FATAL_ERROR
+                "Cluster module boundary: ${_f} reaches past cluster.h: ${_hits}")
+    endif()
+endforeach()
+
+# 3. THE PURE CORE is libc-only -- and, unlike pack_fsm.c, may not call Pack_
+#    either: a call into the live pack module is a call into a lock, and would
+#    make the core non-pure and untestable at once.  Its entire input is the
+#    sClusterPackIn array the caller fills.
+foreach(_pure App/Cluster/cluster_calc.c App/Cluster/cluster_cfg.c)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}" _hits
+             REGEX "HAL_|osThread|osTimer|osMessage|osKernel|xQueue|xTask|vTask|taskENTER_CRITICAL|TRice|NvDb_|W25Q128_|Pack_[A-Z]")
+        if(_hits)
+            message(FATAL_ERROR
+                    "${_pure} must stay libc-only and Pack_-free: ${_hits}")
+        endif()
+    endif()
+endforeach()
+
+# 5. NO LOCK AND NO CRITICAL SECTION anywhere in the module.  That is what
+#    makes Cluster_GetOutput legal from the RTOS timer task.  __DMB() is a
+#    BARRIER, NOT A LOCK, and is deliberately absent from this pattern --
+#    without saying so, "no lock" reads as "no synchronisation of any kind",
+#    which is how a plain s_gen++ between two struct writes survives every
+#    debug build and fails once at -O2.  __disable_irq is inline asm with no
+#    symbol, so it stays a source grep rather than an object-file one.
+foreach(_f ${_clu_srcs})
+    file(STRINGS "${_f}" _hits
+         REGEX "osMutex|vPortEnterCritical|taskENTER_CRITICAL|portENTER_CRITICAL|taskDISABLE_INTERRUPTS|__disable_irq")
+    if(_hits)
+        message(FATAL_ERROR
+                "Cluster: no lock and no critical section (${_f}): ${_hits}")
+    endif()
+endforeach()
+
+# 4/6. Floating point and Pack_Command, ON THE OBJECT FILES.  With
+#      -mfloat-abi=hard a float op emits a VFP mnemonic and a double op emits
+#      an __aeabi_d* reference, so the pair catches both; a comment produces
+#      no relocation, so the Pack_Command check is EXACT where a grep cannot
+#      be.  Run as a post-build step over App/Cluster's objects.
+get_filename_component(_arm_bin_dir "${CMAKE_OBJDUMP}" DIRECTORY)
+set(CLUSTER_PURITY_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_cluster_purity.cmake")
+
+# -Wdouble-promotion / -Wfloat-conversion / -Wfloat-equal, SCOPED to the two
+# pure sources and never global: lwIP, FreeRTOS, the HAL, trice and
+# wireguard-lwip share CMAKE_C_FLAGS and are not ours to fix.
+set(CLUSTER_PURE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_calc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.c
+)
+
 # --- CAN module boundary (docs/design_can_bridge.md §5) -----------------------
 # ONE FILE OWNS THE bxCAN CELLS.  The class of bug this prevents has already
 # happened once: App/Can/bms_reader.c re-initialised CAN2 and defined the only
@@ -717,10 +805,42 @@ set(ENUM_NAME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Pack/pack_cfg.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Log/crash.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Modbus/modbus.c
+    # Nine accessors, instances fifteen through twenty-three
+    # (docs/design_battery_cluster.md constraint 12).
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.c
 )
 set_source_files_properties(${ENUM_NAME_SOURCES}
     TARGET_DIRECTORY application.elf
     PROPERTIES COMPILE_OPTIONS "-Werror=switch"
+)
+
+# The cluster's two pure sources additionally refuse floating point at the
+# WARNING level, which catches the readable cases early; the object-file check
+# below is what makes it a rule rather than a habit.  cluster_cfg.c is in both
+# lists, so its options are spelled once, together.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.c
+    TARGET_DIRECTORY application.elf
+    PROPERTIES COMPILE_OPTIONS
+    "-Werror=switch;-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"
+)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_calc.c
+    TARGET_DIRECTORY application.elf
+    PROPERTIES COMPILE_OPTIONS
+    "-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"
+)
+
+# THE OBJECT-FILE CHECKS (constraints 4 and 6).  No VFP mnemonic, no
+# __aeabi_[df] reference, no Pack_Command relocation may come out of
+# App/Cluster.  A comment produces no relocation, so this is exact where a
+# source grep -- which would fire on cluster.h's own preamble -- cannot be.
+add_custom_command(TARGET application.elf POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DOBJDIR=${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/application.elf.dir/App/Cluster
+            -DOBJDUMP=${CMAKE_OBJDUMP}
+            -DNM=${_arm_bin_dir}/arm-none-eabi-nm
+            -P ${CLUSTER_PURITY_SCRIPT}
+    COMMENT "Cluster purity: no float, no Pack_Command in App/Cluster objects"
+    VERBATIM
 )
 
 target_include_directories(application.elf PRIVATE ${APP_INCLUDES})

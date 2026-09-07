@@ -18,6 +18,7 @@
 /* Includes -----------------------------------------------------------------*/
 
 #include "App/Func/func.h"
+#include "App/Cluster/cluster.h"
 #include "App/Pack/pack.h"
 #include "App/Mon/sysmon.h"
 
@@ -134,6 +135,11 @@ static void Dispatch(const sFuncEvt *evt)
          * flash I/O, and belongs on the task that owns the module rather than
          * on defaultTask (§13). */
         (void)Pack_Init((uint16_t)func_packEvt, Post);
+        /* AFTER Pack_Init, and it takes no event range: the cluster posts
+         * nothing, so the packed event-ID space is unchanged.  It is a plain
+         * consumer of pack.h that happens to need a tick
+         * (docs/design_battery_cluster.md §1). */
+        (void)Cluster_Init();
         return;
     }
 
@@ -186,6 +192,11 @@ static void FuncTask(void *arg)
             s_lastTick_ms = now;
             s_stats.ticks++;
             Pack_Tick(now);
+            /* AFTER Pack_Tick in the SAME iteration, so the cluster
+             * aggregates the state this tick just settled rather than the
+             * previous one's.  R4.3: the aggregation runs here and the frame
+             * source only formats bytes from the snapshot it leaves. */
+            Cluster_Tick(now);
         }
 
         SysMon_TaskCheckin(s_monId);

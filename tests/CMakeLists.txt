@@ -263,6 +263,43 @@ set_source_files_properties(${PROJECT_ROOT}/App/Pack/pack_cfg.c
 )
 add_test(NAME pack_cfg COMMAND test_pack_cfg)
 
+# App/Cluster: the battery cluster module (docs/design_battery_cluster.md).
+# cluster_calc.c and cluster_cfg.c are libc-only APPLICATION code on the
+# pack_fsm.c precedent, and for a stronger reason than convenience: R4.6 makes
+# host-testability a REQUIREMENT -- "a design whose limit arithmetic can only
+# be exercised on hardware does not satisfy this" -- because the thing being
+# computed is a current limit for a live inverter with a live battery behind
+# it.
+add_executable(test_cluster_calc
+    test_cluster_calc.c
+    ${PROJECT_ROOT}/App/Cluster/cluster_calc.c
+    ${PROJECT_ROOT}/App/Cluster/cluster_cfg.c
+    ${JSON_CORE}
+)
+target_include_directories(test_cluster_calc PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME cluster_calc COMMAND test_cluster_calc)
+
+add_executable(test_cluster_cfg
+    test_cluster_cfg.c
+    ${JSON_CORE}
+    ${PROJECT_ROOT}/App/Cluster/cluster_cfg.c
+)
+target_include_directories(test_cluster_cfg PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+# The same -Werror=switch the firmware build scopes to cluster_cfg.c, so a new
+# enumerator in any of the nine enums without a name fails HERE too -- host
+# tests are what a developer runs first.
+set_source_files_properties(${PROJECT_ROOT}/App/Cluster/cluster_cfg.c
+    TARGET_DIRECTORY test_cluster_cfg
+    PROPERTIES COMPILE_OPTIONS "-Werror=switch"
+)
+add_test(NAME cluster_cfg COMMAND test_cluster_cfg)
+
 # ==============================================================================
 # CppUTest suite (fetched from GitHub) — OFF by default.
 #

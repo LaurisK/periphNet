@@ -96,13 +96,14 @@ static const char *const s_userNames[nvdbUser_last] = {
     [nvdbUser_wgTime]           = "wgTime",
     [nvdbUser_wgCfg]            = "wgCfg",
     /* Retired (§9.1) but the STRING stays: this table is also the layout-JSON
-     * parse key (NvDb_UserFromName below), so renaming it would reject a
+     * parse key (NvDb_UserByName below), so renaming it would reject a
      * layout document that names the area every deployed board still has. */
     [nvdbUser_mqttCfg]          = "mqttCfg",
     [nvdbUser_triceUdpCfg]      = "triceUdpCfg",
     [nvdbUser_packCfg]          = "packCfg",
     [nvdbUser_packState]        = "packState",
     [nvdbUser_canLog]           = "canLog",
+    [nvdbUser_clusterCfg]       = "clusterCfg",
 };
 
 /* Private function prototypes ----------------------------------------------*/

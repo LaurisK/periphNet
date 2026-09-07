@@ -45,6 +45,16 @@ memory map, HTTP API, task table, coding standards.
 | [task_flash_wait_and_ota_cost.md](task_flash_wait_and_ota_cost.md) | plan | An OTA pins the CPU at 100 % because `W25Q128_WaitReady` **waits**, and DMA cannot shorten a wait. Measured, not calculated. Parked deliberately |
 | [design_bms_cell_health_estimation.md](design_bms_cell_health_estimation.md) | direction | What the JK BMS actually measures, and what its SOC/SOH really are. The anchoring half has shipped; **per-cell capacity/SOH has not** |
 
+## Battery cluster (BUILT and host-tested 2026-09-07; not yet run on hardware, and driving nothing until a frame source exists)
+
+| Doc | Status | Covers |
+|-----|--------|--------|
+| [requirements_battery_cluster.md](requirements_battery_cluster.md) | design | What a cluster of parallel packs must do. The headline requirement is combining per-pack current limits so no single pack is over-driven while the maximum is still allowed |
+| [design_battery_cluster.md](design_battery_cluster.md) | **current** | The module: API, the closed-loop limit search and its binding gate, architectural constraints, test surface, HTTP shape. **§12 is the implementation** — what exists, three places the code corrects this text, and what it cost (the flash headroom answer among them) |
+| [review_battery_cluster_design.md](review_battery_cluster_design.md) | current | Pre-implementation embedded review, and the running status of every defect it raised — **including the one implementation found that the review did not**: `load_pm` truncated the wrong way, and the update divides by it |
+| [design_can_bms_frame_source.md](design_can_bms_frame_source.md) | design | The CAN dialect the cluster's numbers go out on, and the measured JK transfer function behind it |
+| [reference_dyness_can_capture_2026-09-05.md](reference_dyness_can_capture_2026-09-05.md) | reference | The zaliakalnis Dyness CAN capture: 13 identifiers decoded, the 0.01 A vendor deviation, and what is still unknown |
+
 ## Reference
 
 | Doc | Covers |

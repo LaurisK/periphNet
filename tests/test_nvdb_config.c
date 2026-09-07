@@ -384,8 +384,37 @@ static void test_the_usage_report_renders(void)
     TEST_ASSERT(0 == NvDbCfg_RenderUsage(false, js, 64u));
 }
 
+/** THE ENUM-NAME RULE PROTECTS SWITCHES, AND s_userNames[] IS A TABLE.
+ *  -Werror=switch cannot see a designated initializer left out, so a new
+ *  eNvDbUser added without its entry ships as a NULL that reaches the layout
+ *  JSON — where it is simultaneously the parse key, so a document naming that
+ *  area could never be uploaded and the omission would surface as a rejected
+ *  layout rather than as a missing name.  This generalises: every name TABLE
+ *  in the tree is outside the compile-time mechanism and needs a test.
+ *
+ *  nvdbUser_undefined is the sentinel and legitimately has no name. */
+static void test_every_user_has_a_name(void)
+{
+    unsigned i;
+
+    for (i = 1u; i < (unsigned)nvdbUser_last; i++) {
+        const char *n = NvDb_UserName((eNvDbUser)i);
+
+        TEST_ASSERT(n != NULL);
+        if (n == NULL) {
+            printf("  eNvDbUser %u has no name\n", i);
+            continue;
+        }
+        TEST_ASSERT(n[0] != '\0');
+        /* It is the layout document's parse key as well as its label, so it
+         * must round-trip. */
+        TEST_ASSERT(NvDb_UserByName(n) == (eNvDbUser)i);
+    }
+}
+
 int main(void)
 {
+    RUN_TEST(test_every_user_has_a_name);
     RUN_TEST(test_a_good_document_parses);
     RUN_TEST(test_operation_defaults_to_normal);
     RUN_TEST(test_forced_is_authored_not_requested);

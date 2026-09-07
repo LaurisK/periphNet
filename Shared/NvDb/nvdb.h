@@ -118,6 +118,13 @@ typedef enum {
      * lifecycles. */
     nvdbUser_canLog,
 
+    /* App/Cluster — the battery cluster's membership, opaque profile token
+     * and tunables (docs/design_battery_cluster.md R4.8).  ONE user, 4 KB,
+     * rarely written: it is site fact of exactly the class packCfg and wgCfg
+     * already are, and a new user is itself a layout change, which is why
+     * NVDB_TARGET_VER moves with it. */
+    nvdbUser_clusterCfg,
+
     nvdbUser_last               /* sentinel — a count, never stored         */
 } eNvDbUser;
 

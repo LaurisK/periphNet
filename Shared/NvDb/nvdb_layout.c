@@ -105,6 +105,10 @@ static const uint32_t s_targetSizes[nvdbUser_last] = {
      * space above wgCfg is ~7.3 MB, so this uses a bit over half of it and
      * leaves headroom for everything else this board still grows. */
     [nvdbUser_canLog]           = 0x400000u,
+
+    /* 4 KB, like packCfg: one CRC'd record of ~200 bytes, written only when
+     * an operator uploads a cluster configuration. */
+    [nvdbUser_clusterCfg]       = 0x1000u,
 };
 
 /* The assumed-current layout (§4.4.1): the board's existing hand-assigned map

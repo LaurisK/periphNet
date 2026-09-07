@@ -34,6 +34,7 @@
 #include "usbd_cdc.h"
 #include "App/Modbus/modbus.h"
 #include "App/Modbus/modbus_trice_sink.h"
+#include "App/Cluster/cluster.h"
 #include "App/Pack/pack.h"
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_platform.h"
@@ -2995,6 +2996,372 @@ static void handle_pack_cfg_delete(struct netconn *conn)
 }
 
 /* --------------------------------------------------------------------------
+ * Battery cluster
+ *
+ * R4.9: board access is TUNNEL-ONLY, so "which pack is holding the limit down"
+ * -- the question this module will be asked most -- has to be answerable from
+ * a laptop over the tunnel.  A number the operator cannot see is a number they
+ * cannot trust, and the cluster has no CLI surface by design.
+ *
+ * EVERY ENUM RENDERS AS A NAME, never a bare integer: the numeric `why` on
+ * /api/pack/status needed a second lookup table in the reader's head, and that
+ * is exactly the defect ePackAbsentReason had.
+ * -------------------------------------------------------------------------- */
+
+#define CLUSTER_JSON_CAP        4096u
+/* Room for "],\"stats\":{...}}" and its NUL.  Every append below is made
+ * against a cap that stops this short, so the tail always fits and what a
+ * client receives is well-formed JSON whether or not everything fitted. */
+#define CLUSTER_JSON_TAIL       640u
+#define CLUSTER_NAME_ESC_LEN    (((CLUSTER_NAME_LEN - 1u) * 6u) + 1u)
+
+/** Render a bitmask as an array of names.  A cluster alarm word an operator
+ *  has to decode by hand is a diagnostic nobody uses. */
+static size_t cluster_json_bits(char *js, size_t cap, size_t pos,
+                                uint32_t bits, uint32_t highest,
+                                const char *(*name)(uint32_t))
+{
+    uint32_t b;
+    int      first = 1;
+
+    pos = Json_Cat(js, cap, pos, "[");
+    for (b = 1u; b <= highest; b <<= 1) {
+        if ((bits & b) == 0u) {
+            continue;
+        }
+        /* Emitted unescaped: cluster_cfg.c states as a constraint on its
+         * tables that no name contains a '"' or a '\\', and the host test
+         * asserts it. */
+        pos = Json_Cat(js, cap, pos, "%s\"%s\"", first ? "" : ",", name(b));
+        first = 0;
+    }
+    return Json_Cat(js, cap, pos, "]");
+}
+
+/** One direction of the four-number causal chain, so an adapter renders "why
+ *  is the limit this" with no arithmetic of its own. */
+static size_t cluster_json_dir(char *js, size_t cap, size_t pos,
+                               const char *label, uint32_t loop_mA,
+                               uint32_t derated_mA, uint32_t slewed_mA,
+                               uint32_t published_mA, uint16_t loadMax_pm,
+                               uint8_t state, uint8_t why, uint8_t bindingIdx)
+{
+    pos = Json_Cat(js, cap, pos,
+        "\"%s\":{\"state\":\"%s\",\"loadMax_pm\":%u,"
+        "\"loop_mA\":%u,\"derated_mA\":%u,\"slewed_mA\":%u,"
+        "\"published_mA\":%u,\"why\":\"%s\",\"bindingPack\":",
+        label, Cluster_LoopStateName(state), (unsigned)loadMax_pm,
+        (unsigned)loop_mA, (unsigned)derated_mA, (unsigned)slewed_mA,
+        (unsigned)published_mA, Cluster_LimitWhyName(why));
+    /* null, not 255: at the start value NOBODY is binding, and a sentinel
+     * index rendered as a number invites a reader to look up slot 255. */
+    if (bindingIdx == CLUSTER_PACK_NONE) {
+        pos = Json_Cat(js, cap, pos, "null}");
+    } else {
+        pos = Json_Cat(js, cap, pos, "%u}", (unsigned)bindingIdx);
+    }
+    return pos;
+}
+
+/** GET /api/cluster/status — the published figures, both loops and every
+ *  member.  `?packs=0` omits the member array. */
+static void handle_cluster_status(struct netconn *conn, int withPacks)
+{
+    const size_t   bodyCap = CLUSTER_JSON_CAP - CLUSTER_JSON_TAIL;
+    sClusterOutput o;
+    sClusterMember mem[CLUSTER_PACK_MAX];
+    sClusterStats  st;
+    char          *js;
+    size_t         pos = 0u;
+    uint8_t        written = 0u;
+    uint8_t        i;
+    int            truncated = 0;
+    int            r;
+
+    js = (char *)pvPortMalloc(CLUSTER_JSON_CAP);
+    if (js == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    (void)Cluster_Stats(&st);
+    /* ONE GENERATION for the output and the members, so a status page cannot
+     * render a limit beside a share from a different tick. */
+    r = Cluster_GetSnapshot(&o, mem, (uint8_t)CLUSTER_PACK_MAX, &written);
+
+    if (r != cluErr_ok) {
+        (void)memset(&o, 0, sizeof(o));
+        written = 0u;
+    }
+
+    {
+        char profile[CLUSTER_PROFILE_LEN];
+        char profileEsc[(((CLUSTER_PROFILE_LEN - 1u) * 6u) + 1u)];
+
+        (void)Cluster_ProfileToken(profile, sizeof(profile));
+        (void)Json_Escape(profileEsc, sizeof(profileEsc), profile);
+
+        pos = Json_Cat(js, bodyCap, pos,
+            "{\"provisioned\":%s,\"ready\":%s,\"cond\":\"%s\",\"valid\":%s,"
+            "\"age_ms\":%u,\"seq\":%u,\"members\":%d,\"online\":%u,"
+            "\"profile\":\"%s\",",
+            st.provisioned ? "true" : "false",
+            (r == cluErr_ok) ? "true" : "false",
+            Cluster_CondName(o.cond), o.valid ? "true" : "false",
+            (unsigned)(osKernelGetTickCount() - o.tick_ms),
+            (unsigned)o.seq, Cluster_Count(), (unsigned)o.onlineCnt,
+            profileEsc);
+    }
+
+    pos = Json_Cat(js, bodyCap, pos,
+        "\"published\":{\"voltage_mV\":%u,\"voltSpread_mV\":%u,"
+        "\"current_mA\":%d,\"soc_pm\":%u,\"soh_pm\":%u,"
+        "\"socConf_pm\":%u,\"sohConf_pm\":%u,"
+        "\"remaining_mAh\":%u,\"capacity_mAh\":%u,\"nameplate_mAh\":%u,"
+        "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
+        "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
+        "\"tempMax_dC\":%d,\"tempMin_dC\":%d,"
+        "\"chargeAllowed\":%s,\"dischargeAllowed\":%s,\"alarms\":%u,",
+        (unsigned)o.voltage_mV, (unsigned)o.voltSpread_mV,
+        (int)o.current_mA, (unsigned)o.soc_pm, (unsigned)o.soh_pm,
+        (unsigned)o.socConf_pm, (unsigned)o.sohConf_pm,
+        (unsigned)o.remaining_mAh, (unsigned)o.capacity_mAh,
+        (unsigned)o.nameplate_mAh,
+        (unsigned)o.chargeLimit_mA, (unsigned)o.dischargeLimit_mA,
+        (unsigned)o.chargeVoltLimit_mV, (unsigned)o.dischargeVoltLimit_mV,
+        (int)o.tempMax_dC, (int)o.tempMin_dC,
+        o.chargeAllowed ? "true" : "false",
+        o.dischargeAllowed ? "true" : "false",
+        (unsigned)o.alarms);
+
+    pos = Json_Cat(js, bodyCap, pos, "\"clusterAlarms\":");
+    pos = cluster_json_bits(js, bodyCap, pos, o.clusterAlarms,
+                            (uint32_t)cluAlarm_packCfgChanged,
+                            Cluster_AlarmName);
+    /* WHAT IS NOT BEING PUBLISHED, by name.  A cleared field bit means the
+     * value reads zero and MEANS NOTHING -- a zero charge-voltage limit is not
+     * "no limit", it is an instruction to stop charging -- so the absence has
+     * to be as visible as the number. */
+    pos = Json_Cat(js, bodyCap, pos, ",\"missing\":");
+    pos = cluster_json_bits(js, bodyCap, pos,
+                            (uint32_t)(~o.fields) &
+                            ((uint32_t)cluField_switches * 2u - 1u),
+                            (uint32_t)cluField_switches, Cluster_FieldName);
+    pos = Json_Cat(js, bodyCap, pos, "},\"loop\":{\"lastRestart\":\"%s\",",
+                   Cluster_RestartName(o.lastRestart));
+    pos = cluster_json_dir(js, bodyCap, pos, "charge",
+                           o.chargeLoop_mA, o.chargeDerated_mA,
+                           o.chargeSlewed_mA, o.chargeLimit_mA,
+                           o.chargeLoadMax_pm, o.chargeLoopState,
+                           o.chargeWhy, o.chargeBindingIdx);
+    pos = Json_Cat(js, bodyCap, pos, ",");
+    pos = cluster_json_dir(js, bodyCap, pos, "discharge",
+                           o.dischargeLoop_mA, o.dischargeDerated_mA,
+                           o.dischargeSlewed_mA, o.dischargeLimit_mA,
+                           o.dischargeLoadMax_pm, o.dischargeLoopState,
+                           o.dischargeWhy, o.dischargeBindingIdx);
+    pos = Json_Cat(js, bodyCap, pos, "},\"packs\":[");
+
+    if (withPacks != 0) {
+        int first = 1;
+
+        for (i = 0u; i < written; i++) {
+            const sClusterMember *m = &mem[i];
+            char   name[CLUSTER_NAME_LEN];
+            char   nameEsc[CLUSTER_NAME_ESC_LEN];
+            size_t mark = pos;
+
+            (void)Cluster_MemberName(i, name, sizeof(name));
+            /* Operator text that reached flash through the config parser, so
+             * it is not safe to interpolate raw. */
+            (void)Json_Escape(nameEsc, sizeof(nameEsc), name);
+
+            pos = Json_Cat(js, bodyCap, pos,
+                "%s{\"slot\":%u,\"name\":\"%s\",\"packIdx\":",
+                first ? "" : ",", (unsigned)i, nameEsc);
+            if (m->packIdx == CLUSTER_PACK_NONE) {
+                pos = Json_Cat(js, bodyCap, pos, "null");
+            } else {
+                pos = Json_Cat(js, bodyCap, pos, "%u", (unsigned)m->packIdx);
+            }
+            pos = Json_Cat(js, bodyCap, pos,
+                ",\"state\":\"%s\",\"why\":\"%s\","
+                "\"current_mA\":%d,\"share_pm\":%u,\"load_pm\":%u,"
+                "\"soc_pm\":%u,\"chargeLimit_mA\":%u,"
+                "\"dischargeLimit_mA\":%u,\"elecAge_ms\":%u,\"flags\":",
+                Cluster_MemberStateName(m->state),
+                Cluster_MemberWhyName(m->why),
+                (int)m->current_mA, (unsigned)m->share_pm,
+                (unsigned)m->load_pm, (unsigned)m->soc_pm,
+                (unsigned)m->chargeLimit_mA, (unsigned)m->dischargeLimit_mA,
+                (unsigned)m->elecAge_ms);
+            pos = cluster_json_bits(js, bodyCap, pos, m->flags,
+                                    (uint32_t)cluMemFlag_limitSaturated,
+                                    Cluster_MemberFlagName);
+            pos = Json_Cat(js, bodyCap, pos, "}");
+
+            /* Whole object or none: a member half-written into a full buffer
+             * is unparseable, which is worse than a missing member. */
+            if (pos >= bodyCap) {
+                pos = mark;
+                js[pos] = '\0';
+                truncated = 1;
+                break;
+            }
+            first = 0;
+        }
+    }
+
+    pos = Json_Cat(js, CLUSTER_JSON_CAP, pos,
+                   truncated ? "],\"truncated\":true," : "],");
+    /* bindingSample* IS EXPECTED TO BE A SMALL FRACTION OF ticks, and on a
+     * quiet site zero: the loop only learns while something is actually asking
+     * the battery for current.  It is reported so that is visible rather than
+     * mistaken for a fault -- and so nobody "fixes" it by lowering
+     * bindFrac_pm, which the parser refuses for exactly that reason. */
+    (void)Json_Cat(js, CLUSTER_JSON_CAP, pos,
+        "\"stats\":{\"ticks\":%u,\"publishes\":%u,\"packReadFail\":%u,"
+        "\"nameUnresolved\":%u,\"packCfgSkip\":%u,"
+        "\"noParticipantChg\":%u,\"noParticipantDsg\":%u,"
+        "\"bindingSampleChg\":%u,\"bindingSampleDsg\":%u,"
+        "\"restartChg\":%u,\"restartDsg\":%u,"
+        "\"stepClamped\":%u,\"slewLimited\":%u,"
+        "\"forbiddenChg\":%u,\"forbiddenDsg\":%u,\"voltLimitMissing\":%u,"
+        "\"divergeSoc\":%u,\"divergeShare\":%u,\"sanitised\":%u,"
+        "\"getBusy\":%u,\"getNotReady\":%u,\"cfgPending\":%s}}",
+        (unsigned)st.ticks, (unsigned)st.publishes,
+        (unsigned)st.packReadFailCnt, (unsigned)st.nameUnresolvedCnt,
+        (unsigned)st.packCfgSkipCnt,
+        (unsigned)st.noParticipantChgCnt, (unsigned)st.noParticipantDsgCnt,
+        (unsigned)st.bindingSampleChgCnt, (unsigned)st.bindingSampleDsgCnt,
+        (unsigned)st.restartChgCnt, (unsigned)st.restartDsgCnt,
+        (unsigned)st.stepClampedCnt, (unsigned)st.slewLimitedCnt,
+        (unsigned)st.forbiddenChgCnt, (unsigned)st.forbiddenDsgCnt,
+        (unsigned)st.voltLimitMissingCnt,
+        (unsigned)st.divergeSocCnt, (unsigned)st.divergeShareCnt,
+        (unsigned)st.sanitisedCnt,
+        (unsigned)st.getBusyCnt, (unsigned)st.getNotReadyCnt,
+        st.cfgPending ? "true" : "false");
+
+    send_json(conn, "200 OK", js);
+    vPortFree(js);
+}
+
+/** Report a cluster config parse failure by member index and key. */
+static void send_cluster_cfg_result(struct netconn *conn,
+                                    const sClusterCfgResult *res, int applied)
+{
+    /* Sized so the compiler can PROVE the worst case fits: the 23-character
+     * field at its \u00XX escape expansion is 138 bytes, the reason is 63,
+     * and the literal and index are ~55.  A truncation warning here is not
+     * cosmetic — the reply is what tells an operator which key they got
+     * wrong. */
+    char body[320];
+
+    if (res->ok != 0) {
+        /* 202, not 200, and the difference is load-bearing: NOTHING MOVES NOW.
+         * A staged configuration is adopted by the next tick, and an operator
+         * who read 200 would reasonably re-GET the status expecting the new
+         * membership. */
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":true,\"members\":%u,\"staged\":%s}",
+                       (unsigned)res->members, applied ? "true" : "false");
+        send_json(conn, applied ? "202 Accepted" : "200 OK", body);
+        return;
+    }
+    {
+        char fieldEsc[(((sizeof(res->field) - 1u) * 6u) + 1u)];
+
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), res->field);
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":false,\"member\":%d,\"field\":\"%s\","
+                       "\"reason\":\"%s\"}",
+                       res->memberIdx, fieldEsc, res->reason);
+    }
+    send_json(conn, "422 Unprocessable Entity", body);
+}
+
+/** POST /api/cluster/config[/verify].  Verify and apply share ONE parser and
+ *  one result struct, so there is never a second validator that can disagree
+ *  with the first. */
+static void handle_cluster_cfg_post(struct netconn *conn, sConnStream *s,
+                                    int apply)
+{
+    uint32_t          content_length = parse_content_length(req_buf);
+    sClusterCfgResult res;
+    int               r;
+
+    if ((content_length == 0u) || (content_length > 8u * 1024u)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required (max 8 KB)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    {
+        sBodySource src = { s, content_length };
+
+        (void)memset(&res, 0, sizeof(res));
+        r = apply ? Cluster_ConfigApply(body_source, &src, &res)
+                  : Cluster_ConfigVerify(body_source, &src, &res);
+    }
+
+    if (r == cluErr_busy) {
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"a configuration is already staged\"}");
+        return;
+    }
+    if (r == cluErr_transport) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"could not persist the configuration\"}");
+        return;
+    }
+    send_cluster_cfg_result(conn, &res, apply);
+}
+
+/** GET /api/cluster/config — the active configuration, re-serialised.
+ *  Data-faithful, not byte-identical. */
+static void handle_cluster_cfg_get(struct netconn *conn)
+{
+    char           *body;
+    sPackExportSink sk;
+
+    body = (char *)pvPortMalloc(1024u);
+    if (body == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    sk.buf = body;
+    sk.cap = 1024u;
+    sk.len = 0u;
+
+    if (Cluster_ConfigExport(pack_http_sink, &sk) != cluErr_ok) {
+        vPortFree(body);
+        send_json(conn, "409 Conflict",
+                  "{\"error\":\"unprovisioned\"}");
+        return;
+    }
+    body[sk.len] = '\0';
+    send_json(conn, "200 OK", body);
+    vPortFree(body);
+}
+
+/** DELETE /api/cluster/config — the board becomes unprovisioned and the
+ *  published limits fall to zero at the next tick. */
+static void handle_cluster_cfg_delete(struct netconn *conn)
+{
+    if (Cluster_ConfigErase() != cluErr_ok) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"erase failed\"}");
+        return;
+    }
+    /* THERE IS NO BUILT-IN DEFAULT, so there is nothing to reset *to*: a
+     * cluster configuration names packs this board may not have. */
+    send_json(conn, "200 OK", "{\"ok\":true,\"provisioned\":false}");
+}
+
+/* --------------------------------------------------------------------------
  * CAN bridge
  *
  * The CLI reaches this module over USB CDC / UART1 only, i.e. with physical
@@ -3913,6 +4280,16 @@ static void handle_connection(struct netconn *conn)
         handle_pack_cfg_get(conn);
     } else if (route_is("DELETE /api/pack/config")) {
         handle_pack_cfg_delete(conn);
+    } else if (route_is("GET /api/cluster/status")) {
+        handle_cluster_status(conn, (query_int("packs", 1) != 0));
+    } else if (route_is("POST /api/cluster/config/verify")) {
+        handle_cluster_cfg_post(conn, &stream, 0);
+    } else if (route_is("POST /api/cluster/config")) {
+        handle_cluster_cfg_post(conn, &stream, 1);
+    } else if (route_is("GET /api/cluster/config")) {
+        handle_cluster_cfg_get(conn);
+    } else if (route_is("DELETE /api/cluster/config")) {
+        handle_cluster_cfg_delete(conn);
     } else if (route_is("GET /api/can/status")) {
         handle_can_status(conn);
     } else if (route_is("GET /api/can/traffic")) {

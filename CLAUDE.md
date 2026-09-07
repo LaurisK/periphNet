@@ -20,7 +20,7 @@ the design assessment of moving that wait to a timer + callback:
 
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §12: dialects beyond an address stride, consumer-side rate policy, and **rate-limiting the gateway seam** — nothing bounds how fast a `:502` client may submit raw transfers, and the failure mode is bus starvation of the JK poll rather than a crash. §4.11 is the gateway seam itself.
 
-**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The CAN half of that path now exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN and HA both down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
+**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The AGGREGATION half of that path now exists too**: `App/Cluster/` presents N packs on one DC bus to an inverter as one battery ([docs/design_battery_cluster.md](docs/design_battery_cluster.md), implemented 2026-09-07, host-tested, **not yet run on hardware**). Its headline is that **the current limit is MEASURED, not estimated** — publish a limit, watch how hard the worst pack works at it, rescale — gated so it only ever learns from a measurement taken *at* the limit. It fixes the sodas defect where the inverter sees one of two JK packs and is told 660 Ah at 21 % when the bus holds 1254.7 Ah at 47.3 %. **It drives nothing yet**: `pack_jkbms` publishes no `packCap_voltageLimits`, so the charge-voltage-limit field stays invalid and a frame source is contractually forbidden to transmit `0x351` at all (§7.4). **The CAN half of that path also exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN and HA both down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
 
@@ -49,22 +49,33 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 **Build output:**
 - `build/bootloader.elf` / `.bin` — ~23 KB flash, ~2.7 KB RAM (32 KB limit)
 - `build/application.elf` / `.bin` — **all three regions are tight, and
-  MAIN SRAM is the tightest** (measured 2026-09-05, post-MQTT-removal):
+  FLASH IS NOW THE TIGHTEST** (measured 2026-09-07, with the cluster module in):
 
   | Region | Used | Limit | | Free |
   |---|---|---|---|---|
-  | Flash (`.text`+`.rodata`+`.data`) | 463,892 | 491,520 | **94.4 %** | 27.0 KB |
-  | Main SRAM (`.bss`+`.data`+heap/stack) | 126,000 | 131,072 | **96.1 %** | 5.0 KB |
+  | Flash (`.text`+`.rodata`+`.data`) | 488,720 | 491,520 | **99.4 %** | **2.8 KB** |
+  | Main SRAM (`.bss`+`.data`+heap/stack) | 128,116 | 131,072 | **97.7 %** | 2.9 KB |
   | CCM (`.ccmram`+`.ccmheap`) | 59,124 | 65,536 | **90.2 %** | 6.3 KB |
+
+  **`CMAKE_BUILD_TYPE` IS UNSET, SO THE DEFAULT BUILD CARRIES NO `-O` FLAG AT
+  ALL** — every flash figure above, and every one this file has ever recorded,
+  is `-O0` code. The identical tree built with `-DCMAKE_BUILD_TYPE=Release`
+  (`-O2`) is **353,988 bytes, 72.0 %, 134 KB free**, and its SRAM is unchanged
+  at 97.7 %. So the next feature is budgeted against **2.8 KB**, or against
+  134 KB with one CMake flag — a project decision, not a per-module one.
+  Turning optimisation on changes what a debugger shows and what a stack
+  high-water mark reads, so it is not a change to make silently.
 
   **Measured 2026-09-05 with the Modbus TCP gateway in.** Removing MQTT
   returned 20.1 KB of flash (97.2 % → 93.1 %), 1.3 KB of SRAM and 1.4 KB of
   CCM; the gateway then spent **6.0 KB of flash, 440 B of SRAM and 772 B of
   CCM** of it, plus 3 KB of `.ccmheap` for the `mbtcp` task stack at runtime.
   Net against the pre-MQTT-removal image: 14.1 KB of flash still in hand.
-  **Main SRAM is the tightest region, not flash.**
+  *(That 2026-09-05 note is superseded above: the cluster module spent
+  24.4 KB of `-O0` flash and 2.1 KB of SRAM, and flash overtook SRAM.)*
 
-  A new multi-KB `.bss` array still does not fit. Budget before adding anything — and remember OTA is the only
+  A new multi-KB `.bss` array still does not fit, and at `-O0` neither does a
+  new multi-KB `.text`. Budget before adding anything — and remember OTA is the only
   delivery path to a deployed board. The `.bin` is signed in-place
   (IMAGE_SIZE + HMAC patched) after every build
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
@@ -165,7 +176,12 @@ not DMA — DMA1 S3/S4 belong to the flash now):
 ./tools/trice log -p COM -args "/dev/ttyUSB0:460800" -i ./til.json -li ./li.json
 ```
 
-**Host-native unit tests** (no ARM toolchain; crypto NIST/RFC vectors, version
+**Host-native unit tests** (no ARM toolchain; **the battery cluster's limit
+arithmetic — the closed loop, its binding gate, every restart trigger, the slew
+and all the aggregation — which R4.6 makes a REQUIREMENT rather than a
+convenience, because what is being computed is a current limit for a live
+inverter with a live battery behind it; two property sweeps of 10 000 and
+4 000 pseudorandom buses back it,** crypto NIST/RFC vectors, version
 gate, boot_status flag lifecycle, **the Modbus TCP (MBAP) codec against every
 frame `solis_modbus` sends** — `App/Gw/mbap.c` is deliberately pure so the
 gateway's framing needs no board — the JSON module — the writer against a
@@ -277,9 +293,14 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
 0x0010_3000  ├───────────────────┤ handshake stamp; append-only 16B slot ring
              │ WG Config (4KB)   │ tunnel addr/mask + hub endpoint, one CRC'd
 0x0010_4000  ├───────────────────┤ record; absent = use built-in defaults
-             │ Free              │ ~7.34MB
-             └───────────────────┘
+             │ Free              │ ~7.34MB — nvDb places packCfg, packState,
+             └───────────────────┘   canLog (4MB) and clusterCfg above wgCfg
 ```
+
+**`nvdbUser_clusterCfg` (4 KB) is the newest user and `NVDB_TARGET_VER` is
+now 4.** A new user is itself a layout change even when the placement policy
+does not otherwise move; it appends above the pinned areas, so the
+bootloader contract (`FwuCtl_BlContractHolds()`) is unaffected.
 
 **`nvDb` (`Shared/NvDb/`) now owns this address space** —
 [docs/design_nv_db.md](docs/design_nv_db.md) §1-§4. Each client
@@ -395,7 +416,20 @@ PeriphNet/
                                   #   register + trace ring), bms_reader and
                                   #   bms_sim (now an ordinary subscriber and
                                   #   the bridge's frame source), pylontech.h
-    Cmd/cmd_parser.c/h            # CLI command parser (composition root)
+      Cluster/                      # THE BATTERY CLUSTER MODULE: N packs on one
+                                  #   DC bus presented to an inverter as ONE
+                                  #   battery.  cluster.h (the only consumer
+                                  #   header), cluster_calc (THE PURE CORE --
+                                  #   the closed-loop limit search and its
+                                  #   gate, restarts, sanitiser, slew,
+                                  #   aggregation, divergence; libc-only, zero
+                                  #   file statics, no Pack_ call),
+                                  #   cluster_cfg (JSON + nine name
+                                  #   accessors), cluster.c (tick, the
+                                  #   lock-free double-buffered publish, nvDb).
+                                  #   A consumer of App/Pack and a producer of
+                                  #   one settled snapshot; owns no peripheral
+  Cmd/cmd_parser.c/h            # CLI command parser (composition root)
     nv_record.h                   # a CRC'd, versioned record in one nvDb
                                   #   area. USER-side policy: nvDb never
                                   #   learns what a version is (Rule 3)
@@ -756,7 +790,7 @@ Shared code compiled into both bootloader and application.
 | cmd | 1024 words | osPriorityNormal (24) | Command dispatch (20ms poll). Cmd_Feed only buffers in ISR context (USB CDC/UART1 RX); handlers may block and use RTOS/lwIP APIs |
 | tudp | 512 words | osPriorityNormal (24) | Trice UDP broadcast consumer (runs lwIP TX path under core lock) |
 | modbus | 640 words | osPriorityNormal (24) | The engine: drains one queue fed by three sources (FreeRTOS timers, port completions, mutating API calls), runs a sequence per due (device, plan, time table), dispatches samples to subscribers, drains the request FIFO, commits config swaps. **No poll loop and no start/stop** — `Modbus_Init` is the whole lifecycle and timers come and go with subscriptions (docs/modbus.md §4.2, §5.2) |
-| func | 512 words | osPriorityNormal-1 (23) | The shared functionality task — one task, many clients, a packed event-ID space. Today its only client is the **pack** module: binds at start-up, drains pack events, and runs a 250 ms wall-clock tick (staleness, command expiry, each type's `tick`). Queue and stack are **static in `.bss`, not `.ccmheap`** — CCM is the tight region |
+| func | 512 words | osPriorityNormal-1 (23) | The shared functionality task — one task, many clients, a packed event-ID space. Its clients are the **pack** module (binds at start-up, drains pack events) and the **cluster**, which takes no event range because it posts nothing. The 250 ms wall-clock tick runs `Pack_Tick` then `Cluster_Tick` **in that order, same iteration**, so the cluster aggregates the state the pack tick just settled. Queue and stack are **static in `.bss`, not `.ccmheap`** — CCM is the tight region |
 | mbtcp | 768 words | osPriorityNormal-1 (23) | The Modbus TCP gateway on `:502`. **Below the engine deliberately** — a request arriving from the WAN must never delay the sequence that keeps the battery and inverter talking. Idle until a client connects; binds to the tunnel address only, and retries every 5 s while the board is unprovisioned rather than exiting. **Measured 2026-09-05: 537 of 768 words used under load, converged — 512 would have overflowed.** The depth is lwIP's `netconn_write` path and does not scale with frame size, since the frame buffers are static in `.ccmram` |
 | nvdb | 256 words | osPriorityLow | The nvDb collector: erases deleted space in the background so erases stay off the write path. One erasable unit per lock acquisition, so a waiting writer gets in between units. Sleeps on a notify (1 s backstop); never reboots anything |
 | tcpip_thread | 6144 bytes | 24 | lwIP TCP/IP processing — **also runs all WireGuard crypto** (handshake + per-packet ChaCha20-Poly1305), which is why it is above the CubeMX 4096 default |
@@ -853,6 +887,11 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/pack/config` | POST | Upload + apply a pack configuration. 422 names the offending **pack index and key**; 409 while another parse holds the shared scratch |
 | `/api/pack/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
 | `/api/pack/config` | DELETE | Erase it; the board becomes **unprovisioned**. There is no built-in default, so there is nothing to reset *to* |
+| `/api/cluster/status` | GET | The battery cluster: the published figures, **the four-number causal chain per direction** (loop → derated → slewed → published) with the loop's state, `why` and **which pack is binding the limit**, plus every member's share, load, age and flags. `?packs=0` omits the member array. Every enum renders as a **name**. **`bindingSample*` is expected to be a small fraction of `ticks`, and zero on a quiet site** — the loop only learns while something is actually asking the battery for current; that is correct, not a fault |
+| `/api/cluster/config` | GET | Active configuration, re-serialised (data-faithful) |
+| `/api/cluster/config` | POST | **202 Accepted** — the configuration is STAGED and adopted by the next tick, never applied inline; **409** while a stage is pending; 422 names the member index and key |
+| `/api/cluster/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
+| `/api/cluster/config` | DELETE | Erase it; the board becomes **unprovisioned** and the published limits fall to zero at the next tick. There is no built-in default |
 | `/api/can/status` | GET | The CAN bridge: mode, which cell is battery and which inverter, bitrate, the frame source, the override list, per-direction forward/suppress/drop counters, and both cells' health (rx/tx, overruns, errors, bus-off, ESR REC/TEC, TX queue depth) |
 | `/api/can/traffic?bus=N` | GET | The identifier register of one bus: per ID the counts, last payload, age, **observed period band** and how often the payload actually changed — which is how a live measurement is told from a constant |
 | `/api/can/trace` | GET | The newest N frames of the trace ring, oldest first (`?n=`, default 32) |
