@@ -125,6 +125,15 @@ typedef enum {
      * NVDB_TARGET_VER moves with it. */
     nvdbUser_clusterCfg,
 
+    /* App/Http/web_ui.c — the gzip-compressed web UI (docs §B.1).  It lives
+     * here rather than in the image because the page has grown 4.1 KB -> 15.6 KB
+     * since March and more than doubled in the five weeks to 2026-09-07, in an
+     * image that is 99.65 % full: on the medium, a new card costs no flash at
+     * all.  64 KB against ~5.3 KB used today, because the whole point is
+     * headroom.  The image keeps a small fallback page, so a board with this
+     * area empty still answers `GET /` and says how to fill it. */
+    nvdbUser_webUi,
+
     nvdbUser_last               /* sentinel — a count, never stored         */
 } eNvDbUser;
 

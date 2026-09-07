@@ -88,6 +88,18 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 - `build/periphnet_full.hex` — BL + signed APP combined, factory/initial J-Link write
 - `build/periphnet_fwu.pnfw` — encrypted+authenticated blob, the ONLY artifact
   used for OTA (needs python3 `cryptography` + `intelhex` packages)
+- `build/periphnet_ui.pnui` — **the web UI, gzipped, and a SEPARATE ARTIFACT
+  from the firmware**. The page lives in external flash (`nvdbUser_webUi`), not
+  in the image: it had grown to 15.6 KB and more than doubled in the five weeks
+  to 2026-09-07, so every new card was spending flash the CAN frame source
+  needs. Built by `dfu_image_tool.py ui` from `App/Http/web/index.html`; no keys
+  and no python packages involved. **A UI change needs no firmware cycle and no
+  `confirm`, and a firmware update does NOT replace the page.** Upload it with
+  `curl -X POST --data-binary @build/periphnet_ui.pnui http://HOST/api/ui`.
+  `periphnet_full.hex` cannot carry it — that is internal flash only — so a
+  **factory-flashed board serves the built-in fallback page until the UI is
+  uploaded once**. The fallback says exactly that and names the command; the
+  whole `/api/` surface works without it
 
 **FWU keys:** `bootloader/secrets.c` holds committed DEVELOPMENT keys (matching
 the defaults in `tools/dfu_image_tool.py`). For production: create gitignored
@@ -138,7 +150,9 @@ explicit, not globbed).
 
 ```bash
 ping 10.42.0.203
-curl http://10.42.0.203/
+curl --compressed http://10.42.0.203/           # UI is stored gzipped; plain
+                                                # curl would print binary
+curl http://10.42.0.203/api/ui                  # is a page stored? size/crc
 curl http://10.42.0.203/api/image/info                 # stored image (name/version/size/crc)
 curl http://10.42.0.203/api/fwu/status                 # FWU state (running/golden/confirmed)
 curl http://10.42.0.203/api/system/status              # tasks, stacks, heap, CPU, IWDG margin
@@ -304,8 +318,9 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
              └───────────────────┘   canLog (4MB) and clusterCfg above wgCfg
 ```
 
-**`nvdbUser_clusterCfg` (4 KB) is the newest user and `NVDB_TARGET_VER` is
-now 4.** A new user is itself a layout change even when the placement policy
+**`nvdbUser_webUi` (64 KB) is the newest user and `NVDB_TARGET_VER` is
+now 5** — the gzipped web page, ~5.3 KB used of 64 KB. Before it,
+`nvdbUser_clusterCfg` (4 KB) made it 4. A new user is itself a layout change even when the placement policy
 does not otherwise move; it appends above the pinned areas, so the
 bootloader contract (`FwuCtl_BlContractHolds()`) is unaffected.
 
@@ -865,7 +880,11 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/fwu/kick` | POST | Reload the confirmation countdown (`?window_sec=N`, clamped 30..3600). **The new FWU procedure**: an unconfirmed image reboots itself unless kicked, so an updater that loses its tunnel to a bad build recovers the board by doing nothing. 409 when nothing is counting down, saying whether that is `exempt` (local build) or already `confirmed` |
 | `/api/fwu/verify` | GET | Authenticate RUNNING image via BL HMAC (no FWU state change) |
 | `/api/fwu/status` | GET | JSON: running/golden versions, confirmed, attempts_remaining, last_fwu_result, promote_pending, reset_cause, plus **`confirm_guard`** (armed/exempt/window_sec/remaining_sec/kicks) — the countdown to a self-reboot |
-| `/api/crash/latest` | GET/DELETE | Crash log read / clear |
+| `/api/ui` | GET | Is a web page stored: `present`, `size`, `crc32`, `encoding`, `max_bytes` |
+| `/api/ui` | POST | Upload the `.pnui` blob the build produces. Streams to `nvdbUser_webUi`; **the header is written LAST, after the payload is read back and CRC-checked**, so an interrupted upload leaves the fallback serving rather than half a page. 422 names what was wrong with the blob |
+| `/api/ui` | DELETE | Erase the stored page; `GET /` falls back to the built-in one |
+| `/` | GET | **Serves the stored page STILL GZIPPED** (`Content-Encoding: gzip`; the board never decompresses). `Accept-Encoding` is deliberately not consulted — honouring it would mean storing an uncompressed copy too. Use `curl --compressed`; every `/api/` reply stays plain JSON. With no page stored, answers the built-in fallback |
+| `/api/crash/latest` | GET/DELETE | Crash log read / clear. **`backtrace` is now `scan`** — LR candidates from the stack scan, not an ordered chain (the frame-pointer unwinder was removed 2026-09-07) |
 | `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag) |
 | `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |
 | `/api/system/reboot` | POST | Restart the board (`?delay_ms=N`, default 1000, floored at 500). Answers **before** it acts — the reset is armed on a deadline and performed by defaultTask, so the caller gets a 200 instead of a dropped connection. Arms **no** FWU state, unlike the `/api/fwu/install` trick that used to stand in for it |

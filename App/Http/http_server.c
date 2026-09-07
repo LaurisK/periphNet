@@ -14,6 +14,7 @@
  */
 
 #include "App/Http/http_server.h"
+#include "App/Http/web_ui.h"
 #include "App/Img/image_store.h"
 #include "json.h"
 #include "nvdb.h"
@@ -91,303 +92,38 @@ static char resp_buf[1280] CCMRAM_BSS;
  * byte in is the \u00XX worst case. */
 #define ESC_FIELD_LEN           (((48u - 1u) * 6u) + 1u)
 
-static const char index_html[] =
+/* THE FALLBACK PAGE, and deliberately nothing more.
+ *
+ * The real UI lives in external flash (App/Http/web_ui.c) because it had grown
+ * to 15.6 KB of an image that is 99.65 % full.  What stays here is the answer
+ * for a board that has never been given one -- a factory board, or one whose
+ * page was erased -- so `GET /` is never a blank screen with no explanation.
+ *
+ * It is plain text in one literal on purpose: every byte here is image, and
+ * the whole reason the page moved out was that those bytes are scarce.  A
+ * board in this state is FULLY OPERABLE -- every /api/ route is in the image --
+ * so this needs to say only that, and how to install the page. */
+static const char fallback_html[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>PeriphNet</title>"
-    "<style>"
-    "body{font-family:sans-serif;max-width:640px;margin:20px auto;padding:0 12px}"
-    "h1{margin-bottom:4px}#ver{color:#666;font-size:.9em}"
-    ".card{border:1px solid #ddd;border-radius:6px;padding:12px;margin:10px 0}"
-    ".card h3{margin:0 0 8px}#bar{width:100%;height:18px;background:#eee;border-radius:4px;display:none}"
-    "#fill{height:100%;background:#4a4;border-radius:4px;transition:width .3s}"
-    "button{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;margin:4px 2px}"
-    ".btn-up{background:#37c;color:#fff}.btn-dl{background:#666;color:#fff}"
-    ".btn-inst{background:#e63;color:#fff}.btn-del{background:#a33;color:#fff}"
-    "button:disabled{opacity:.5;cursor:default}"
-    ".msg{margin:8px 0;padding:8px;border-radius:4px;display:none}"
-    ".ok{background:#dfd;color:#060}.err{background:#fdd;color:#600}"
-    ".info{color:#555;font-size:.9em;margin:6px 0}"
-    "pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}"
-    "table.cells{width:100%;border-collapse:collapse;font-size:.8em}"
-    "table.cells td{padding:1px 4px;white-space:nowrap}"
-    ".cb{display:inline-block;height:10px;background:#4a8;border-radius:2px;vertical-align:middle}"
-    ".cmin{background:#e63}.cmax{background:#37c}"
-    ".warn{color:#a60}.dim{color:#999}"
-    "</style></head><body>"
-    "<h1>PeriphNet</h1><div id=ver></div><div id=uptime class=info></div>"
-    "<div class=card><h3>Image Management</h3>"
-    "<input type=file id=file accept='.pnfw'>"
-    "<button class=btn-up onclick=upload()>Upload</button>"
-    "<div id=bar><div id=fill></div></div>"
-    "<div id=iinfo class=info></div><div id=imsg class=msg></div>"
-    "<div style='margin-top:8px'>"
-    "<button class=btn-dl onclick=download() id=bdl disabled>Download</button>"
-    "<button class=btn-del onclick=del() id=bdel disabled>Delete</button>"
-    "</div></div>"
-    "<div class=card><h3>Firmware Update</h3>"
-    "<div id=finst class=info></div><div id=finfo class=info></div>"
-    "<div id=fguard class=info></div>"
-    "<div id=fmsg class=msg></div>"
-    "<div style='margin-top:8px'>"
-    "<button class=btn-inst onclick=install() id=binst disabled>Install</button>"
-    "<button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button>"
-    "<button class=btn-up onclick=kickFw() id=bkick disabled>Kick</button>"
-    "</div></div>"
-    "<div class=card><h3>System</h3>"
-    "<div id=sysinfo class=info>Loading...</div><div id=systasks></div>"
-    "<button class=btn-dl onclick=resetPeaks()>Reset peaks</button>"
-    "<button class=btn-del onclick=reboot()>Reboot</button></div>"
-    "<div class=card><h3>Battery Pack</h3>"
-    "<div id=pkhdr class=info>Loading...</div>"
-    "<div id=pkcells></div>"
-    "<div id=pkstats class=info></div>"
-    "<button class=btn-dl onclick=balReset()>Reset balance totals</button></div>"
-    "<div class=card><h3>CAN Bridge</h3>"
-    "<div id=canhdr class=info>Loading...</div>"
-    "<div id=canbus class=info></div>"
-    "<div style='margin-top:6px'>"
-    "<button class=btn-up onclick=canMode('bridge')>Bridge</button>"
-    "<button class=btn-dl onclick=canMode('monitor')>Monitor</button>"
-    "<button class=btn-inst onclick=canMode('bms')>Be the BMS</button>"
-    "<button class=btn-del onclick=canMode('off')>Off</button>"
-    "<button class=btn-dl onclick=canReset()>Reset counters</button>"
-    "</div>"
-    "<div id=cantraffic></div>"
-    "<h3 style='margin-top:14px'>Flash Trace</h3>"
-    "<div id=canloghdr class=info>Loading...</div>"
-    "<div style='margin-top:6px'>"
-    "<button class=btn-up onclick=canLogMode('changes')>Changes</button>"
-    "<button class=btn-dl onclick=canLogMode('all')>All frames</button>"
-    "<button class=btn-del onclick=canLogMode('off')>Off</button>"
-    "<button class=btn-del onclick=canLogWipe()>Wipe</button>"
-    "</div></div>"
-    "<div class=card><h3>Last Crash</h3>"
-    "<div id=crash>Loading...</div></div>"
-    "<script>"
-    "var B='http://'+location.host;"
-    "function show(id,t,ok){var m=document.getElementById(id);m.textContent=t;"
-    "m.className='msg '+(ok?'ok':'err');m.style.display='block'}"
-    "function pollImg(){fetch(B+'/api/image/info').then(r=>r.json()).then(j=>{"
-    "var t;"
-    "if(j.present){t='Name: '+(j.name||'(unnamed)')+' | Version: '+j.version"
-    "+' | Size: '+j.size+' B | CRC32: '+j.crc32}"
-    "else if(j.status=='uploading'){t='Uploading... '+j.progress+'%'}"
-    "else if(j.status=='error'){t='Error: '+j.error}"
-    "else{t='No image uploaded.'}"
-    "document.getElementById('iinfo').textContent=t;"
-    "document.getElementById('bdl').disabled=!j.present;"
-    "document.getElementById('bdel').disabled=!j.present;"
-    "document.getElementById('binst').disabled=!j.present;"
-    "document.getElementById('finst').textContent=j.present?"
-    "'Image ready to install: '+j.version+(j.name?' ('+j.name+')':''):"
-    "'No image available - upload one in Image Management.';"
-    "}).catch(()=>{})}"
-    "function pollFwu(){fetch(B+'/api/fwu/status').then(r=>r.json()).then(j=>{"
-    "document.getElementById('ver').textContent='Running: '+j.running_version"
-    "+(j.confirmed?' (confirmed)':' UNCONFIRMED, '+j.attempts_remaining+' boots left');"
-    "var u=j.uptime,s='';"
-    "if(u>=86400){s+=Math.floor(u/86400)+'d ';u%=86400}"
-    "if(u>=3600){s+=Math.floor(u/3600)+'h ';u%=3600}"
-    "if(u>=60){s+=Math.floor(u/60)+'m ';u%=60}"
-    "s+=u+'s';"
-    "document.getElementById('uptime').textContent='Uptime: '+s;"
-    "var t='';"
-    "if(j.golden_version)t='Golden: '+j.golden_version;"
-    "if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;"
-    "if(j.promote_pending)t+=(t?' | ':'')+'promoting to golden...';"
-    "document.getElementById('finfo').textContent=t;"
-    "var g=j.confirm_guard||{};"
-    "document.getElementById('fguard').textContent=g.armed?"
-    "'Auto-reboot in '+g.remaining_sec+'s unless kicked or confirmed'"
-    "+' (kicks: '+g.kicks+')':'';"
-    "document.getElementById('bconf').disabled=j.confirmed;"
-    "document.getElementById('bkick').disabled=!g.armed;"
-    "}).catch(()=>{})}"
-    "function pct(p){return (p/10).toFixed(1)+'%'}"
-    "function pollSys(){fetch(B+'/api/system/status').then(r=>r.json()).then(j=>{"
-    "var h='CPU '+pct(j.cpu_load_permille)+' (peak '+pct(j.cpu_peak_permille)"
-    "+') | idle '+pct(j.idle_permille)"
-    "+'<br>Heap '+j.heap.free+' / '+j.heap.size+' B free (min '+j.heap.free_min+')'"
-    "+'<br>Watchdog margin: worst gap '+j.iwdg.gap_max_ms+' ms of '+j.iwdg.timeout_ms+' ms';"
-    "if(!j.runtime_counter_ok)h+='<br><b>CPU clock not running</b>';"
-    "if(j.tasks_stale)h+='<br><b>'+j.tasks_stale+' task(s) missed their check-in deadline</b>';"
-    "if(j.stack_warnings)h+='<br><b>'+j.stack_warnings+' task(s) below '+j.stack_warn_words+' free stack words</b>';"
-    "document.getElementById('sysinfo').innerHTML=h;"
-    "var t='task            pri st    cpu   peak  stack(free/size) checkins\\n';"
-    "j.tasks.forEach(function(k){"
-    "t+=(k.name+'               ').slice(0,15)+String(k.prio).padStart(4)+' '+k.state"
-    "+pct(k.cpu_permille).padStart(7)+pct(k.cpu_peak_permille).padStart(7)+'  '"
-    "+(k.stack_free_min_words+'/'+(k.stack_size_words||'?')).padStart(14)+' '"
-    "+k.checkins+(k.deadline_ms?' ('+k.since_checkin_ms+'ms)':'')"
-    "+(k.stale?' STALE':'')+(k.present?'':' GONE')+'\\n'});"
-    "document.getElementById('systasks').innerHTML='<pre>'+t+'</pre>'"
-    "}).catch(()=>{})}"
-    "function reboot(){if(!confirm('Reboot the board now?'))return;"
-    "fetch(B+'/api/system/reboot',{method:'POST'})"
-    ".then(function(){document.getElementById('sysinfo').textContent="
-    "'Rebooting - reconnecting...';setTimeout(function(){location.reload()},"
-    "12000)})}"
-    "function resetPeaks(){fetch(B+'/api/system/reset-peaks',{method:'POST'})"
-    ".then(()=>pollSys()).catch(()=>{})}"
-    "function pollPack(){fetch(B+'/api/pack/status').then(r=>r.json()).then(j=>{"
-    "var h=document.getElementById('pkhdr');"
-    "if(!j.provisioned||!j.packs.length){h.innerHTML="
-    "'<span class=dim>Unprovisioned - upload a pack config to /api/pack/config</span>';"
-    "document.getElementById('pkcells').innerHTML='';return}"
-    "var p=j.packs[0];"
-    /* SOC is flagged as estimated or the vendor's, because a consumer that
-     * cannot tell them apart will trust the wrong one. */
-    "var est=(p.flags&1)?' <span class=dim>(estimated)</span>':' <span class=dim>(BMS)</span>';"
-    "var cls=p.cond=='online'?'':' class=warn';"
-    /* WHY, not just THAT.  "absent" alone sends an operator to the site; the
-     * reason distinguishes a config error from a silent battery, and until
-     * whyText existed it was reachable only from a console needing physical
-     * access.  The wording comes from a fixed table in pack_cfg.c -- no
-     * operator input reaches it, so innerHTML is safe here. */
-    "var why=(p.cond=='online'||!p.whyText)?'':"
-    "' <span class=dim>('+p.whyText+')</span>';"
-    "h.innerHTML='<b'+cls+'>'+p.cond+'</b>'+why+' &middot; '+p.name+' &middot; '+"
-    "(p.voltage_mV/1000).toFixed(3)+' V &middot; '+(p.current_mA/1000).toFixed(2)+' A &middot; '+"
-    "((p.voltage_mV*p.current_mA)/1e6).toFixed(0)+' W<br>'+"
-    "'SOC '+(p.soc_pm/10).toFixed(1)+'%'+est+' conf '+(p.socConf_pm/10).toFixed(0)+'%'+"
-    "(p.socDrift_pm?' drift '+(p.socDrift_pm/10).toFixed(1)+'%':'')+'<br>'+"
-    "(p.remaining_mAh/1000).toFixed(1)+' Ah of '+(p.capacity_mAh/1000).toFixed(1)+' Ah'+"
-    "' &middot; SOH '+(p.soh_pm/10).toFixed(0)+'% conf '+(p.sohConf_pm/10).toFixed(0)+'%<br>'+"
-    "'limits '+(p.chargeLimit_mA/1000).toFixed(0)+' A chg / '+"
-    "(p.dischargeLimit_mA/1000).toFixed(0)+' A dsg &middot; '+"
-    "'temp '+(p.tempMin_dC/10).toFixed(1)+'-'+(p.tempMax_dC/10).toFixed(1)+' C'+"
-    "(p.alarms?' &middot; <span class=warn>ALARM 0x'+p.alarms.toString(16)+'</span>':'');"
-    "}).catch(e=>{document.getElementById('pkhdr').textContent='pack: '+e})}"
-
-    "function pollCells(){fetch(B+'/api/pack/cells?idx=0').then(r=>r.json()).then(j=>{"
-    "var d=document.getElementById('pkcells');"
-    "if(!j.cells||!j.cells.length){d.innerHTML='';return}"
-    "var mv=j.cells.map(c=>c.mV),lo=Math.min.apply(null,mv),hi=Math.max.apply(null,mv);"
-    "var t='<div class=info>'+j.cellCount+' cells &middot; '+lo+'-'+hi+' mV &middot; spread <b>'+"
-    "(hi-lo)+' mV</b>'+(j.weakestIdx>=0?' &middot; weakest cell '+j.weakestIdx:'')+"
-    "' &middot; measured '+(j.measuredCells||0)+'/'+j.cellCount+'</div>';"
-    "t+='<table class=cells>';"
-    "for(var i=0;i<j.cells.length;i++){var c=j.cells[i];"
-    /* bar width is the position INSIDE the spread, so a 3 mV spread is still
-     * legible -- an absolute scale would render every cell identical. */
-    "var w=(hi>lo)?Math.round((c.mV-lo)*100/(hi-lo)):0;"
-    "var k=(c.mV==lo)?' cmin':((c.mV==hi)?' cmax':'');"
-    "t+='<tr><td>'+i+'</td><td>'+c.mV+' mV</td>'+"
-    "'<td style=width:55%><span class=cb'+k+' style=width:'+w+'%></span></td>'+"
-    "'<td>'+(c.soc_pm>=0?(c.soc_pm/10).toFixed(1)+'%':'<span class=dim>-</span>')+'</td>'+"
-    "'<td>'+(c.capacity_mAh>0&&c.capConf_pm>0?(c.capacity_mAh/1000).toFixed(1)+' Ah':"
-    "'<span class=dim>-</span>')+'</td></tr>'}"
-    "t+='</table>';"
-    "if(j.balance)t+='<div class=info>balancer '+(j.balance.active?'ON':'idle')+"
-    "' '+(j.balance.current_mA/1000).toFixed(2)+' A'+"
-    "(j.balance.srcIdx>=0?' cell '+j.balance.srcIdx+'&rarr;'+j.balance.sinkIdx:'')+'</div>';"
-    "d.innerHTML=t}).catch(e=>{})}"
-
-    "function pollPStats(){fetch(B+'/api/pack/stats?idx=0').then(r=>r.json()).then(j=>{"
-    "var d=document.getElementById('pkstats');if(!j.stats){d.innerHTML='';return}"
-    "var U={57:'Ah',9:'C',33:'A',35:'V',255:''};var t='';"
-    "for(var i=0;i<j.stats.length;i++){var s=j.stats[i];"
-    "t+=(i?' &middot; ':'')+s.name+' <b>'+(s.value*Math.pow(10,s.scale)).toFixed(2)+"
-    "'</b> '+(U[s.unit]||'')}"
-    "d.innerHTML=t}).catch(e=>{})}"
-
-    "function balReset(){if(!confirm('Reset accumulated balance totals?'))return;"
-    "fetch(B+'/api/pack/balance/reset?idx=0',{method:'POST'}).then(()=>pollCells())}"
-
-    "function canRows(b,j){var h='<tr><td colspan=6><b>CAN'+b+'</b></td></tr>';"
-    "if(!j.ids.length){h+='<tr><td colspan=6 class=dim>no traffic</td></tr>';"
-    "return h}"
-    "j.ids.forEach(function(r){h+='<tr><td>'+r.id+'</td><td>rx '+r.rx"
-    "+'</td><td>tx '+r.tx+'</td><td>'+r.data+'</td><td>'+r.age_ms"
-    "+' ms</td><td>'+(r.max_gap_ms?r.min_gap_ms+'-'+r.max_gap_ms+' ms':'-')"
-    "+'</td></tr>'});return h}"
-    "function pollCan(){fetch(B+'/api/can/status').then(r=>r.json()).then(j=>{"
-    "var t='Mode: <b>'+j.mode+'</b> | battery CAN'+j.battery_bus"
-    "+' &rarr; inverter CAN'+j.inverter_bus+' | '+j.bitrate_bps+' bps';"
-    "if(j.mode=='bms')t+=' | source '+(j.source.bound?'bound':"
-    "'<span class=warn>MISSING</span>')+', '+j.source.emits+' emits';"
-    "document.getElementById('canhdr').innerHTML=t;"
-    "var f=j.forward,m=j.monitor;"
-    "var b='bat&rarr;inv fwd '+f.to_inverter.forwarded+' / supp '"
-    "+f.to_inverter.suppressed+' / drop '+f.to_inverter.dropped"
-    "+'<br>inv&rarr;bat fwd '+f.to_battery.forwarded+' / supp '"
-    "+f.to_battery.suppressed+' / drop '+f.to_battery.dropped+'<br>';"
-    "j.buses.forEach(function(u){b+='CAN'+u.bus+' '+(u.running?'up':'down')"
-    "+' rx '+u.rx+' tx '+u.tx_done+'/'+u.tx_accepted+' drop '+u.tx_dropped"
-    "+' err '+u.errors+' busoff '+u.bus_off_count"
-    "+' rec/tec '+u.rec+'/'+u.tec+'<br>'});"
-    "b+='recorded '+m.recorded+', id overflow '+m.id_overflow;"
-    "document.getElementById('canbus').innerHTML=b}).catch(()=>{});"
-    "Promise.all([fetch(B+'/api/can/traffic?bus=1').then(r=>r.json()),"
-    "fetch(B+'/api/can/traffic?bus=2').then(r=>r.json())]).then(function(a){"
-    "document.getElementById('cantraffic').innerHTML="
-    "'<table class=cells>'+canRows(1,a[0])+canRows(2,a[1])+'</table>'"
-    "}).catch(()=>{})}"
-    "function canMode(m){fetch(B+'/api/can/mode?mode='+m,{method:'POST'})"
-    ".then(()=>pollCan()).catch(()=>{})}"
-    "function canReset(){fetch(B+'/api/can/reset',{method:'POST'})"
-    ".then(()=>pollCan()).catch(()=>{})}"
-    "function pollCanLog(){fetch(B+'/api/can/log/status').then(r=>r.json()).then(j=>{"
-    "var t='Mode: <b>'+j.mode+'</b> ('+j.state+') | held '+j.held_recs+' / '"
-    "+j.capacity_recs+' recs | gap&gt;='+j.min_gap_ms+'ms hb&lt;='"
-    "+j.heartbeat_ms+'ms<br>staged '+j.staged+'/'+j.stage_depth"
-    "+' | dropped '+j.dropped+' stalled '+j.stalled+' writeErr '"
-    "+j.write_errors+' | area '+(j.area_size_bytes/1048576).toFixed(1)+' MB';"
-    "document.getElementById('canloghdr').innerHTML=t}).catch(()=>{})}"
-    "function canLogMode(m){fetch(B+'/api/can/log/mode?mode='+m,{method:'POST'})"
-    ".then(()=>pollCanLog()).catch(()=>{})}"
-    "function canLogWipe(){if(!confirm('Erase the whole flash trace?'))return;"
-    "fetch(B+'/api/can/log/wipe',{method:'POST'}).then(()=>pollCanLog()).catch(()=>{})}"
-    "function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats();pollCan();pollCanLog()}"
-    "function kickFw(){fetch(B+'/api/fwu/kick',{method:'POST'})"
-    ".then(r=>r.json()).then(j=>{show('fmsg','Kicked, '+j.window_sec+'s',1);poll()})"
-    ".catch(e=>show('fmsg',e,0))}"
-    "function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'})"
-    ".then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()})"
-    ".catch(e=>show('fmsg',e,0))}"
-    "function crashPoll(){fetch(B+'/api/crash/latest').then(r=>r.json()).then(j=>{"
-    "var d=document.getElementById('crash');"
-    "if(!j.valid){d.innerHTML='No crash recorded.';return}"
-    "var h='<b>'+j.type+'</b> at tick '+j.tick+'<br>'"
-    "+'PC=0x'+j.pc+' LR=0x'+j.lr+' SP=0x'+j.sp+'<br>';"
-    "if(j.task)h+='Task: '+j.task+'<br>';"
-    "h+='CFSR=0x'+j.cfsr+' HFSR=0x'+j.hfsr+'<br>';"
-    "if(j.scan&&j.scan.length)h+='LR scan (candidates, filter): '"
-    "+j.scan.join(' ')+'<br>';"
-    "if(j.tasks.length){h+='<pre>';j.tasks.forEach(function(t){"
-    "h+=t.name+' ['+t.state+'] PC=0x'+t.pc+' stk='+t.free_stack+'\\n'});"
-    "h+='</pre>'}"
-    "h+='<button class=btn-del onclick=clearCrash()>Clear</button>';"
-    "d.innerHTML=h}).catch(()=>{})}"
-    "function clearCrash(){fetch(B+'/api/crash/latest',{method:'DELETE'})"
-    ".then(()=>crashPoll()).catch(()=>{})}"
-    "function upload(){var f=document.getElementById('file').files[0];"
-    "if(!f){show('imsg','Select a file first',0);return}"
-    "var bar=document.getElementById('bar'),fill=document.getElementById('fill');"
-    "bar.style.display='block';fill.style.width='0%';"
-    "var x=new XMLHttpRequest();"
-    "x.upload.onprogress=function(e){if(e.lengthComputable)"
-    "fill.style.width=Math.round(100*e.loaded/e.total)+'%'};"
-    "x.onload=function(){bar.style.display='none';"
-    "if(x.status==200){var r=JSON.parse(x.responseText);"
-    "show('imsg','Upload OK: '+r.version+' ('+r.size+' B)',1)}else{"
-    "show('imsg','Upload failed: '+x.responseText,0)}poll()};"
-    "x.onerror=function(){bar.style.display='none';show('imsg','Network error',0)};"
-    "x.open('POST',B+'/api/image/upload');"
-    "x.setRequestHeader('Content-Type','application/octet-stream');"
-    "x.setRequestHeader('X-Filename',f.name.replace(/[^\\x20-\\x7e]/g,'_'));"
-    "x.send(f)}"
-    "function download(){window.location=B+'/api/image/download'}"
-    "function install(){if(!confirm('Install uploaded image? Device will reboot.'))return;"
-    "fetch(B+'/api/fwu/install',{method:'POST'}).then(r=>r.json()).then(j=>{"
-    "if(j.status=='deploying'){show('fmsg','Installing... device will reboot',1)}else{"
-    "show('fmsg','Install failed: '+(j.error||JSON.stringify(j)),0)}}).catch(e=>show('fmsg',e,0))}"
-    "function del(){fetch(B+'/api/image',{method:'DELETE'}).then(r=>r.json())"
-    ".then(j=>{show('imsg',j.status=='deleted'?'Image deleted':'Delete failed: '+(j.error||''),j.status=='deleted');poll()})"
-    ".catch(e=>show('imsg',e,0))}"
-    "poll();setInterval(poll,5000);crashPoll();"
-    "</script></body></html>";
+    "<title>PeriphNet</title><style>"
+    "body{font-family:system-ui,sans-serif;margin:2em auto;max-width:40em;"
+    "line-height:1.5;color:#222}code{background:#f2f2f2;padding:.1em .3em}"
+    "pre{background:#f2f2f2;padding:1em;overflow-x:auto}</style></head><body>"
+    "<h1>PeriphNet</h1>"
+    "<p>The board is running. <b>No web interface is installed.</b></p>"
+    "<p>The interface is stored in external flash and shipped separately from "
+    "the firmware, so it is uploaded once per board:</p>"
+    "<pre>curl -X POST --data-binary @periphnet_ui.pnui \\\n"
+    "     http://HOST/api/ui</pre>"
+    "<p><code>periphnet_ui.pnui</code> is produced by the build, next to "
+    "<code>periphnet_fwu.pnfw</code>. It does not need a firmware update, and "
+    "a firmware update does not replace it.</p>"
+    "<p>Everything else already works without it &mdash; the whole "
+    "<code>/api/</code> surface is in the firmware. For example "
+    "<code>/api/system/status</code>, <code>/api/pack/status</code>, "
+    "<code>/api/cluster/status</code>.</p>"
+    "</body></html>";
 
 /* --------------------------------------------------------------------------
  * Connection byte stream — hides netbuf/part boundaries from the parser
@@ -4222,6 +3958,141 @@ static void handle_wg_restart(struct netconn *conn)
     send_json(conn, "200 OK", resp_buf);
 }
 
+/* `GET /`.  The stored page is served STILL COMPRESSED -- the board never
+ * decompresses it, it sets one header and streams the bytes it holds -- so
+ * gzip costs nothing here and saves about two thirds of the segments on a
+ * tunnel where TCP_MSS is 536.
+ *
+ * `Accept-Encoding` is deliberately not consulted: honouring it would mean
+ * storing an uncompressed copy too, which is the cost the compression exists
+ * to avoid, and every browser that can reach this board sends gzip.  Note
+ * this makes `curl http://HOST/` return binary -- use `curl --compressed`.
+ * Only this one route is affected; every /api/ reply stays plain JSON. */
+static void handle_index(struct netconn *conn)
+{
+    static uint8_t buf[256];
+    char           hdr[160];
+    uint32_t       size, off;
+    int            hlen;
+
+    if (!WebUi_Present()) {
+        hlen = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %u\r\n"
+            "Connection: close\r\n\r\n",
+            (unsigned)(sizeof(fallback_html) - 1));
+        send_all(conn, hdr, hlen);
+        send_all(conn, fallback_html, sizeof(fallback_html) - 1);
+        return;
+    }
+
+    size = WebUi_PayloadSize();
+    hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Encoding: gzip\r\n"
+        "Content-Length: %lu\r\n"
+        "Connection: close\r\n\r\n",
+        (unsigned long)size);
+    if (!send_all(conn, hdr, hlen)) {
+        return;
+    }
+
+    for (off = 0u; off < size; ) {
+        uint32_t n = size - off;
+
+        if (n > sizeof(buf)) {
+            n = sizeof(buf);
+        }
+        if (!WebUi_Read(off, buf, n)) {
+            return;         /* header already sent; dropping is all we can do */
+        }
+        if (!send_all(conn, buf, n)) {
+            return;
+        }
+        off += n;
+    }
+}
+
+/** `GET /api/ui` — is a page stored, and which one. */
+static void handle_ui_status(struct netconn *conn)
+{
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"present\":%s,\"size\":%lu,\"crc32\":\"%08lX\","
+             "\"encoding\":\"gzip\",\"max_bytes\":%lu}",
+             WebUi_Present() ? "true" : "false",
+             (unsigned long)WebUi_PayloadSize(),
+             (unsigned long)WebUi_Crc32(),
+             (unsigned long)WEBUI_BLOB_MAX);
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/** `POST /api/ui` — upload a .pnui blob, streamed straight to the medium. */
+static void handle_ui_upload(struct netconn *conn, sConnStream *s)
+{
+    uint32_t    content_length = parse_content_length(req_buf);
+    uint32_t    remaining;
+    const char *err;
+
+    if (content_length == 0u) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required\"}");
+        return;
+    }
+
+    err = WebUi_UploadBegin(content_length);
+    if (err != NULL) {
+        snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}", err);
+        send_json(conn, "409 Conflict", resp_buf);
+        return;
+    }
+
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    remaining = content_length;
+    while (remaining > 0u) {
+        uint32_t n;
+
+        if (cs_fill(s) != ERR_OK) {
+            WebUi_UploadAbort();
+            send_json(conn, "408 Request Timeout",
+                      "{\"error\":\"connection lost during upload\"}");
+            return;
+        }
+        n = (uint32_t)(s->len - s->off);
+        if (n > remaining) {
+            n = remaining;
+        }
+        if (!WebUi_UploadWrite((uint8_t *)s->data + s->off, n)) {
+            WebUi_UploadAbort();
+            send_json(conn, "500 Internal Server Error",
+                      "{\"error\":\"flash write error\"}");
+            return;
+        }
+        s->off    += (u16_t)n;
+        remaining -= n;
+    }
+
+    err = WebUi_UploadFinish();
+    if (err != NULL) {
+        /* 422: the bytes arrived, they are just not a page.  The area is left
+         * without a valid header, so the fallback answers until a good blob
+         * lands -- which is the state an operator can act on. */
+        snprintf(resp_buf, sizeof(resp_buf), "{\"error\":\"%s\"}", err);
+        send_json(conn, "422 Unprocessable Entity", resp_buf);
+        return;
+    }
+
+    snprintf(resp_buf, sizeof(resp_buf),
+             "{\"status\":\"stored\",\"size\":%lu,\"crc32\":\"%08lX\"}",
+             (unsigned long)WebUi_PayloadSize(),
+             (unsigned long)WebUi_Crc32());
+    send_json(conn, "200 OK", resp_buf);
+}
+
 static void handle_connection(struct netconn *conn)
 {
     sConnStream stream;
@@ -4380,16 +4251,19 @@ static void handle_connection(struct netconn *conn)
         handle_wg_keygen(conn);
     } else if (route_is("POST /api/wg/restart")) {
         handle_wg_restart(conn);
+    } else if (route_is("GET /api/ui")) {
+        handle_ui_status(conn);
+    } else if (route_is("POST /api/ui")) {
+        handle_ui_upload(conn, &stream);
+    } else if (route_is("DELETE /api/ui")) {
+        if (WebUi_Erase()) {
+            send_json(conn, "200 OK", "{\"status\":\"erased\"}");
+        } else {
+            send_json(conn, "500 Internal Server Error",
+                      "{\"error\":\"could not erase the stored page\"}");
+        }
     } else if (route_is("GET / ")) {
-        char hdr[96];
-        int hlen = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html\r\n"
-            "Content-Length: %u\r\n"
-            "Connection: close\r\n\r\n",
-            (unsigned)(sizeof(index_html) - 1));
-        send_all(conn, hdr, hlen);
-        send_all(conn, index_html, sizeof(index_html) - 1);
+        handle_index(conn);
     } else {
         send_body(conn, "404 Not Found", "text/html",
                   "<html><body><h1>404 Not Found</h1></body></html>");

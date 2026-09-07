@@ -956,6 +956,34 @@ else()
 endif()
 
 # ==============================================================================
+# Web UI artifact
+#   periphnet_ui.pnui — the gzipped web page, uploaded to POST /api/ui
+#
+# SEPARATE FROM THE FIRMWARE ON PURPOSE.  The page lives in external flash
+# (nvdbUser_webUi), not in the image, so it ships and updates as its own file:
+# a UI change needs no firmware cycle and no confirm, and a firmware update
+# does not replace the page.  The image carries only a fallback page that says
+# how to install this one.  Needs no python packages and no keys — a UI blob is
+# not executable — so it is generated unconditionally, unlike the FWU blobs.
+# ==============================================================================
+
+set(WEB_UI_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/App/Http/web/index.html)
+
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/periphnet_ui.pnui
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/dfu_image_tool.py ui
+            -i ${WEB_UI_SOURCE}
+            -o ${CMAKE_CURRENT_BINARY_DIR}/periphnet_ui.pnui
+    DEPENDS ${WEB_UI_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dfu_image_tool.py
+    COMMENT "Packaging web UI (gzip -> .pnui)"
+    VERBATIM
+)
+
+add_custom_target(web_ui ALL
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/periphnet_ui.pnui
+)
+
+# ==============================================================================
 # Flash targets (J-Link clone wrapper)
 # ==============================================================================
 

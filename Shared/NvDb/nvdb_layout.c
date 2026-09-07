@@ -109,6 +109,10 @@ static const uint32_t s_targetSizes[nvdbUser_last] = {
     /* 4 KB, like packCfg: one CRC'd record of ~200 bytes, written only when
      * an operator uploads a cluster configuration. */
     [nvdbUser_clusterCfg]       = 0x1000u,
+
+    /* 64 KB.  The stored blob is ~5.3 KB today; the headroom is the reason the
+     * page moved off the image in the first place. */
+    [nvdbUser_webUi]            = 0x10000u,
 };
 
 /* The assumed-current layout (§4.4.1): the board's existing hand-assigned map

@@ -30,6 +30,7 @@
 #include "App/Log/trice_consumer.h"
 #include "App/Log/trice_udp.h"
 #include "App/Log/trice_usb.h"
+#include "App/Http/web_ui.h"
 #include "App/Gw/modbus_tcp.h"
 #include "App/Mon/sysmon.h"
 #include "App/Net/wg_link.h"
@@ -163,6 +164,11 @@ void App_DefaultTaskEntry(void)
             TRice("nvDb: init returned %u\n", nvRes);
         }
     }
+
+    /* The web UI lives on the medium, so it can only be checked once nvDb is
+     * up.  Absent or corrupt is not a fault: `GET /` answers with the built-in
+     * fallback page, which says how to install one. */
+    WebUi_Init();
 
     /* NOTE: the app deliberately does NOT self-confirm.  An outside actor
      * must POST /api/fwu/confirm after checking the device is healthy;

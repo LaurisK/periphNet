@@ -10,6 +10,14 @@ Commands:
              The manifest is authenticated as GCM AAD; the trailing CRC32
              lets the device check transfer integrity without the key.
   full     — combined BL+APP Intel HEX for factory flashing
+  ui       — gzip a web-UI .html into the .pnui blob the board stores in nvDb:
+             [magic "PNUI":4][ver:2][rsv:2][payload_size:4][payload_crc32:4]
+             [gzip payload]
+             SEPARATE from the firmware on purpose.  The page lives in external
+             flash, not in the image, so it ships and updates as its own file;
+             the image carries only a small fallback page.  No key is involved:
+             a UI blob is not executable and the tunnel is its authorization,
+             exactly as for a Modbus or pack configuration upload.
 
 Keys come from --key/--hmac-key, DFU_AES_KEY/DFU_HMAC_KEY env vars, or
 fall back to the committed development keys (matching bootloader/secrets.c).
@@ -25,6 +33,7 @@ import hmac
 import hashlib
 import secrets
 import argparse
+import gzip
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
@@ -288,6 +297,49 @@ def generate_full_image(input_path, output_path, bootloader_path,
     }
 
 
+UI_MAGIC        = b"PNUI"
+UI_FORMAT_VER   = 1
+UI_HEADER_SIZE  = 16
+
+
+def package_web_ui(input_path, output_path):
+    """Compress a web-UI .html and wrap it in the .pnui container.
+
+    The board stores these bytes VERBATIM in nvdbUser_webUi -- header included
+    -- and serves the payload with `Content-Encoding: gzip` without ever
+    decompressing it.  So the gzip here is the exact byte stream the browser
+    receives, and the CRC32 covers the transfer end to end: upload, flash
+    write, and the read back out on every page load.
+    """
+    with open(input_path, "rb") as f:
+        html = f.read()
+    if not html:
+        raise ValueError(f"{input_path} is empty")
+
+    # mtime=0 so an unchanged page produces an unchanged blob -- otherwise the
+    # gzip header timestamp makes every build a "new" UI to upload.
+    payload = gzip.compress(html, compresslevel=9, mtime=0)
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+
+    header = struct.pack("<4sHHII", UI_MAGIC, UI_FORMAT_VER, 0,
+                         len(payload), crc)
+    assert len(header) == UI_HEADER_SIZE
+
+    with open(output_path, "wb") as f:
+        f.write(header + payload)
+
+    ratio = len(payload) / len(html) if html else 0
+    logging.info(f"Web UI packaged: {output_path}")
+    logging.info(f"  html={len(html)} B  gzip={len(payload)} B "
+                 f"({ratio*100:.0f}%)  blob={UI_HEADER_SIZE + len(payload)} B")
+    return {
+        'html_bytes': len(html),
+        'gzip_bytes': len(payload),
+        'blob_bytes': UI_HEADER_SIZE + len(payload),
+        'crc32': f"0x{crc:08X}",
+    }
+
+
 def resolve_key(cli_value, env_var, expected_len, dev_default, name):
     """Resolve a key: CLI arg > env var > committed dev default (warned)."""
     for source, value in (("--" + name, cli_value),
@@ -360,7 +412,22 @@ Keys: --key/--hmac-key (hex) > DFU_AES_KEY/DFU_HMAC_KEY env > dev defaults.
                         help=f"App base address (default: 0x{DEFAULT_APP_ADDRESS:08X})")
     add_key_args(p_full)
 
+    # --- ui subcommand ---
+    p_ui = subparsers.add_parser("ui",
+                                 help="Gzip a web-UI .html into a .pnui blob")
+    p_ui.add_argument("-i", "--input", required=True, help="Input .html file")
+    p_ui.add_argument("-o", "--output", required=True, help="Output .pnui blob")
+
     args = parser.parse_args()
+
+    # The UI blob carries no key material and needs none -- handle it before
+    # the key resolution the firmware commands all share.
+    if args.command == "ui":
+        result = package_web_ui(args.input, args.output)
+        logging.info("\n=== Summary ===")
+        for k, v in result.items():
+            logging.info(f"  {k}: {v}")
+        raise SystemExit(0)
 
     hmac_key = resolve_key(args.hmac_key, 'DFU_HMAC_KEY', 32,
                            DEV_HMAC_KEY, "hmac-key")
