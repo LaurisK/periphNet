@@ -353,7 +353,8 @@ static const char index_html[] =
     "+'PC=0x'+j.pc+' LR=0x'+j.lr+' SP=0x'+j.sp+'<br>';"
     "if(j.task)h+='Task: '+j.task+'<br>';"
     "h+='CFSR=0x'+j.cfsr+' HFSR=0x'+j.hfsr+'<br>';"
-    "if(j.backtrace.length)h+='BT: '+j.backtrace.join(' ')+'<br>';"
+    "if(j.scan&&j.scan.length)h+='LR scan (candidates, filter): '"
+    "+j.scan.join(' ')+'<br>';"
     "if(j.tasks.length){h+='<pre>';j.tasks.forEach(function(t){"
     "h+=t.name+' ['+t.state+'] PC=0x'+t.pc+' stk='+t.free_stack+'\\n'});"
     "h+='</pre>'}"
@@ -1328,7 +1329,7 @@ static void handle_crash_get(struct netconn *conn)
         "\"r0\":\"%08lX\",\"r12\":\"%08lX\",\"psr\":\"%08lX\","
         "\"cfsr\":\"%08lX\",\"hfsr\":\"%08lX\","
         "\"mmfar\":\"%08lX\",\"bfar\":\"%08lX\","
-        "\"task\":\"%s\",\"task_count\":%u,\"backtrace\":[",
+        "\"task\":\"%s\",\"task_count\":%u,\"scan\":[",
         type_str, (unsigned long)log->tick,
         (unsigned long)log->pc, (unsigned long)log->lr,
         (unsigned long)log->sp, (unsigned long)log->r0,
@@ -1337,9 +1338,13 @@ static void handle_crash_get(struct netconn *conn)
         (unsigned long)log->mmfar, (unsigned long)log->bfar,
         log->task_name, (unsigned)log->task_count);
 
-    for (int i = 0; i < log->bt_depth && i < CRASH_LOG_MAX_BT_DEPTH; i++) {
+    /* Return-address candidates, not an ordered trace: stale LRs from calls
+     * that already returned sit among them, so this is filtered host-side.
+     * It was persisted but reachable only over Trice until now, which on a
+     * tunnel-only board meant the call path needed physical access. */
+    for (int i = 0; i < log->scan_count && i < CRASH_LOG_MAX_SCAN; i++) {
         pos = Json_Cat(js, CRASH_JSON_CAP, pos, "%s\"%08lX\"",
-                       (i > 0) ? "," : "", (unsigned long)log->bt_addr[i]);
+                       (i > 0) ? "," : "", (unsigned long)log->scan_lr[i]);
     }
 
     pos = Json_Cat(js, CRASH_JSON_CAP, pos, "],\"tasks\":[");

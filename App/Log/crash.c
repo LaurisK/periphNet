@@ -21,7 +21,6 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "stm32f4xx_hal.h"
-#include "Middlewares/Third_Party/backtrace/backtrace.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -42,7 +41,6 @@ typedef struct {
     uint32_t sp;      /*!< stack pointer at fault time                  */
     uint32_t control;
     uint32_t primask;
-    uint32_t fp;      /*!< R7 of the faulting context = frame pointer    */
     uint8_t  frameOnMsp;
 } sCrashRegs;
 
@@ -100,28 +98,7 @@ static void flushTrice(void)
 }
 
 /**
- * @brief Print PC/LR/FP backtrace entries.
- */
-static void printBacktrace(uint32_t pc, uint32_t lr, uint32_t sp, uint32_t fp)
-{
-    backtrace_frame_t frame;
-    backtrace_t       bt[8];
-
-    frame.pc = pc;
-    frame.lr = lr;
-    frame.sp = sp;
-    frame.fp = fp;
-
-    int depth = _backtrace_unwind(bt, 8, &frame);
-
-    trice(">>> Backtrace:\n");
-    for (int i = 0; i < depth; i++) {
-        trice("\t  #%d 0x%08X\n", i, (uint32_t)bt[i].address);
-    }
-}
-
-/**
- * @brief Iterate FreeRTOS tasks and print state + per-task backtrace.
+ * @brief Iterate FreeRTOS tasks and print state + each task's saved PC/LR.
  *
  * Accesses pxTopOfStack (offset 0 in TCB) to reconstruct the Cortex-M4F
  * saved context.  Handles optional FPU context (EXC_RETURN bit 4).
@@ -165,12 +142,13 @@ static void printTaskList(void)
         uint32_t exc_return = (uint32_t)top[8];
         uint32_t fpu_offset = ((exc_return & 0x10U) == 0U) ? 16U : 0U;
 
-        uint32_t r7_fp   = (uint32_t)top[3U  + fpu_offset]; /* R7 = frame ptr  */
         uint32_t task_lr = (uint32_t)top[14U + fpu_offset]; /* saved LR        */
         uint32_t task_pc = (uint32_t)top[15U + fpu_offset]; /* saved PC        */
-        uint32_t task_sp = (uint32_t)(top + 17U + fpu_offset); /* SP after frame */
 
-        printBacktrace(task_pc, task_lr, task_sp, r7_fp);
+        /* PC and LR are worth printing on their own: scanAllStacks() finds
+         * return addresses on this task's stack, but not the PC it was
+         * actually stopped at, which is only in the saved context. */
+        trice("\t  pc=0x%08X lr=0x%08X\n", task_pc, task_lr);
         flushTrice();
     }
 
@@ -201,9 +179,16 @@ typedef struct {
     uint32_t r4_r11[8];
     uint32_t msp;
     uint32_t psp;
-    uint32_t caller_r7;   /*!< faulting context's R7 = its frame pointer */
     uint32_t valid;       /*!< CRASH_ENTRY_MAGIC when the shim ran        */
 } sCrashEntryRegs;
+
+/* Crash_CaptureEntry() writes these offsets as literals in assembly, so the
+ * struct and the shim can drift apart silently -- and did move when the
+ * caller_r7 slot was removed with the frame-pointer unwinder.  A wrong offset
+ * would corrupt the one snapshot the whole report is decoded from. */
+_Static_assert(offsetof(sCrashEntryRegs, msp)   == 32, "capture shim offset");
+_Static_assert(offsetof(sCrashEntryRegs, psp)   == 36, "capture shim offset");
+_Static_assert(offsetof(sCrashEntryRegs, valid) == 40, "capture shim offset");
 
 /* Only the five fault handlers run the shim.  The software-watchdog, assert
  * and stack-overflow paths call Crash_GenerateReport() directly from ordinary
@@ -216,14 +201,13 @@ volatile sCrashEntryRegs g_crashEntry __attribute__((used));
 
 __attribute__((naked, used)) void Crash_CaptureEntry(void)
 {
-    /* R7 is the one register that is already GONE by the time this runs: the
-     * calling handler's prologue does `push {r7, lr}` then `add r7, sp, #0`,
-     * so r7 now holds the handler's own frame pointer.  The faulting context's
-     * R7 is the word the prologue pushed, i.e. *MSP — and it is worth
-     * recovering because R7 is a real frame pointer here: the build sets
-     * -fno-omit-frame-pointer (CMakeLists.txt), which both guarantees that
-     * prologue shape and makes the FP chain walkable in the first place.
-     * captureRegs() range-checks the result before trusting it.
+    /* R7 used to be recovered separately from *MSP, on the assumption that the
+     * calling handler's prologue was `push {r7, lr}` + `add r7, sp, #0`.  That
+     * shape was guaranteed by -fno-omit-frame-pointer, which the build no
+     * longer sets, so *MSP is no longer reliably the caller's R7 and the
+     * recovery is gone.  R7 is now simply whatever `stm` captured: exact if
+     * the handler's prologue did not push over it, stale if it did.  Nothing
+     * walks a frame chain any more, so a wrong R7 misleads nobody.
      *
      * Clobbers r0-r2 only, which AAPCS already lets a callee destroy. */
     __asm volatile (
@@ -233,10 +217,8 @@ __attribute__((naked, used)) void Crash_CaptureEntry(void)
         "str   r1, [r0, #32]       \n"
         "mrs   r2, psp             \n"
         "str   r2, [r0, #36]       \n"
-        "ldr   r2, [r1]            \n"   /* *MSP = R7 pushed by the prologue */
-        "str   r2, [r0, #40]       \n"
         "ldr   r2, =0xC5A1BEEF     \n"
-        "str   r2, [r0, #44]       \n"
+        "str   r2, [r0, #40]       \n"
         "bx    lr                  \n"
     );
 }
@@ -361,14 +343,13 @@ static void captureRegs(sCrashRegs *regs)
 
     /* No shim ran: this is a watchdog/assert/stack-overflow report, not a
      * fault.  There is no exception frame, so read the stacks live and make no
-     * claim about a frame pointer or callee-saved registers. */
+     * claim about the callee-saved registers. */
     if (g_crashEntry.valid != CRASH_ENTRY_MAGIC) {
         uint32_t livePsp;
 
         __asm volatile ("MRS %0, PSP\n" : "=r"(livePsp));
         memset((void *)&g_crashEntry, 0, sizeof(g_crashEntry));
         regs->sp         = livePsp;
-        regs->fp         = livePsp;
         regs->frameOnMsp = 0U;
         regs->r0 = regs->r1 = regs->r2 = regs->r3 = 0U;
         regs->r12 = regs->lr = regs->pc = regs->psr = 0U;
@@ -389,12 +370,6 @@ static void captureRegs(sCrashRegs *regs)
         frame            = (uint32_t *)g_crashEntry.psp;   /* best effort */
         regs->frameOnMsp = 0U;
     }
-
-    /* Frame pointer of the faulting context.  Only trusted if it points into
-     * a stack; anything else means the prologue was not what we assumed, and a
-     * WRONG fp is worse than none — it walks the unwinder into noise. */
-    regs->fp  = sp_in_ram(g_crashEntry.caller_r7) ? g_crashEntry.caller_r7
-                                                  : regs->sp;
 
     regs->sp  = (uint32_t)frame;
     regs->r0  = frame[0];
@@ -499,18 +474,6 @@ static void saveToFlash(eCrashType type, const sCrashRegs *regs)
     log.hfsr  = SCB->HFSR;
     log.mmfar = SCB->MMFAR;
     log.bfar  = SCB->BFAR;
-
-    /* Backtrace */
-    backtrace_frame_t frame = {
-        .pc = regs->pc, .lr = regs->lr,
-        .sp = regs->sp, .fp = regs->fp
-    };
-    backtrace_t bt[CRASH_LOG_MAX_BT_DEPTH];
-    int depth = _backtrace_unwind(bt, CRASH_LOG_MAX_BT_DEPTH, &frame);
-    log.bt_depth = (uint8_t)(depth > 0 ? depth : 0);
-    for (int i = 0; i < log.bt_depth; i++) {
-        log.bt_addr[i] = (uint32_t)bt[i].address;
-    }
 
     /* Recorded for EVERY type, faults included.  It used to be limited to the
      * types where the current task is provably the offender, which left a
@@ -621,21 +584,16 @@ void Crash_GenerateReport(eCrashType type)
     printRegisters(type, &regs);
     flushTrice();
 
-    /* The FP chain walk IS available now: Crash_CaptureEntry() latches R4-R11
-     * on exception entry, so R7 of the faulting context is real.  This used to
-     * pass `sp` as the frame pointer and could never produce more than pc+lr. */
-    printBacktrace(regs.pc, regs.lr, regs.sp, regs.fp);
-    flushTrice();
-
     /* Save to external flash before printing task list (which takes longer) */
     saveToFlash(type, &regs);
 
-    /* Print all tasks with individual backtraces */
+    /* Print all tasks with their saved PC/LR */
     printTaskList();
     flushTrice();
 
-    /* Chain-independent view, last because it is the most verbose and the
-     * durable record is already in flash by now. */
+    /* THE call path, last because it is the most verbose and the durable
+     * record is already in flash by now.  Chain-independent by construction:
+     * this is the only call-path mechanism left. */
     scanAllStacks(regs.frameOnMsp);
     flushTrice();
 

@@ -28,8 +28,12 @@ set(MCU_FLAGS "-mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard")
 # Compile flags (shared by both targets)
 # ==============================================================================
 
+# NO -fno-omit-frame-pointer.  It cost 11,832 bytes of flash and existed only
+# for the R7-chain unwinder in Middlewares/Third_Party/backtrace, which is gone:
+# the call path now comes from the stack LR scan in App/Log/crash.c, which needs
+# no frame chain (the ZhagaFW crash_handler.c approach, commit 3130846).
 set(COMMON_FLAGS
-    "${MCU_FLAGS} -Wall -fdata-sections -ffunction-sections -fno-omit-frame-pointer"
+    "${MCU_FLAGS} -Wall -fdata-sections -ffunction-sections"
 )
 set(CMAKE_C_FLAGS          "${COMMON_FLAGS}")
 set(CMAKE_C_FLAGS_DEBUG    "-g3 -O0")
@@ -615,12 +619,6 @@ foreach(_f ${_can_srcs})
     endif()
 endforeach()
 
-# --- Backtrace library ---
-
-set(BACKTRACE_SOURCES
-    Middlewares/Third_Party/backtrace/backtrace.c
-)
-
 # --- WireGuard-lwIP (application only) ---
 # Bundles its own Curve25519 / ChaCha20-Poly1305 / BLAKE2s.  Must NEVER reach
 # the 32 KB bootloader — same rule as SHARED_MODBUS_SOURCES.  The Cortex-M0
@@ -722,7 +720,6 @@ set(APP_INCLUDES
     USB_DEVICE/Target
     Middlewares/ST/STM32_USB_Device_Library/Core/Inc
     Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
-    Middlewares/Third_Party/backtrace
     Middlewares/Third_Party/wireguard-lwip/src
     App/Net
     Drivers/BSP/Components/dp83848
@@ -770,7 +767,6 @@ add_executable(application.elf
     ${SHARED_MODBUS_SOURCES}
     ${SHARED_NVDB_SOURCES}
     ${SHARED_FAULT_SOURCES}
-    ${BACKTRACE_SOURCES}
     ${WIREGUARD_SOURCES}
     ${HAL_SOURCES}
     ${BSP_SOURCES}
