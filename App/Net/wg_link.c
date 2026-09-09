@@ -5,6 +5,7 @@
 
 #include "App/Net/wg_link.h"
 #include "App/Net/wg_cfg.h"
+#include "App/Net/wg_ladder.h"
 
 #include <string.h>
 
@@ -59,9 +60,20 @@ static uint8_t    s_cfgStored;   /* active cfg came from flash */
  * seconds after boot when a raw age would look plausibly small. */
 static uint32_t   s_lastAlive_ms;
 static uint8_t    s_haveAlive;
-static uint32_t   s_downSince_ms; /* sys_now() when it was last judged up   */
 static uint32_t   s_recoveries;
 static uint32_t   s_portRotations;
+
+/* INTENT, not state.  s_running is what the tunnel is; s_wantRunning is what
+ * was asked for.  They are different exactly when WgLink_Start() failed, and
+ * that difference is what used to strand a board forever: both the retry in
+ * WgLink_Housekeep() and its caller in app_freertos.c gated on s_running --
+ * the flag the failure clears (issue_wg_sodas_offline_2026-09-06.md §5.1).
+ * WgLink_Stop() must NOT clear it: Restart() and cfg_reapply() go through
+ * Stop(), and a rebuild that disarms the ladder is the same bug wearing a
+ * different hat.  Only an explicit stop verb clears it. */
+static uint8_t    s_wantRunning;
+static uint32_t   s_startFailures;
+static sWgLadder  s_ladder;
 
 /* --------------------------------------------------------------------------
  * Configuration loading
@@ -331,7 +343,7 @@ static void peer_add_extra_ranges(void)
     }
 }
 
-int WgLink_Start(const sWgLinkCfg *cfg)
+static int wg_start_impl(const sWgLinkCfg *cfg)
 {
     ip4_addr_t tunnelIp;
     ip4_addr_t tunnelMask;
@@ -463,7 +475,6 @@ int WgLink_Start(const sWgLinkCfg *cfg)
      * wrong instant. */
     s_haveAlive    = 0u;
     s_lastAlive_ms = 0u;
-    s_downSince_ms = sys_now();
 
     TRice("WG: up, %d.%d.%d.%d -> %d.%d.%d.%d:%d, %u range(s)\n",
           s_cfg.tunnelIp[0], s_cfg.tunnelIp[1],
@@ -619,46 +630,177 @@ static void rotate_source_port(void)
     }
 }
 
-int WgLink_Housekeep(void)
+/* Is the board's OWN network sane?  Gates the terminal rung: with the link
+ * down or no default route the fault is demonstrably off-board, a reboot
+ * cannot repair it, and firing it would only interrupt local control.  The
+ * Ethernet netif is the default one -- WgLink_Start() deliberately never calls
+ * netif_set_default() on the tunnel. */
+static uint8_t local_net_ok(void)
 {
-    uint32_t now = sys_now();
+    struct netif *nif;
+    uint8_t       ok = 0u;
 
-    if (!s_running) {
-        s_downSince_ms = now;
+    LOCK_TCPIP_CORE();
+    nif = netif_default;
+    if (nif != NULL && netif_is_up(nif) && netif_is_link_up(nif) &&
+        !ip4_addr_isany_val(*netif_ip4_gw(nif))) {
+        ok = 1u;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return ok;
+}
+
+/* Rung 2 -- re-read the stored configuration.  The one rung that can repair a
+ * corrupted in-RAM s_cfg, which is the only genuinely non-deterministic way
+ * WgLink_Start() fails; every other path is config the parser already
+ * validated.
+ *
+ * Refuses when the active config did NOT come from flash: a board provisioned
+ * by `wg genkey` without a save holds its identity only in RAM, and reloading
+ * would erase the very key it needs.  Restarts only on an actual difference --
+ * rung 1 is already restarting every 15 minutes, so a no-op restart here buys
+ * nothing. */
+static int reload_cfg_from_flash(void)
+{
+    sWgLinkCfg before;
+
+    if (!s_cfgStored) {
+        TRice("WG: config not flash-backed, skipping reload\n");
         return 0;
     }
 
-    if (WgLink_IsUp()) {          /* samples as a side effect */
-        s_downSince_ms = now;
+    before      = s_cfg;
+    s_cfgLoaded = 0u;
+    cfg_ensure_loaded();
+
+    if (memcmp(&before, &s_cfg, sizeof(before)) == 0) {
+        TRice("WG: stored config re-read, unchanged\n");
         return 0;
     }
 
-    if ((uint32_t)(now - s_downSince_ms) < WG_LINK_RECOVER_MS) {
-        return 0;
+    TRice("WG: stored config differed from RAM -- restarting on flash copy\n");
+    if (s_running) {
+        WgLink_Stop();
+    }
+    return WgLink_Start(NULL);
+}
+
+eWgLadderAction WgLink_Housekeep(void)
+{
+    sWgLadderIn     in;
+    eWgLadderAction act;
+
+    (void)WgLink_IsUp();          /* samples the liveness evidence */
+
+    in.now_ms        = sys_now();
+    in.aliveAge_ms   = WgLink_AliveAge();
+    in.staleAfter_ms = WG_LINK_STALE_MS;
+    in.wantRunning   = s_wantRunning;
+    in.running       = (uint8_t)(s_running ? 1u : 0u);
+    in.hasIdentity   = (uint8_t)(WgLink_HasIdentity() ? 1u : 0u);
+    in.localNetOk    = local_net_ok();
+
+    act = WgLadder_Step(&s_ladder, &in);
+
+    switch (act) {
+    case wgLadder_start:
+        /* The tunnel is not running though it should be: a WgLink_Start() that
+         * failed, which before this existed was permanent. */
+        TRice("WG: not running, retrying start (failures=%u)\n",
+              (unsigned)s_startFailures);
+        (void)WgLink_Start(NULL);
+        break;
+
+    case wgLadder_rebuildRotate:
+        /* Everything the port would have to unstick by itself -- a
+         * prev_keypair it can no longer expire, a half-finished handshake, an
+         * endpoint it roamed to -- is state only a rebuild clears.  The
+         * rotation is what escapes a NAT mapping that has gone dead. */
+        TRice("WG: no response for %us, rebuilding peer (recovery #%u)\n",
+              (unsigned)(WgLadder_OutageAge(&s_ladder, in.now_ms) / 1000u),
+              (unsigned)(s_recoveries + 1u));
+        s_recoveries++;
+        rotate_source_port();
+        if (WgLink_Restart() != 0) {
+            TRice("WG: rebuild failed, will retry\n");
+        }
+        break;
+
+    case wgLadder_reloadConfig:
+        TRice("WG: silent %umin, re-reading stored config\n",
+              (unsigned)(WgLadder_OutageAge(&s_ladder, in.now_ms) / 60000u));
+        (void)reload_cfg_from_flash();
+        break;
+
+    case wgLadder_terminalReboot:
+        /* Deliberately NOT performed here.  defaultTask owns every reboot on
+         * this board and has to stamp the survivor block first. */
+        TRice("WG: terminal rung due after %umin silent (reboot #%u)\n",
+              (unsigned)(WG_LADDER_TERMINAL_MS / 60000u),
+              (unsigned)s_ladder.rebootsUsed);
+        break;
+
+    case wgLadder_none:
+    case wgLadder_last:
+        break;
     }
 
-    /* Down long enough that waiting is not going to help.  Everything the
-     * port would have to unstick by itself — a prev_keypair it can no longer
-     * expire, a half-finished handshake, an endpoint it roamed to — is state
-     * only a rebuild clears. */
-    TRice("WG: no response for %us, rebuilding peer (recovery #%u)\n",
-          (unsigned)((now - s_downSince_ms) / 1000u),
-          (unsigned)(s_recoveries + 1u));
+    return act;
+}
 
-    s_recoveries++;
-    s_downSince_ms = now;         /* set before the restart: a failed start
-                                   * must not retry every 5 s */
+/* Public entry point for WgLink_Start(): records intent and counts failures.
+ * Intent is recorded even when the attempt fails -- that is the whole point,
+ * since it is what lets the ladder retry a start that never succeeded. */
+int WgLink_Start(const sWgLinkCfg *cfg)
+{
+    int rc;
 
-    /* Every recovery, not after some threshold: by the time we are here the
-     * current source port has produced no evidence of the hub for
-     * WG_LINK_RECOVER_MS, so there is nothing about it left worth keeping. */
-    rotate_source_port();
+    s_wantRunning = 1u;
 
-    if (WgLink_Restart() != 0) {
-        TRice("WG: rebuild failed, will retry\n");
-        return 0;
+    rc = wg_start_impl(cfg);
+    if (rc != 0 && rc != -1) {   /* -1 is "already running", not a failure */
+        s_startFailures++;
     }
-    return 1;
+    return rc;
+}
+
+void WgLink_StopRequested(void)
+{
+    /* The only thing that clears intent.  After this the ladder leaves the
+     * tunnel alone until someone asks for it again. */
+    s_wantRunning = 0u;
+    WgLink_Stop();
+}
+
+int WgLink_WantRunning(void)
+{
+    return (int)s_wantRunning;
+}
+
+uint32_t WgLink_StartFailures(void)
+{
+    return s_startFailures;
+}
+
+uint8_t WgLink_LadderRung(void)
+{
+    return s_ladder.rung;
+}
+
+uint32_t WgLink_OutageAge(void)
+{
+    return WgLadder_OutageAge(&s_ladder, sys_now());
+}
+
+uint8_t WgLink_TerminalReboots(void)
+{
+    return s_ladder.rebootsUsed;
+}
+
+void WgLink_RestoreTerminalReboots(uint8_t used)
+{
+    WgLadder_RestoreReboots(&s_ladder, used);
 }
 
 /* Re-create the netif so new parameters take effect.  Changing a running
@@ -814,7 +956,10 @@ int WgLink_ResetCfg(void)
         return -1;
     }
 
-    WgLink_Stop();
+    /* Un-provisioning is an explicit stop: without clearing intent the ladder
+     * would keep retrying a board that has deliberately been left with no
+     * identity. */
+    WgLink_StopRequested();
 
     s_cfg       = s_defaultCfg;
     s_cfgLoaded = 1u;

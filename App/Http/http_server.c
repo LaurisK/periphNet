@@ -1234,6 +1234,50 @@ static void handle_system_reset_peaks(struct netconn *conn)
     send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
 }
 
+/* GET /api/system/last-restart
+ *
+ * THE BLACK BOX.  A restart the firmware performed on itself in order to make
+ * a fault investigable is worse than useless if it erases the state that
+ * explains the fault -- uptime, how long the hub had been silent, the source
+ * port that was not working, the heap floor.  This is that state, read back
+ * out of the CCM survivor block after the reset (App/system.h).
+ *
+ * `present:false` is the normal answer: it means the last reset was a power
+ * cycle, an OTA, or an operator asking -- not the board rescuing itself.
+ */
+static void handle_system_last_restart(struct netconn *conn)
+{
+    sRestartRecord rec;
+
+    if (System_GetLastRestart(&rec) != 0) {
+        send_json(conn, "200 OK", "{\"present\":false}");
+        return;
+    }
+
+    (void)snprintf(resp_buf, sizeof(resp_buf),
+        "{\"present\":true,\"reason\":%u,\"reason_name\":\"%s\","
+        "\"uptime_sec\":%u,\"outage_age_ms\":%u,"
+        "\"recoveries\":%u,\"port_rotations\":%u,\"local_port\":%u,"
+        "\"heap_free_min\":%u,\"tasks_stale\":%u,"
+        "\"terminal_reboots\":%u,\"prev_reset_cause\":\"0x%08X\"}",
+        (unsigned)rec.reason, System_RestartReasonName(rec.reason),
+        (unsigned)rec.uptime_sec, (unsigned)rec.outageAge_ms,
+        (unsigned)rec.recoveries, (unsigned)rec.portRotations,
+        (unsigned)rec.localPort, (unsigned)rec.heapFreeMin,
+        (unsigned)rec.tasksStale, (unsigned)rec.rebootsUsed,
+        (unsigned)rec.prevResetCause);
+
+    send_json(conn, "200 OK", resp_buf);
+}
+
+/* DELETE /api/system/last-restart -- the board does not explain itself twice,
+ * and a stale record would misattribute the next outage. */
+static void handle_system_last_restart_clear(struct netconn *conn)
+{
+    System_ClearRestartRecord();
+    send_json(conn, "200 OK", "{\"status\":\"cleared\"}");
+}
+
 /* POST /api/system/reboot[?delay_ms=N]
  *
  * The route that was missing.  Until now the only ways to restart a deployed
@@ -2207,7 +2251,6 @@ static void wg_status_json(char *buf, size_t sz)
             "\"keypair_valid\":%s,\"prev_keypair_valid\":%s,"
             "\"keypair_age_ms\":%u,\"alive_age_ms\":%d,"
             "\"recoveries\":%u,"
-            "\"local_port\":%u,\"port_rotations\":%u,"
             "\"tx_packets\":%u,\"rx_counter\":%u,"
             "\"live_endpoint\":\"%u.%u.%u.%u:%u\",\"now_ms\":%u",
             (unsigned)st.lastRx_ms, (unsigned)st.lastTx_ms,
@@ -2216,7 +2259,6 @@ static void wg_status_json(char *buf, size_t sz)
             (unsigned)st.keypairAge_ms,
             (st.aliveAge_ms == WG_LINK_AGE_NEVER) ? -1 : (int)st.aliveAge_ms,
             (unsigned)WgLink_RecoveryCount(),
-            (unsigned)WgLink_LocalPort(), (unsigned)WgLink_PortRotationCount(),
             (unsigned)st.txPackets, (unsigned)st.rxCounter,
             st.endpointIp[0], st.endpointIp[1],
             st.endpointIp[2], st.endpointIp[3],
@@ -2231,6 +2273,13 @@ static void wg_status_json(char *buf, size_t sz)
         "\"allowed_ips\":[%s],"
         "\"endpoint_ip\":\"%u.%u.%u.%u\",\"endpoint_port\":%u,"
         "\"keepalive\":%u,\"rng_hw_seeded\":%s,\"rng_failures\":%u,"
+        /* Outside the peer block on purpose: WgLink_GetPeerStats() fails when
+         * the tunnel is not running, and a stranded board reporting nothing
+         * diagnostic is exactly the hole that cost a site visit. */
+        "\"want_running\":%s,\"start_failures\":%u,"
+        "\"local_port\":%u,\"port_rotations\":%u,"
+        "\"ladder_rung\":%u,\"outage_age_ms\":%u,"
+        "\"terminal_reboots\":%u,\"terminal_reboots_max\":%u,"
         "\"time_now\":%u,\"time_persisted\":%u,\"time_flash_backed\":%s%s}",
         WgLink_IsRunning() ? "true" : "false",
         WgLink_IsUp()      ? "true" : "false",
@@ -2246,6 +2295,11 @@ static void wg_status_json(char *buf, size_t sz)
         cfg->endpointIp[2], cfg->endpointIp[3],
         (unsigned)cfg->endpointPort, (unsigned)cfg->keepAlive_sec,
         hwSeeded ? "true" : "false", (unsigned)rngFailures,
+        WgLink_WantRunning() ? "true" : "false",
+        (unsigned)WgLink_StartFailures(),
+        (unsigned)WgLink_LocalPort(), (unsigned)WgLink_PortRotationCount(),
+        (unsigned)WgLink_LadderRung(), (unsigned)WgLink_OutageAge(),
+        (unsigned)WgLink_TerminalReboots(), (unsigned)WG_LADDER_MAX_REBOOTS,
         (unsigned)now, (unsigned)persisted, flashOk ? "true" : "false",
         peerStats);
 }
@@ -4150,6 +4204,10 @@ static void handle_connection(struct netconn *conn)
         handle_system_reset_peaks(conn);
     } else if (route_is("POST /api/system/reboot")) {
         handle_system_reboot(conn);
+    } else if (route_is("GET /api/system/last-restart")) {
+        handle_system_last_restart(conn);
+    } else if (route_is("DELETE /api/system/last-restart")) {
+        handle_system_last_restart_clear(conn);
     } else if (route_is("POST /api/modbus/dump/on")) {
         handle_modbus_dump(conn, 1);
     } else if (route_is("POST /api/modbus/dump/off")) {

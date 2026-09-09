@@ -526,7 +526,10 @@ PeriphNet/
                                   #   stack high-water marks, heap, per-task CPU
                                   #   share and idle time, IWDG kick margin
     Net/                          # WireGuard peer: wg_link (tunnel netif +
-                                  #   hub peer), wg_platform (port hooks: HW
+                                  #   hub peer), wg_ladder (THE PURE RECOVERY
+                                  #   LADDER -- rung decisions only, libc-only,
+                                  #   zero file statics, host-tested),
+                                  #   wg_platform (port hooks: HW
                                   #   RNG-backed DRBG, TAI64N), wg_time
                                   #   (reboot-surviving monotonic seconds),
                                   #   wg_cfg (per-device net config in flash)
@@ -937,6 +940,7 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/crash/latest` | GET/DELETE | Crash log read / clear. **`backtrace` is now `scan`** — LR candidates from the stack scan, not an ordered chain (the frame-pointer unwinder was removed 2026-09-07) |
 | `/api/system/status` | GET | System monitor JSON: uptime, CPU load/idle (per-mille), heap free/min, IWDG gap max, plus one object per task (state, priority, stack free-min vs configured, CPU share + peak, lifetime run time, check-in count/age/deadline, stale flag). **Compare `tasks_total` / `tasks_sampled` / `tasks_listed`**: the array is capped by the reply buffer and the last entries are rolled back whole rather than truncated mid-object, so a short array is normal and now says so. At 3072 bytes it silently held only eleven of fourteen and dropped `tcpip_thread` — the stack carrying the WireGuard crypto chain — while still reporting `tasks_total:14` |
 | `/api/system/reset-peaks` | POST | Clear peak CPU, the IWDG gap maximum and stale counters (stack high-water marks are FreeRTOS-owned and cannot be cleared) |
+| `/api/system/last-restart` | GET/DELETE | **The black box.** What the board looked like immediately before it reset *itself* — uptime, how long the hub had been silent, the source port that was not working, heap floor, stale tasks, the previous `reset_cause`. `present:false` is the normal answer and means the last reset was a power cycle, an OTA or an operator, not the board rescuing itself. Lives in `.ccmnoinit` (CCM, outside the memset range), so it survives a soft reset and an OTA install but not a power cycle |
 | `/api/system/reboot` | POST | Restart the board (`?delay_ms=N`, default 1000, floored at 500). Answers **before** it acts — the reset is armed on a deadline and performed by defaultTask, so the caller gets a 200 instead of a dropped connection. Arms **no** FWU state, unlike the `/api/fwu/install` trick that used to stand in for it |
 | `/api/nvdb/layout` | GET | The storage layout in force, free space, and anything that has come aboard but not been applied |
 | `/api/nvdb/layout` | POST | Take a layout aboard (JSON, §2.7 schema). **202 Accepted** — nothing moves now: a layout is applied at the NEXT boot and only there, so check `lastApplyResult` afterwards. 422 with the offending field on a parse error; 409 when the advisory structural check refuses (nothing written, previous layout untouched) |
@@ -1087,6 +1091,31 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
   registration), and `local_port` / `port_rotations` are reported by
   `/api/wg/status` and `wg status`. A "just reboot it" watchdog is **not** a
   substitute — it retries the same dead tuple.
+
+- **THE RECOVERY LADDER, and its one rule: evidence resets the clock, actions
+  never do.** `App/Net/wg_ladder.c` is the pure decision core
+  ([docs/design_tunnel_watchdog.md](docs/design_tunnel_watchdog.md),
+  host-tested); `WgLink_Housekeep()` executes rungs 1–2 and defaultTask
+  executes rung 3. Rung 1 at 15 min: rebuild + rotate the source port,
+  repeating. Rung 2 at 60 min: re-read the stored config (refused when the
+  config is not flash-backed — a `genkey` identity lives only in RAM). Rung 3
+  at 6 h: a **bounded** (3 per power-on) terminal reboot, **gated** on the
+  board's own link and default route being up, and it stamps
+  `/api/system/last-restart` before it fires. A corrective action must NEVER
+  reset the escalation clock — rung 1 firing every 15 min would otherwise hold
+  rung 3 permanently 15 minutes away, which is how 325 rebuilds achieved
+  nothing over three days.
+
+- **Intent is not state.** `s_wantRunning` (asked for) is separate from
+  `s_running` (actually up), because they differ exactly when
+  `WgLink_Start()` failed — and both gates that would have retried it used to
+  key on `s_running`, the flag the failure clears, so one transient failure
+  stranded a board until a power cycle. `WgLink_Stop()` deliberately does not
+  clear intent (`Restart()` and `cfg_reapply()` go through it);
+  **`WgLink_StopRequested()` is the only thing that does**, and it is what the
+  CLI `wg stop` and `WgLink_ResetCfg()` call. Getting this backwards
+  resurrects a tunnel somebody deliberately stopped, which the host tests
+  assert against.
 
 - **Soft dependency, always.** A dead hub costs one handshake packet every
   5 s (`REKEY_TIMEOUT`) and nothing else; `peer->active` stays set so the port

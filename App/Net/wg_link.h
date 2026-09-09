@@ -31,6 +31,7 @@
 #include <stdint.h>
 
 #include "App/Net/wg_conf.h"
+#include "App/Net/wg_ladder.h"
 
 /* Base64 of a 32-byte key: 44 characters + NUL. */
 #define WG_KEY_B64_SIZE   45u
@@ -71,11 +72,9 @@
  *  never gets near it. */
 #define WG_LINK_STALE_MS       360000u
 
-/** Judged down for this long and the peer is torn down and rebuilt.  This is
- *  the one action known to clear the stuck state above; it costs no memory
- *  (the netif is reused, see the note in wg_link.c) and no other subsystem
- *  depends on the tunnel. */
-#define WG_LINK_RECOVER_MS     900000u
+/* The rebuild cadence and every rung above it now live in wg_ladder.h
+ * (WG_LADDER_REBUILD_MS and friends), so there is one source of truth for the
+ * escalation rather than two constants free to drift apart. */
 
 /* --------------------------------------------------------------------------
  * Configuration
@@ -187,18 +186,53 @@ uint32_t WgLink_AliveAge(void);
 int WgLink_Restart(void);
 
 /**
- * @brief  Periodic liveness sampling and self-recovery.  Call about every 5 s
- *         from a task; it takes the tcpip core lock and must not run in lwIP
- *         context.
+ * @brief  Drive the recovery ladder one step.  Call about every 5 s from a
+ *         task; it takes the tcpip core lock and must not run in lwIP context.
  *
- * Samples the evidence WgLink_IsUp() reads, and once the tunnel has been down
- * for WG_LINK_RECOVER_MS performs a WgLink_Restart().  A board whose hub is
- * genuinely gone therefore rebuilds its peer every 15 minutes and does
- * nothing else — the tunnel stays a soft dependency.
+ * Samples the liveness evidence, asks WgLadder_Step() what is due, and
+ * performs it — rungs 1 and 2 (rebuild + rotate source port, reload the stored
+ * config).  A board whose hub is genuinely gone works through source ports
+ * every 15 minutes and does nothing else; the tunnel stays a soft dependency.
  *
- * @return 1 if it restarted the tunnel this call, 0 otherwise.
+ * **It does not reboot.**  wgLadder_terminalReboot is returned, not acted on:
+ * defaultTask owns every reboot on this board and has to stamp the survivor
+ * block first (App/system.h).
+ *
+ * @return the action taken this call, wgLadder_none most of the time.
  */
-int WgLink_Housekeep(void);
+eWgLadderAction WgLink_Housekeep(void);
+
+/**
+ * @brief  Stop the tunnel AND clear the intent to run it.
+ *
+ * The only thing that disarms the ladder.  WgLink_Stop() deliberately does
+ * not: Restart() and cfg_reapply() go through it, and a rebuild that stopped
+ * the ladder would strand the board exactly as §5.1 did.  Use this for an
+ * operator "stop", never for an internal transition.
+ */
+void WgLink_StopRequested(void);
+
+/** @return 1 when someone has asked for the tunnel and it has not been
+ *          explicitly stopped.  Differs from WgLink_IsRunning() precisely when
+ *          a WgLink_Start() failed — which is the state the ladder retries. */
+int WgLink_WantRunning(void);
+
+/** @brief  How many WgLink_Start() attempts have failed since boot. */
+uint32_t WgLink_StartFailures(void);
+
+/** @brief  Highest ladder rung acted on for the current outage; 0 when the
+ *          tunnel is healthy. */
+uint8_t WgLink_LadderRung(void);
+
+/** @brief  How long the hub has been silent, ms.  0 when healthy. */
+uint32_t WgLink_OutageAge(void);
+
+/** @brief  Terminal reboots spent this power-on (see WG_LADDER_MAX_REBOOTS). */
+uint8_t WgLink_TerminalReboots(void);
+
+/** @brief  Restore the terminal-reboot budget from the survivor block after a
+ *          terminal reboot.  Called once at start-up. */
+void WgLink_RestoreTerminalReboots(uint8_t used);
 
 /** @brief  How many times WgLink_Housekeep() has recovered the tunnel since
  *          boot.  Nonzero means the link died and came back by itself. */

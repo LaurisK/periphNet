@@ -16,6 +16,7 @@
 
 #include "App/app_freertos.h"
 #include "App/system.h"
+#include <string.h>
 #include "App/Can/bms_reader.h"
 #include "App/Can/can_bridge.h"
 #include "App/Can/can_log.h"
@@ -327,8 +328,23 @@ void App_DefaultTaskEntry(void)
      * is not an error: the handshake retries on lwIP timers and nothing else
      * on the board depends on it. */
     {
-        int wgRc = WgLink_Start(NULL);
-        int hwSeeded = 0;
+        int            wgRc;
+        int            hwSeeded = 0;
+        sRestartRecord prev;
+
+        /* Carry the terminal-reboot budget across the reset it counts.  The
+         * block lives in CCM and survives a soft reset but not a power cycle,
+         * so a power-on legitimately starts the budget fresh. */
+        if (System_GetLastRestart(&prev) == 0 &&
+            prev.reason == (uint32_t)restartReason_tunnelTerminal) {
+            WgLink_RestoreTerminalReboots((uint8_t)prev.rebootsUsed);
+            TRice("WG: resumed after terminal recovery #%u (was silent %umin, port %u)\n",
+                  (unsigned)prev.rebootsUsed,
+                  (unsigned)(prev.outageAge_ms / 60000u),
+                  (unsigned)prev.localPort);
+        }
+
+        wgRc = WgLink_Start(NULL);
         WgPlatform_GetRngStatus(&hwSeeded, NULL);
         if (wgRc != 0) {
             TRice("WG: start failed (%d)\n", wgRc);
@@ -442,17 +458,19 @@ void App_DefaultTaskEntry(void)
             wgTick = 0U;
             WgTime_Tick();
 
-            /* Samples the tunnel's liveness evidence and, if the hub has
-             * been silent long enough, rebuilds the peer.  The judgement is
-             * WgLink_IsUp(), which is deliberately NOT the port's own
-             * peer-is-up predicate — that one cannot go false once a session
-             * has existed (see wg_link.h). */
-            if (WgLink_IsRunning()) {
-                int up;
+            /* Drives the recovery ladder.  The judgement is WgLink_IsUp(),
+             * which is deliberately NOT the port's own peer-is-up predicate —
+             * that one cannot go false once a session has existed (wg_link.h).
+             *
+             * NOT gated on WgLink_IsRunning() any more.  That gate was half of
+             * the §5.1 defect: a WgLink_Start() that failed cleared s_running,
+             * and both this caller and the retry inside Housekeep() keyed on
+             * it, so one failure stranded the board until a power cycle. The
+             * ladder distinguishes intent from state and retries by itself. */
+            {
+                eWgLadderAction act = WgLink_Housekeep();
+                int             up  = WgLink_IsUp();
 
-                (void)WgLink_Housekeep();
-
-                up = WgLink_IsUp();
                 if (up != wgWasUp) {
                     wgWasUp = up;
                     if (up) {
@@ -461,6 +479,34 @@ void App_DefaultTaskEntry(void)
                         TRice("WG: tunnel DOWN (no response for %us)\n",
                               (unsigned)(WG_LINK_STALE_MS / 1000u));
                     }
+                }
+
+                /* The terminal rung.  Every reboot on this board is performed
+                 * here, and the survivor block is stamped FIRST — a reboot
+                 * meant to make the cause investigable is worse than useless
+                 * if it erases the evidence on the way out (App/system.h). */
+                if (act == wgLadder_terminalReboot) {
+                    sRestartRecord   rec;
+                    sSysMonSummary   sum;
+
+                    SysMon_GetSummary(&sum);
+                    memset(&rec, 0, sizeof(rec));
+                    rec.reason         = (uint32_t)restartReason_tunnelTerminal;
+                    rec.uptime_sec     = sum.uptime_sec;
+                    rec.outageAge_ms   = WgLink_OutageAge();
+                    rec.recoveries     = WgLink_RecoveryCount();
+                    rec.portRotations  = WgLink_PortRotationCount();
+                    rec.localPort      = WgLink_LocalPort();
+                    rec.heapFreeMin    = sum.heapFreeMin_bytes;
+                    rec.tasksStale     = (uint32_t)sum.staleCnt;
+                    rec.rebootsUsed    = WgLink_TerminalReboots();
+                    rec.prevResetCause = System_GetResetCause();
+                    System_RecordRestart(&rec);
+
+                    TRice("WG: terminal recovery — rebooting (#%u of %u)\n",
+                          (unsigned)rec.rebootsUsed,
+                          (unsigned)WG_LADDER_MAX_REBOOTS);
+                    System_RequestReboot(SYSTEM_REBOOT_MIN_DELAY_MS);
                 }
             }
         }

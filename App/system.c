@@ -19,6 +19,7 @@
 #include "stm32f4xx_hal.h"
 #include "FreeRTOSConfig.h"   /* configLIBRARY_LOWEST_INTERRUPT_PRIORITY */
 #include <string.h>
+#include "Shared/Fwu/image_mgmt.h"   /* ImgMgmt_Crc32 for the survivor block */
 
 /* External IWDG handle (declared in Core/Src/iwdg.c) */
 extern IWDG_HandleTypeDef hiwdg;
@@ -249,4 +250,69 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     __disable_irq();
     Crash_GenerateReport(crashType_stackOverflow);
     NVIC_SystemReset();
+}
+
+
+/* ---------------------------------------------------------------------------
+ * The restart survivor block (see App/system.h)
+ * ------------------------------------------------------------------------ */
+
+#define RESTART_RECORD_MAGIC    0x52535452u   /* "RSTR" */
+
+typedef struct {
+    uint32_t       magic;
+    uint32_t       crc32;      /* over `rec` only */
+    sRestartRecord rec;
+} sRestartBlock;
+
+/* .ccmnoinit is NOLOAD and sits outside _sccmram.._eccmram, so neither the
+ * startup code nor System_Init()'s memset clears it.  That is the whole
+ * mechanism: it survives NVIC_SystemReset() and the bootloader, and only a
+ * power cycle takes it away. */
+__attribute__((section(".ccmnoinit"), used))
+static sRestartBlock s_restart;
+
+static uint32_t restart_crc(const sRestartRecord *rec)
+{
+    return ImgMgmt_Crc32((const uint8_t *)rec, (uint32_t)sizeof(*rec));
+}
+
+void System_RecordRestart(const sRestartRecord *rec)
+{
+    if (rec == NULL) {
+        return;
+    }
+    s_restart.rec   = *rec;
+    s_restart.crc32 = restart_crc(&s_restart.rec);
+    s_restart.magic = RESTART_RECORD_MAGIC;
+}
+
+int System_GetLastRestart(sRestartRecord *out)
+{
+    if (s_restart.magic != RESTART_RECORD_MAGIC) {
+        return -1;
+    }
+    if (s_restart.crc32 != restart_crc(&s_restart.rec)) {
+        return -1;
+    }
+    if (out != NULL) {
+        *out = s_restart.rec;
+    }
+    return 0;
+}
+
+void System_ClearRestartRecord(void)
+{
+    s_restart.magic = 0u;
+    s_restart.crc32 = 0u;
+}
+
+const char *System_RestartReasonName(uint32_t reason)
+{
+    switch ((eRestartReason)reason) {
+    case restartReason_none:            return "none";
+    case restartReason_tunnelTerminal:  return "tunnel-terminal";
+    case restartReason_last:            break;
+    }
+    return "?";
 }

@@ -908,7 +908,9 @@ static void cmd_wg(const char *args)
             TRice("WG start failed (%d)\n", rc);
         }
     } else if (strncmp(args, "stop", 4) == 0) {
-        WgLink_Stop();
+        /* The operator verb, so it clears intent too -- otherwise the recovery
+         * ladder would bring the tunnel straight back up. */
+        WgLink_StopRequested();
     } else if (strncmp(args, "endpoint ", 9) == 0) {
         unsigned a, b, c, d, port = 51820u;
         if (sscanf(args + 9, "%u.%u.%u.%u %u", &a, &b, &c, &d, &port) >= 4) {
@@ -988,6 +990,13 @@ static void cmd_wg(const char *args)
                 TRice("WG: source port %u (rotations=%u)\n",
                       (unsigned)WgLink_LocalPort(),
                       (unsigned)WgLink_PortRotationCount());
+                TRice("WG: ladder rung=%u outage=%us want=%u startfail=%u reboots=%u/%u\n",
+                      (unsigned)WgLink_LadderRung(),
+                      (unsigned)(WgLink_OutageAge() / 1000u),
+                      (unsigned)WgLink_WantRunning(),
+                      (unsigned)WgLink_StartFailures(),
+                      (unsigned)WgLink_TerminalReboots(),
+                      (unsigned)WG_LADDER_MAX_REBOOTS);
             }
         }
         TRice("WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\n",

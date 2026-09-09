@@ -189,6 +189,20 @@ SECTIONS
     . = ALIGN(8);
   } >CCMRAM
 
+  /* Survives a reset, by construction.  Deliberately OUTSIDE the
+     _sccmram.._eccmram range (like .ccmheap above) so System_Init()'s memset
+     never reaches it, and NOLOAD so the startup code does not either.  The
+     bootloader declares CCMRAM but places nothing in it, so a record written
+     here also survives an OTA install -- only a power cycle clears it, which
+     is exactly the intended lifetime.  See App/system.h. */
+  .ccmnoinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.ccmnoinit)
+    *(.ccmnoinit*)
+    . = ALIGN(4);
+  } >CCMRAM
+
   /* Remove information from the compiler libraries */
   /DISCARD/ :
   {

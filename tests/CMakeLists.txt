@@ -282,6 +282,21 @@ target_include_directories(test_cluster_calc PRIVATE
 )
 add_test(NAME cluster_calc COMMAND test_cluster_calc)
 
+# App/Net: the WireGuard recovery ladder (docs/design_tunnel_watchdog.md).
+# wg_ladder.c is the pure decision core -- libc only, no lwIP, no statics -- on
+# the pack_fsm.c/cluster_calc.c precedent.  It is host-tested for the same
+# reason cluster_calc is: every rung above the first only ever runs during an
+# unattended outage, so "it worked on the bench" is not available as evidence.
+add_executable(test_wg_ladder
+    test_wg_ladder.c
+    ${PROJECT_ROOT}/App/Net/wg_ladder.c
+)
+target_include_directories(test_wg_ladder PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+add_test(NAME wg_ladder COMMAND test_wg_ladder)
+
 add_executable(test_cluster_cfg
     test_cluster_cfg.c
     ${JSON_CORE}
