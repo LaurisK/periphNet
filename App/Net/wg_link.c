@@ -12,6 +12,7 @@
 #include "lwip/ip.h"
 #include "lwip/tcpip.h"
 #include "lwip/sys.h"
+#include "lwip/udp.h"
 #include "wireguardif.h"
 #include "wireguard.h"
 #include "crypto.h"
@@ -60,6 +61,7 @@ static uint32_t   s_lastAlive_ms;
 static uint8_t    s_haveAlive;
 static uint32_t   s_downSince_ms; /* sys_now() when it was last judged up   */
 static uint32_t   s_recoveries;
+static uint32_t   s_portRotations;
 
 /* --------------------------------------------------------------------------
  * Configuration loading
@@ -537,6 +539,86 @@ uint32_t WgLink_RecoveryCount(void)
     return s_recoveries;
 }
 
+uint16_t WgLink_LocalPort(void)
+{
+    struct wireguard_device *dev;
+    uint16_t                 port = 0u;
+
+    if (!s_netifCreated) {
+        return 0u;
+    }
+
+    LOCK_TCPIP_CORE();
+    dev = (struct wireguard_device *)s_wgNetif.state;
+    if (dev != NULL && dev->udp_pcb != NULL) {
+        port = dev->udp_pcb->local_port;
+    }
+    UNLOCK_TCPIP_CORE();
+
+    return port;
+}
+
+uint32_t WgLink_PortRotationCount(void)
+{
+    return s_portRotations;
+}
+
+/* Rebind the port's UDP socket so the next handshake leaves from a different
+ * source port.
+ *
+ * The source port is chosen ONCE, by the udp_bind(..., listen_port = 0) inside
+ * wireguardif_init(), and nothing in the recovery ladder used to change it.
+ * WgLink_Stop() deliberately keeps the netif — "the port's device, UDP PCB and
+ * periodic timer outlive this and are reused on the next start" — so every
+ * rebuild retried down the very same 5-tuple.  A reboot did not help either:
+ * lwIP's ephemeral counter restarts at UDP_LOCAL_PORT_RANGE_START, so the pcb
+ * lands on the same port on every boot.
+ *
+ * That is not academic.  sodas was stranded from 2026-09-06 to 2026-09-09 with
+ * a healthy board, a healthy hub and a correct endpoint: its initiations were
+ * valid — relaying one to the hub by hand got a response in 200 ms — but every
+ * one of them left from :62510, whose NAT mapping on the site's LTE uplink was
+ * dead.  325 rebuilds and a reboot all sent from :62510, so the board could not
+ * escape on its own and the site needed a visit.
+ *
+ * Rebinding is the only action available to us that changes the tuple, and it
+ * costs nothing: the hub authenticates a peer by its key and follows whatever
+ * source the initiation arrives from, so a rotated port is indistinguishable
+ * from any other roaming client.  udp_bind() on a pcb already in the list is a
+ * documented rebind, it draws a fresh port from udp_new_port() (which skips
+ * ports in use, so the new one always differs), and it leaves the udp_recv()
+ * registration alone.  A failed bind leaves the old port in place, which is
+ * exactly the state we were already in.
+ */
+static void rotate_source_port(void)
+{
+    struct wireguard_device *dev;
+    uint16_t                 before = 0u;
+    uint16_t                 after  = 0u;
+
+    if (!s_netifCreated) {
+        return;
+    }
+
+    LOCK_TCPIP_CORE();
+    dev = (struct wireguard_device *)s_wgNetif.state;
+    if (dev != NULL && dev->udp_pcb != NULL) {
+        before = dev->udp_pcb->local_port;
+        if (udp_bind(dev->udp_pcb, IP_ADDR_ANY, 0) == ERR_OK) {
+            after = dev->udp_pcb->local_port;
+        }
+    }
+    UNLOCK_TCPIP_CORE();
+
+    if (after != 0u && after != before) {
+        s_portRotations++;
+        TRice("WG: source port %u -> %u (rotation #%u)\n",
+              (unsigned)before, (unsigned)after, (unsigned)s_portRotations);
+    } else {
+        TRice("WG: source port rotation failed, still %u\n", (unsigned)before);
+    }
+}
+
 int WgLink_Housekeep(void)
 {
     uint32_t now = sys_now();
@@ -566,6 +648,11 @@ int WgLink_Housekeep(void)
     s_recoveries++;
     s_downSince_ms = now;         /* set before the restart: a failed start
                                    * must not retry every 5 s */
+
+    /* Every recovery, not after some threshold: by the time we are here the
+     * current source port has produced no evidence of the hub for
+     * WG_LINK_RECOVER_MS, so there is nothing about it left worth keeping. */
+    rotate_source_port();
 
     if (WgLink_Restart() != 0) {
         TRice("WG: rebuild failed, will retry\n");

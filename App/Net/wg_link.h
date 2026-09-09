@@ -204,6 +204,20 @@ int WgLink_Housekeep(void);
  *          boot.  Nonzero means the link died and came back by itself. */
 uint32_t WgLink_RecoveryCount(void);
 
+/** @brief  The UDP source port the tunnel's handshakes and data currently
+ *          leave from, or 0 before the netif exists.
+ *
+ * Worth reporting because it is otherwise invisible without a packet capture,
+ * and because a NAT that blackholes one mapping makes it the whole story: see
+ * rotate_source_port() in wg_link.c.
+ */
+uint16_t WgLink_LocalPort(void);
+
+/** @brief  How many times a recovery has rebound the socket to a fresh source
+ *          port.  Climbing while the link stays down means the board is
+ *          working through mappings rather than retrying one dead one. */
+uint32_t WgLink_PortRotationCount(void);
+
 /** @brief  1 once both keys are present, i.e. the tunnel can be started. */
 int WgLink_HasIdentity(void);
 

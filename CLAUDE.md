@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is BUILT AND VERIFIED IN THE FIELD** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address). `Pd1.1.49` was left running, confirmed and golden, on both boards on 2026-09-05 (board 1 has since moved to `Pd1.1.51`); **sodas has been off the tunnel since 2026-09-06 02:01 and its state is unobserved — see [docs/issue_wg_sodas_offline_2026-09-06.md](docs/issue_wg_sodas_offline_2026-09-06.md)**; **all 48 register groups `solis_modbus` reads returned data from the live Solis**, worst 268 ms against a 1500 ms budget, with the exception map behaving as designed. Measurements and what is still outstanding — step 6 unapplied, HA not yet pointed at the board, no write ever made — are in §10 of that document.
+**PeriphNet** is an STM32F407VET6 firmware project. Long-term goal: RS485/Modbus-RTU to Ethernet bridge for Solis inverter + Home Assistant, with dual-image OTA bootloader. **Home Assistant is reached by being a Modbus TCP gateway that `solis_modbus` polls** — MQTT was removed from the project 2026-09-05 ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §6.4, §9.1). **That gateway is BUILT AND VERIFIED IN THE FIELD** (`App/Gw/modbus_tcp.c`, a `:502` listener bound to the tunnel address). `Pd1.1.49` was left running, confirmed and golden, on both boards on 2026-09-05 (board 1 has since moved to `Pd1.1.51`); **sodas was off the tunnel 2026-09-06 02:01 → 2026-09-09 12:20 and is BACK on `Pd1.1.54`** — the board was healthy the whole time; a stale NAT mapping on its LTE uplink swallowed its handshakes, and its own 5 s retries kept that mapping refreshed so it could never age out. **The WireGuard source port is fixed for the life of a boot AND identical on every boot** (lwIP's ephemeral counter restarts at `0xc000`, so both boards sit on `:62510`), so neither the 15-minute peer rebuild nor a reboot could escape it. `Pd1.1.54` rotates the source port on every recovery; `/api/wg/status` now reports `local_port` and `port_rotations` — see [docs/issue_wg_sodas_offline_2026-09-06.md](docs/issue_wg_sodas_offline_2026-09-06.md) §0 and §8; **all 48 register groups `solis_modbus` reads returned data from the live Solis**, worst 268 ms against a 1500 ms budget, with the exception map behaving as designed. Measurements and what is still outstanding — step 6 unapplied, HA not yet pointed at the board, no write ever made — are in §10 of that document.
 
 **Done and in place:** the encrypted FWU pipeline (Zhaga pattern, extended) — firmware is distributed only as encrypted+authenticated `.pnfw` blobs; the bootloader does streaming AES-128-GCM decrypt + HMAC verify during install, with confirm/rollback via a golden image. HMAC, AES-128 and GCM are real, NIST-vector-tested implementations (not stubs). Also done: **the Modbus module rebuild of [docs/modbus.md](docs/modbus.md) §1-§9** — the v2 record format (capabilities/devices/plans), the subscription + event surface, the frame-level port contract with a test peripheral, event-driven per-device timers, runtime plan editing, and a generic HA bridge that was an ordinary consumer (**that bridge was MQTT and has since been removed**, §9.1 of the Solis link doc; the Trice sink is now the reference subscriber). **Not yet run on hardware.**
 
@@ -1072,6 +1072,21 @@ endpoint <ip> [port]|ip <addr> [mask]|genkey|save|reset`.
   `WG_LINK_STALE_MS` (6 min) = down; down for `WG_LINK_RECOVER_MS` (15 min) =
   `WgLink_Housekeep()` rebuilds the peer, which is the one action that clears
   the stuck state.
+
+- **THE WIREGUARD SOURCE PORT IS FIXED FOR A BOOT AND THE SAME ON EVERY BOOT,
+  and that stranded a board for three days.** It is chosen once by
+  `udp_bind(..., listen_port = 0)` in `wireguardif_init()`; `WgLink_Stop()`
+  keeps the netif (*"the port's device, UDP PCB and periodic timer outlive
+  this"*), so a peer rebuild reuses it, and lwIP's ephemeral counter restarts
+  at `UDP_LOCAL_PORT_RANGE_START` on reset, so a reboot reuses it too — both
+  boards independently sit on `:62510`. When a NAT blackholes that one mapping
+  the board cannot escape, and its own ~5 s retries keep the dead entry
+  refreshed so it never ages out. `WgLink_Housekeep()` therefore **rotates the
+  source port on every recovery** (`rotate_source_port()`, an
+  `udp_bind(pcb, IP_ADDR_ANY, 0)` rebind that keeps the `udp_recv()`
+  registration), and `local_port` / `port_rotations` are reported by
+  `/api/wg/status` and `wg status`. A "just reboot it" watchdog is **not** a
+  substitute — it retries the same dead tuple.
 
 - **Soft dependency, always.** A dead hub costs one handshake packet every
   5 s (`REKEY_TIMEOUT`) and nothing else; `peer->active` stays set so the port

@@ -985,6 +985,9 @@ static void cmd_wg(const char *args)
                       (unsigned)st.sessionValid, (unsigned)st.prevValid,
                       (unsigned)st.keypairAge_ms,
                       (unsigned)WgLink_RecoveryCount());
+                TRice("WG: source port %u (rotations=%u)\n",
+                      (unsigned)WgLink_LocalPort(),
+                      (unsigned)WgLink_PortRotationCount());
             }
         }
         TRice("WG: tunnel ip %d.%d.%d.%d/%d.%d.%d.%d\n",

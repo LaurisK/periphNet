@@ -2195,7 +2195,7 @@ static void wg_status_json(char *buf, size_t sz)
     }
 
     sWgPeerStats st;
-    char peerStats[320] = "";
+    char peerStats[384] = "";
 
     if (WgLink_GetPeerStats(&st) == 0) {
         /* alive_age_ms is the number session_up is a threshold on, and
@@ -2207,6 +2207,7 @@ static void wg_status_json(char *buf, size_t sz)
             "\"keypair_valid\":%s,\"prev_keypair_valid\":%s,"
             "\"keypair_age_ms\":%u,\"alive_age_ms\":%d,"
             "\"recoveries\":%u,"
+            "\"local_port\":%u,\"port_rotations\":%u,"
             "\"tx_packets\":%u,\"rx_counter\":%u,"
             "\"live_endpoint\":\"%u.%u.%u.%u:%u\",\"now_ms\":%u",
             (unsigned)st.lastRx_ms, (unsigned)st.lastTx_ms,
@@ -2215,6 +2216,7 @@ static void wg_status_json(char *buf, size_t sz)
             (unsigned)st.keypairAge_ms,
             (st.aliveAge_ms == WG_LINK_AGE_NEVER) ? -1 : (int)st.aliveAge_ms,
             (unsigned)WgLink_RecoveryCount(),
+            (unsigned)WgLink_LocalPort(), (unsigned)WgLink_PortRotationCount(),
             (unsigned)st.txPackets, (unsigned)st.rxCounter,
             st.endpointIp[0], st.endpointIp[1],
             st.endpointIp[2], st.endpointIp[3],
