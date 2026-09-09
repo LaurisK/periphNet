@@ -29,17 +29,14 @@
  * Fixture
  * ============================================================================ */
 
-/* The slew is a separate mechanism and most loop cases want it out of the way.
- * At the parse-time maximum rate and the clamped maximum dt, one tick moves
- * 200 A — so a rise reaches its target in one step and the LOOP is what the
- * assertion sees. */
-#define FAST_RISE   CLUSTER_RISE_MAX_MA_PER_S
-#define BIG_DT      CLUSTER_DT_MAX_MS
+/* A TICK INTERVAL, AND NOTHING DEPENDS ON IT.  The rate limiter is gone
+ * (design §14.8), so no value is carried and no interval is measured; this
+ * exists only to advance the snapshot stamp the way the board does. */
+#define BIG_DT      2000u
 
 typedef struct {
     sClusterPackIn    in[CLUSTER_PACK_MAX];
     sClusterTune      tune;
-    sClusterCalcState st;
     sClusterScratch   sc;
     sClusterResult    out;
     uint32_t          now_ms;
@@ -49,7 +46,6 @@ static void fix_init(sFix *f)
 {
     (void)memset(f, 0, sizeof(*f));
     ClusterCfg_Defaults(&f->tune);
-    f->tune.riseRate_mA_per_s = FAST_RISE;
 }
 
 /** Derate out of the way: the convergence table in §3.2 is stated at
@@ -85,30 +81,25 @@ static void pack_online(sClusterPackIn *p, uint8_t idx,
 static void step(sFix *f, uint8_t n, uint32_t dt_ms)
 {
     f->now_ms += dt_ms;
-    TEST_ASSERT(ClusterCalc_Solve(f->in, n, &f->tune, &f->st, &f->sc,
+    TEST_ASSERT(ClusterCalc_Solve(f->in, n, &f->tune, &f->sc,
                                   f->now_ms, &f->out) == cluErr_ok);
 }
 
-/** Run until the published value stops moving.  THE FIRST TICK ALWAYS MOVES
- *  BY THE STEP FLOOR ALONE — st->started is 0, so dt is 0, because there is
- *  no previous tick to measure an interval from — and at FAST_RISE each tick
- *  after that adds 200 A.  Iterating rather than counting keeps the loop
- *  assertions about the LOOP instead of about how many ticks a ramp took. */
+/** ONE TICK IS SETTLED.  This used to iterate until the published value
+ *  stopped moving, because a rate limiter took several ticks to reach it.  It
+ *  is kept as a name rather than inlined, because "the answer is complete
+ *  after exactly one tick" is a PROPERTY worth asserting: the second call must
+ *  produce the same output as the first. */
 static void settle(sFix *f, uint8_t n)
 {
-    unsigned t;
+    sClusterResult first;
 
-    for (t = 0u; t < 16u; t++) {
-        const uint32_t chg = f->out.pub.chargeLimit_mA;
-        const uint32_t dsg = f->out.pub.dischargeLimit_mA;
-
-        step(f, n, BIG_DT);
-        if ((t > 0u) && (f->out.pub.chargeLimit_mA == chg) &&
-            (f->out.pub.dischargeLimit_mA == dsg)) {
-            return;
-        }
-    }
-    TEST_ASSERT(0);         /* the slew never settled: the test is wrong */
+    step(f, n, BIG_DT);
+    first = f->out;
+    step(f, n, BIG_DT);
+    first.pub.tick_ms = f->out.pub.tick_ms;     /* the stamp is allowed to
+                                                   move; nothing else is    */
+    TEST_ASSERT_MEM_EQ(&first, &f->out, sizeof(first));
 }
 
 /* ============================================================================
@@ -119,13 +110,16 @@ static void test_struct_sizes_are_as_budgeted(void)
 {
     /* R4.1: main SRAM is the binding constraint and these are what is spent.
      * A silent growth here is 16 bytes per pack per buffer. */
-    TEST_ASSERT(sizeof(sClusterOutput) == 112u);
+    /* 104, DOWN FROM 112: the two slewed_mA fields went with the rate
+     * limiter and the causal chain is three numbers now, not four. */
+    TEST_ASSERT(sizeof(sClusterOutput) == 104u);
     TEST_ASSERT(sizeof(sClusterMember) == 32u);
     TEST_ASSERT(sizeof(sClusterPackIn) == 64u);
-    TEST_ASSERT(sizeof(sClusterCalcState) == 112u);
-    TEST_ASSERT(sizeof(sClusterScratch) == 96u);
-    TEST_ASSERT(sizeof(sClusterTune) == 36u);
-    TEST_ASSERT(sizeof(sClusterCfg) == 180u);
+    /* 16, DOWN FROM 96: three write-only arrays of the retired estimator
+     * hierarchy went with the dead-code sweep. */
+    TEST_ASSERT(sizeof(sClusterScratch) == 16u);
+    TEST_ASSERT(sizeof(sClusterTune) == 24u);
+    TEST_ASSERT(sizeof(sClusterCfg) == 168u);
 }
 
 static void test_pack_max_equals_pack_module_max(void)
@@ -148,8 +142,8 @@ static void test_enum_bits_are_distinct(void)
     const uint32_t flags[] = {
         cluMemFlag_bindingCharge, cluMemFlag_bindingDischarge,
         cluMemFlag_socOutlier, cluMemFlag_shareOutlier,
-        cluMemFlag_circulating, cluMemFlag_limitFell, cluMemFlag_joined,
-        cluMemFlag_left, cluMemFlag_implausible, cluMemFlag_limitSaturated,
+        cluMemFlag_circulating, cluMemFlag_implausible,
+        cluMemFlag_limitSaturated,
     };
     const uint32_t fields[] = {
         cluField_voltage, cluField_current, cluField_soc, cluField_soh,
@@ -193,538 +187,358 @@ static void test_enum_values_are_not_renumbered(void)
     TEST_ASSERT((int)cluWhy_none        == 0);
     TEST_ASSERT((int)cluWhy_implausible == 7);
     TEST_ASSERT((int)cluLoop_idle      == 0);
-    TEST_ASSERT((int)cluLoop_converged == 3);
-    TEST_ASSERT((int)cluRestart_none      == 0);
-    TEST_ASSERT((int)cluRestart_permitted == 7);
+    TEST_ASSERT((int)cluLoop_predicted == 2);
     TEST_ASSERT((int)cluLimitWhy_noParticipant == 0);
-    TEST_ASSERT((int)cluLimitWhy_ceiling       == 6);
+    TEST_ASSERT((int)cluLimitWhy_ceiling       == 4);
     TEST_ASSERT((int)cluErr_ok    ==  0);
     TEST_ASSERT((int)cluErr_busy  == -6);
 }
 
 /* ============================================================================
- * B — the closed-loop search
+ * B — the measured rule and its low-load prediction (design §3.2, rev 3)
  * ============================================================================ */
 
-/** THE GREEDY CASE from §3.2's table: L = (100, 100) A, f = (0.8, 0.2),
- *  cold start 100 A, one binding measurement -> 112.5 A, and that is the
- *  fixed point. */
-static void test_loop_converges_in_one_step_greedy(void)
+/** THE WORKED EXAMPLE, stated by the user and reproduced exactly.
+ *
+ *  Two equal 300 A packs drawing 100 A and 80 A.  The bus is at 180 A and the
+ *  hardest-working pack is at 1/3 of its limit, so the bus could carry
+ *  180 x 3 = 540 A and the module publishes 90 % of that = 486 A.
+ *
+ *  The assertion is 485 029 mA, not 486 000, and the 971 mA difference is the
+ *  DELIBERATE conservatism of rounding load_pm UP: ceil(1000 x 100/300) = 334
+ *  rather than 333.33, and load is the divisor.  Asserting the exact value
+ *  rather than a band is what makes a change to that rounding visible here. */
+static void test_measured_limit_reproduces_the_worked_example(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    f.in[0].current_mA = 100000;
+    f.in[1].current_mA =  80000;
+    settle(&f, 2u);
+
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 334u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  == 485029u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  <  486000u);
+    TEST_ASSERT(f.out.pub.chargeLoopState  == (uint8_t)cluLoop_measured);
+    TEST_ASSERT(f.out.pub.chargeWhy        == (uint8_t)cluLimitWhy_measured);
+    TEST_ASSERT(f.out.pub.chargeBindingIdx == 0u);      /* the 100 A pack   */
+}
+
+/** THE BINDING PACK IS THE HARDEST-WORKING ONE, NOT THE BIGGEST CURRENT, and
+ *  with unequal packs those are different packs.
+ *
+ *  L = (300, 100) A, I = (100, 60) A.  Pack 0 draws more current but sits at
+ *  33 % of its limit; pack 1 is at 60 % and is what the bus can be scaled
+ *  against: 160 x (100/60) = 266.7 A, x 0.9 = 240 A.  Scaling from pack 0
+ *  instead would give 432 A and put 162 A through a 100 A pack. */
+static void test_measured_limit_binds_on_fractional_load_not_current(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    f.in[0].current_mA = 100000;
+    f.in[1].current_mA =  60000;
+    settle(&f, 2u);
+
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 600u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  == 240000u);
+    TEST_ASSERT(f.out.pub.chargeBindingIdx == 1u);
+    TEST_ASSERT(f.out.member[1].flags & cluMemFlag_bindingCharge);
+    TEST_ASSERT((f.out.member[0].flags & cluMemFlag_bindingCharge) == 0u);
+}
+
+/** SCALE INVARIANCE IS THE WHOLE REASON THE GATE COULD GO.  The same shares
+ *  at a tenth of the current give the same answer, so the rule needs no bus
+ *  at the limit and no settled publish to measure against.  Currents chosen
+ *  to divide exactly, so the assertion is equality rather than a band. */
+static void test_measured_limit_is_scale_invariant(void)
+{
+    sFix     f;
+    uint32_t big;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    f.in[0].current_mA = 150000;
+    f.in[1].current_mA = 120000;
+    settle(&f, 2u);
+    big = f.out.pub.chargeTarget_mA;
+    TEST_ASSERT(big == 486000u);
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    /* A FIFTH of the current, still above the floor (loadMax lands exactly
+     * on 100), and the answer is bit-for-bit the same. */
+    f.in[0].current_mA = 30000;
+    f.in[1].current_mA = 24000;
+    settle(&f, 2u);
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 100u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == big);
+}
+
+/** THE §13.2 RAMP-IN TRAP, WHICH CANNOT HAPPEN ANY MORE — the board-1
+ *  scenario that cost a 36x throughput loss on Pd1.1.50, replayed.
+ *
+ *  A 150 A pack, a steady 1.007 A charge, the slew walking up from zero.
+ *  Revision 2 measured the bus against its own emitted value, so the ramp
+ *  crossing the load satisfied the gate and ratcheted the loop down to 5.1 A,
+ *  where it LATCHED.  Revision 3 never looks at what it published: 1.007 A on
+ *  a 150 A pack is a load of 7 pm, far below the floor, so it predicts
+ *  0.9 x 150 A and the slew simply walks up to it. */
+static void test_a_ramping_slew_can_no_longer_latch_the_limit_low(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 150000u, 150000u);
+    f.in[0].current_mA = 1007;
+    settle(&f, 1u);
+
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_predicted);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 135000u);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA  == 135000u);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA  >  100000u);  /* not 4 112 mA     */
+}
+
+/** BELOW THE FLOOR, PREDICT.  Two 300 A packs at ~1 A: a load of 4 pm is
+ *  noise, so the geometric sum runs — 0.9 x 300 + 0.81 x 300 = 513 A, which
+ *  is conservative against the 600 A the packs add up to. */
+static void test_below_the_floor_the_prediction_runs(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    f.in[0].current_mA = 1000;
+    f.in[1].current_mA =  800;
+    settle(&f, 2u);
+
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm < f.tune.lowLoadFloor_pm);
+    TEST_ASSERT(f.out.pub.chargeLoopState  == (uint8_t)cluLoop_predicted);
+    TEST_ASSERT(f.out.pub.chargeWhy        == (uint8_t)cluLimitWhy_predicted);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  == 513000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  <  600000u);
+    /* NOBODY IS BINDING A PREDICTION, and saying so is what stops an operator
+     * reading the last measurement's pack as the current one. */
+    TEST_ASSERT(f.out.pub.chargeBindingIdx == CLUSTER_PACK_NONE);
+}
+
+/** SMALLEST FIRST, and the ordering is load-bearing.  L = (100, 300) A gives
+ *  0.9 x 100 + 0.81 x 300 = 333 A.  Sorted the other way it would be
+ *  0.9 x 300 + 0.81 x 100 = 351 A — higher, i.e. the unsafe direction, which
+ *  is exactly why the sort exists. */
+static void test_the_prediction_weights_the_weakest_pack_most(void)
 {
     sFix f;
 
     fix_init(&f);
     fix_no_derate(&f);
     pack_online(&f.in[0], 0u, 100000u, 100000u);
-    pack_online(&f.in[1], 1u, 100000u, 100000u);
-
-    settle(&f, 2u);
-    /* The safe opening value is min(L_i), NOT max: with L = (10, 100) A and
-     * the small pack taking 60 % of the bus, a start at 100 A would put 60 A
-     * through a 10 A pack for at least one tick. */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 100000u);
-
-    /* Now drive the bus TO the limit, shared 80/20. */
-    f.in[0].current_mA = 80000;
-    f.in[1].current_mA = 20000;
-    step(&f, 2u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 800u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 112500u);
-    TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_binding);
-    TEST_ASSERT(f.out.member[0].flags & cluMemFlag_bindingCharge);
-
-    /* And it STAYS there: the fixed point is independent of A. */
-    f.in[0].current_mA = 90000;
-    f.in[1].current_mA = 22500;
-    step(&f, 2u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 112500u);
-    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_converged);
-}
-
-/** THE IDENTICAL CASE: f = (0.5, 0.5) gives the full sum, 180 A at the 90 %
- *  setpoint, which is what "identical packs get N x L" has to mean once a
- *  margin exists. */
-static void test_loop_converges_in_one_step_identical(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
     settle(&f, 2u);
 
-    f.in[0].current_mA = 50000;
-    f.in[1].current_mA = 50000;
-    step(&f, 2u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 500u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 180000u);
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_predicted);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 333000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA != 351000u);
 }
 
-/** §3.2.1 — THE ONE THING THAT MAKES THE MECHANISM DANGEROUS IF OMITTED.
- *  100 A published, 10 A drawn: the ungated rule computes 1125 A and then
- *  LATCHES there, reporting itself converged at ten times too high. */
-static void test_loop_does_not_update_when_the_bus_is_not_binding(void)
+/** A PREDICTION NEVER REACHES sum(L_i) EITHER, at any member count.  With
+ *  eight identical packs the geometric series is bounded by d/(1-d) x L,
+ *  which at d = 0.9 is 9 L against the 8 L the packs actually add up to — so
+ *  the bound is NOT free from the series alone at eight members, and the test
+ *  is a real one rather than an algebraic tautology. */
+static void test_the_prediction_never_exceeds_the_sum_of_limits(void)
 {
-    sFix f;
+    uint8_t n;
 
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    pack_online(&f.in[1], 1u, 100000u, 100000u);
-    settle(&f, 2u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 100000u);
-
-    f.in[0].current_mA = 8000;      /* 10 % of the published limit */
-    f.in[1].current_mA = 2000;
-    step(&f, 2u, BIG_DT);
-
-    TEST_ASSERT(f.out.pub.chargeLoop_mA  == 100000u);   /* NOT 1125000 */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 100000u);
-    TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_start);
-    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_searching);
-}
-
-/** Defect L2, as a property.  The gate gives published <= 1000|S|/bindFrac
- *  and the update is loop' = published x target / loadMax, so with
- *  bindFrac_pm >= loadTarget_pm the loop can never publish above the binding
- *  pack's own limit.  Ten thousand pseudorandom two-pack buses. */
-static void test_loop_never_exceeds_min_limit_over_share(void)
-{
-    unsigned iter;
-    unsigned violations = 0u;
-
-    srand(20260906u);
-    for (iter = 0u; iter < 10000u; iter++) {
+    for (n = 1u; n <= CLUSTER_PACK_MAX; n++) {
         sFix     f;
-        uint32_t L0 = 1000u + (uint32_t)(rand() % 300000);
-        uint32_t L1 = 1000u + (uint32_t)(rand() % 300000);
-        uint32_t f0 = 1u + (uint32_t)(rand() % 999);   /* pack 0's share, pm */
-        unsigned t;
+        uint8_t  i;
+        uint64_t sum = 0u;
 
         fix_init(&f);
         fix_no_derate(&f);
-        pack_online(&f.in[0], 0u, L0, L0);
-        pack_online(&f.in[1], 1u, L1, L1);
-
-        for (t = 0u; t < 12u; t++) {
-            /* The bus follows the published limit exactly, split by a fixed
-             * share — the operating point where the gate always opens and the
-             * loop is therefore free to climb as far as it can. */
-            const uint32_t bus  = f.out.pub.chargeLimit_mA;
-            const uint32_t was  = f.out.pub.chargeLoop_mA;
-            uint64_t       i0, i1;
-
-            i0 = ((uint64_t)bus * f0) / 1000u;
-            i1 = (uint64_t)bus - i0;
-            f.in[0].current_mA = (int32_t)i0;
-            f.in[1].current_mA = (int32_t)i1;
-            step(&f, 2u, BIG_DT);
-
-            /* m = min over the charging packs of L_i / f_i, computed from the
-             * currents THIS TICK ACTUALLY SAW.  Taking it from the nominal
-             * share instead would make integer truncation in the split — not
-             * the loop — the thing under test. */
-            if ((f.out.pub.chargeLoop_mA != was) && (bus > 0u)) {
-                uint64_t m = (uint64_t)0xFFFFFFFFFFFFULL;
-
-                if (i0 > 0u) {
-                    const uint64_t m0 = ((uint64_t)L0 * bus) / i0;
-
-                    if (m0 < m) { m = m0; }
-                }
-                if (i1 > 0u) {
-                    const uint64_t m1 = ((uint64_t)L1 * bus) / i1;
-
-                    if (m1 < m) { m = m1; }
-                }
-                if ((uint64_t)f.out.pub.chargeLoop_mA > m) {
-                    violations++;
-                }
-            }
+        for (i = 0u; i < n; i++) {
+            pack_online(&f.in[i], i, 300000u, 300000u);
+            sum += 300000u;
         }
+        settle(&f, n);
+        TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_predicted);
+        TEST_ASSERT((uint64_t)f.out.pub.chargeTarget_mA <= sum);
     }
-    TEST_ASSERT(violations == 0u);
 }
 
-/** THE TRUNCATION DEFECT, as the concrete case that found it.  load_pm feeds
- *  a DIVISION, so a load truncated down yields a limit rounded up, and the
- *  error is unbounded in ratio exactly where load_pm is small.  Found by the
- *  property sweep above: published 10 mA (the slew's opening step) against a
- *  4.779 A pack taking 70 % of the bus.  True load 1.4 pm, truncated to 1, and
- *  the loop leapt to 9.0 A against a 6.827 A ceiling — 32 % over, with the
- *  gate open and every other rule satisfied. */
-static void test_loop_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 125973u, 125973u);
-    pack_online(&f.in[1], 1u,   4779u,   4779u);
-
-    step(&f, 1u + 1u, 250u);            /* opening step: published = 10 mA   */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == CLUSTER_RISE_STEP_MIN_MA);
-
-    f.in[0].current_mA = 3;             /* 30 % of a 10 mA bus               */
-    f.in[1].current_mA = 7;
-    step(&f, 2u, BIG_DT);
-
-    /* m = min(L_i x |S| / I_i) = min(125973 x 10 / 3, 4779 x 10 / 7)
-     *   = min(419910, 6827) = 6827 mA. */
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 2u);      /* ceil(1.465), not 1 */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA <= 6827u);
-}
-
-/** THE RAMP-IN TRAP, found on hardware and not by any of the cases above.
- *
- *  The slew starts at zero and walks upward.  While it is walking, the emitted
- *  value is not a limit the inverter is respecting — it is a number the board
- *  is moving through the bus current — so the gate opens for a reason that has
- *  nothing to do with the battery being at its limit, and the update ratchets
- *  the loop DOWN to wherever the ramp crossed the load.
- *
- *  IT THEN LATCHES: re-opening the gate needs a bus draw at 90 % of a limit
- *  the loop has just made too small to reach.
- *
- *  MEASURED ON BOARD 1 (Pd1.1.50, 2026-09-07), and these are its real numbers:
- *  a 150 A pack, a steady 1.007 A charge, the default 5 A/s rise.  It settled
- *  at a published charge limit of 4.112 A with `why: notBinding` and stayed
- *  there — a 36x throughput loss.  This test reproduces it exactly and must
- *  FAIL against the pre-fix loop. */
-static void test_loop_does_not_learn_while_the_slew_is_still_ramping_in(void)
+/** THE ACCEPTED LIMITATION, made explicit so it cannot regress by accident.
+ *  A one-pack cluster publishes margin x L — 135 A of a 150 A pack — and it
+ *  does so IDENTICALLY on both sides of the floor, because |S| / (|S|/L) is
+ *  L at every current.  A single-pack site therefore never steps when the
+ *  load arrives, and the 10 % it gives up is the price of the module. */
+static void test_a_single_pack_is_continuous_across_the_floor(void)
 {
     sFix     f;
-    unsigned t;
+    uint32_t quiet;
 
     fix_init(&f);
-    f.tune.riseRate_mA_per_s = CLUSTER_DFLT_RISE_MA_PER_S;   /* 5 A/s        */
+    fix_no_derate(&f);
     pack_online(&f.in[0], 0u, 150000u, 150000u);
-    f.in[0].current_mA = 1007;                  /* the board's real reading  */
+    settle(&f, 1u);
+    quiet = f.out.pub.chargeTarget_mA;
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_predicted);
+    TEST_ASSERT(quiet == 135000u);
 
-    /* 40 s of 250 ms ticks: long enough for the ramp to cross 1.007 A many
-     * times over and to reach the derated start value. */
-    for (t = 0u; t < 160u; t++) {
-        step(&f, 1u, 250u);
-    }
-
-    /* The loop must still be holding the SAFE OPENING VALUE, min(L_i) — it
-     * has been given no measurement worth learning from. */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 150000u);
-    /* And the emitted value is that, derated: 150 A x 0.80 = 120 A, which is
-     * what the JK itself would have sent.  NOT 4.1 A. */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 120000u);
-    TEST_ASSERT(f.st.chgBindSeen == 0u);
-}
-
-/** The other half of the same rule: once the slew HAS settled, a genuine
- *  measurement at the limit is still learned from.  Without this the fix
- *  above could be "never learn anything" and pass. */
-static void test_loop_still_learns_once_the_slew_has_settled(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);                             /* ramp in, no current       */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 100000u);
-    TEST_ASSERT(f.st.chgSlewing == 0u);
-
-    f.in[0].current_mA = 100000;                /* the bus really is at it   */
+    f.in[0].current_mA = 100000;                /* well above the floor      */
     step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 1000u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 90000u);      /* 0.9 x 100 A      */
-    TEST_ASSERT(f.st.chgBindSeen == 1u);
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_measured);
+    /* Equal to within the ceiling on load_pm — 667 rather than 666.67 — which
+     * is 68 mA of 135 A, and always in the conservative direction. */
+    TEST_ASSERT(f.out.pub.chargeTarget_mA <= quiet);
+    TEST_ASSERT((quiet - f.out.pub.chargeTarget_mA) < 200u);
 }
 
-/** Review B5, and the reason it is not merely a division guard: a zero limit
- *  with current flowing is a pack ALREADY over its rating.  It saturates at
- *  1000 per-mille, which makes the loop reduce. */
-static void test_loop_saturates_load_for_a_zero_limit_pack(void)
+/** THE SAFETY MARGIN IS A NUMBER, not a constant folded into the arithmetic.
+ *  1000 is a legal setting and means "no margin"; the sum bound still holds
+ *  there, which is why the parser permits it. */
+static void test_the_safety_margin_is_configurable_end_to_end(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    f.tune.safetyMargin_pm = 1000u;
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    f.in[0].current_mA = 150000;
+    f.in[1].current_mA = 120000;
+    settle(&f, 2u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 540000u);  /* 486 000 / 0.9    */
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    f.tune.safetyMargin_pm = 500u;
+    pack_online(&f.in[0], 0u, 300000u, 300000u);
+    pack_online(&f.in[1], 1u, 300000u, 300000u);
+    f.in[0].current_mA = 150000;
+    f.in[1].current_mA = 120000;
+    settle(&f, 2u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 270000u);
+}
+
+/** LOAD IS ROUNDED UP, AND THAT IS THE SAFE DIRECTION.  A 10 mA bus against a
+ *  4.779 A pack has a true load of 2.09 pm; truncating to 2 would licence
+ *  4.5 A, ceiling to 3 gives 3.0 A.  Measured with the floor lowered, since
+ *  the shipped floor sends this case to the prediction instead. */
+static void test_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    f.tune.lowLoadFloor_pm = 0u;                /* force the measured path   */
+    pack_online(&f.in[0], 0u, 4779u, 4779u);
+    f.in[0].current_mA = 10;
+    settle(&f, 1u);
+
+    /* ceil(10 * 1000 / 4779) = 3, so 10 * 900 / 3 = 3000 mA.  Truncation
+     * would have given 2 and 4500 mA — nearly the pack's whole limit off one
+     * 10 mA reading. */
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 3u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  == 3000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA  <= 4779u);
+}
+
+/** A PACK ADVERTISING A ZERO LIMIT WHILE CURRENT FLOWS IS OVER ITS LIMIT BY
+ *  DEFINITION.  It is excluded from the participating set but NOT from the
+ *  measurement, and its load saturates at 1000 rather than dividing. */
+static void test_measurement_saturates_load_for_a_zero_limit_pack(void)
 {
     sFix f;
 
     fix_init(&f);
     fix_no_derate(&f);
     pack_online(&f.in[0], 0u, 100000u, 100000u);
-    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    pack_online(&f.in[1], 1u,      0u, 100000u);
+    f.in[0].current_mA = 50000;
+    f.in[1].current_mA = 50000;
     settle(&f, 2u);
-
-    /* Pack 1's own limit collapses to zero while it still carries current. */
-    f.in[1].chargeLimit_mA = 0u;
-    f.in[0].current_mA = 60000;
-    f.in[1].current_mA = 40000;
-    step(&f, 2u, BIG_DT);
 
     TEST_ASSERT(f.out.member[1].flags & cluMemFlag_limitSaturated);
     TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 1000u);
-    /* It also left the participating set, so the leave clamp applies and the
-     * limit may only go DOWN. */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA <= 100000u);
+    /* 100 A of bus at a load of 1.0 is 100 A of capability, x 0.9. */
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 90000u);
 }
 
-static void test_loop_ignores_a_zero_loadmax(void)
+/** `|I| * 1000` OVERFLOWS uint32 above 4 294 967 mA, and a wrap there
+ *  produces a SMALL loadMax — which is a LARGE limit, since loadMax is the
+ *  divisor.  The intermediate is uint64 for exactly this. */
+static void test_load_does_not_wrap_at_an_absurd_current(void)
 {
     sFix f;
 
     fix_init(&f);
     fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-    /* No current at all in either direction: the degenerate case of the gate,
-     * and it must never reach the division. */
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 0u);
-}
-
-/** Defect L4.  1000 A against a 15 A limit is load_pm = 66 666, and a plain
- *  narrowing to uint16 sends 65536 to exactly 0 — the value the loop reads as
- *  "no current, do not update".  The most extreme overload the system can
- *  have must not be indistinguishable from no current at all. */
-static void test_loop_load_does_not_wrap_at_an_absurd_current(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 15000u, 15000u);
+    f.tune.lowLoadFloor_pm = 0u;
+    pack_online(&f.in[0], 0u, 1000u, 1000u);
+    f.in[0].current_mA = 900000000;             /* beyond plausible          */
     settle(&f, 1u);
 
-    f.in[0].current_mA = 1000000;               /* 1000 A, at the domain edge */
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 0xFFFFu);      /* saturated     */
-    TEST_ASSERT(f.out.member[0].load_pm    == 0xFFFFu);
-    /* And it acted on it: the limit collapsed rather than holding. */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA < 15000u);
+    /* Dropped by the plausibility pass before any of this, which is where a
+     * garbage reading belongs. */
+    TEST_ASSERT(f.out.member[0].flags & cluMemFlag_implausible);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA == 0u);
 }
 
-/** abs(INT32_MIN) is undefined behaviour and sign-extends through a
- *  (uint64_t) cast.  The value is outside the plausible domain, so the pack
- *  is DROPPED — but it must be dropped by an evaluation that did not trap. */
 static void test_abs_of_int32_min_does_not_sign_extend(void)
 {
     sFix f;
 
     fix_init(&f);
     pack_online(&f.in[0], 0u, 100000u, 100000u);
+    f.in[0].current_mA = INT32_MIN;
+    step(&f, 1u, 250u);
+
+    /* -(int64_t)v, never -v: negating INT32_MIN in int32 is undefined and
+     * (uint64_t)(-v) sign-extends first.  Either way it is implausible. */
+    TEST_ASSERT(f.out.member[0].flags & cluMemFlag_implausible);
+}
+
+/** ONLY THE PACKS FLOWING THIS WAY.  A discharging pack must not appear in
+ *  the charge measurement, or the two directions would contaminate each
+ *  other's divisor. */
+static void test_measurement_uses_only_the_controlled_direction(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
     pack_online(&f.in[1], 1u, 100000u, 100000u);
-    f.in[1].current_mA = INT32_MIN;
-    step(&f, 2u, 250u);
-
-    TEST_ASSERT(f.out.member[1].state == (uint8_t)cluMember_absent);
-    TEST_ASSERT(f.out.member[1].why   == (uint8_t)cluWhy_implausible);
-    TEST_ASSERT(f.out.member[1].flags & cluMemFlag_implausible);
-    TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_implausible);
-    TEST_ASSERT(f.out.pub.onlineCnt == 1u);
-    TEST_ASSERT(f.out.sanitised == 1u);
-}
-
-/** A discharging bus must not tune the CHARGE limit (§3.5 item 6). */
-static void test_loop_uses_only_the_controlled_direction(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-
-    f.in[0].current_mA = -95000;                /* hard discharge            */
-    step(&f, 1u, BIG_DT);
-
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 0u);        /* nothing charging */
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);      /* untouched        */
-    TEST_ASSERT(f.out.pub.dischargeLoadMax_pm == 950u);   /* the loop that
-                                                             should have moved */
-    TEST_ASSERT(f.out.pub.dischargeLoop_mA != 100000u);
-}
-
-/* ============================================================================
- * C — the start value and the restart triggers
- * ============================================================================ */
-
-static void test_start_is_min_limit_not_max(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 10000u, 10000u);      /* the small pack        */
-    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    f.in[0].current_mA =  50000;                /* charging                  */
+    f.in[1].current_mA = -50000;                /* discharging               */
     settle(&f, 2u);
 
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 10000u);
-    TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_start);
+    /* Each direction sees one pack at half its limit: 50 A / 0.5 x 0.9. */
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm    == 500u);
+    TEST_ASSERT(f.out.pub.dischargeLoadMax_pm == 500u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA     == 90000u);
+    TEST_ASSERT(f.out.pub.dischargeTarget_mA  == 90000u);
 }
 
-static void test_restart_on_a_participant_limit_decrease(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 300000u, 300000u);
-    pack_online(&f.in[1], 1u, 300000u, 300000u);
-    settle(&f, 2u);
-    f.in[0].current_mA = 150000;
-    f.in[1].current_mA = 150000;
-    step(&f, 2u, BIG_DT);                       /* earn a binding sample     */
-    TEST_ASSERT(f.st.chgBindSeen == 1u);
-
-    f.in[0].chargeLimit_mA = 30000;             /* a 90 % derate by the pack */
-    step(&f, 2u, BIG_DT);
-    TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_limitFell);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 30000u);
-    TEST_ASSERT(f.out.member[0].flags & cluMemFlag_limitFell);
-}
-
-static void test_no_restart_on_a_participant_limit_increase(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-
-    f.in[0].chargeLimit_mA = 300000;    /* safe at the smaller limit ⟹ safe  */
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_none);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);
-}
-
-/** Noise inside the deadband must not restart; a MONOTONIC RAMP must, and
- *  that is why the reference is latched at restart rather than refreshed
- *  every tick. */
-static void test_deadband_suppresses_noise_but_not_a_ramp(void)
-{
-    sFix     f;
-    unsigned t;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.limitDeadband_pm = 20u;                  /* 2 %                   */
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-
-    /* +/- 1 % noise: never trips. */
-    for (t = 0u; t < 6u; t++) {
-        f.in[0].chargeLimit_mA = ((t & 1u) != 0u) ? 99000u : 101000u;
-        step(&f, 1u, BIG_DT);
-        TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_none);
-    }
-
-    /* A 1 %-per-tick ramp down: against a per-tick reference this would never
-     * trip at all, and the loop would hold a value learned against a pack
-     * that has since derated itself into the ground. */
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.limitDeadband_pm = 20u;
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-    {
-        uint32_t L = 100000u;
-        int      tripped = 0;
-
-        for (t = 0u; t < 5u; t++) {
-            L -= 1000u;
-            f.in[0].chargeLimit_mA = L;
-            step(&f, 1u, BIG_DT);
-            if (f.out.pub.lastRestart == (uint8_t)cluRestart_limitFell) {
-                tripped = 1;
-                break;
-            }
-        }
-        TEST_ASSERT(tripped == 1);
-    }
-}
-
-/** REVIEW B2, REOPENED AS L3.  Three packs, L = (300, 300, 30) A, the loop
- *  has earned 60 A.  The 30 A pack's electrical group goes stale — IT IS
- *  STILL BOLTED TO THE BUSBAR.  min(L_i) over the new set is 300 A, so an
- *  unclamped restart would raise the emitted limit toward 255 A and put ~127 A
- *  through a 30 A pack that is invisible to loadMax. */
-static void test_restart_on_member_leave_never_raises_the_limit(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 300000u, 300000u);
-    pack_online(&f.in[1], 1u, 300000u, 300000u);
-    pack_online(&f.in[2], 2u,  30000u,  30000u);
-    settle(&f, 3u);
-
-    /* Teach the loop a modest value: the small pack is greedy. */
-    f.in[0].current_mA =  2000;
-    f.in[1].current_mA =  2000;
-    f.in[2].current_mA = 26000;
-    step(&f, 3u, BIG_DT);
-    {
-        const uint32_t learned = f.out.pub.chargeLoop_mA;
-
-        TEST_ASSERT(learned <= 300000u);
-
-        /* And now it vanishes from view. */
-        f.in[2].elecAge_ms = 400000u;
-        step(&f, 3u, BIG_DT);
-        TEST_ASSERT(f.out.member[2].state == (uint8_t)cluMember_stale);
-        TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_memberLeft);
-        TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_memberLost);
-        /* THE CLAUSE THAT CLOSES B2: loop = min(loop_before, min_new(L_i)). */
-        TEST_ASSERT(f.out.pub.chargeLoop_mA <= learned);
-        TEST_ASSERT(f.out.pub.chargeLoop_mA < 300000u);
-    }
-}
-
-static void test_restart_when_a_pack_joins(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 300000u, 300000u);
-    pack_online(&f.in[1], 1u, 300000u, 300000u);
-    f.in[1].cond = (uint8_t)packCond_absent;
-    settle(&f, 2u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 300000u);
-
-    /* The newcomer is small, and has never been measured. */
-    f.in[1].cond = (uint8_t)packCond_online;
-    f.in[1].chargeLimit_mA = 20000u;
-    f.in[1].dischargeLimit_mA = 20000u;
-    step(&f, 2u, BIG_DT);
-    TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_memberJoined);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 20000u);
-    TEST_ASSERT(f.out.member[1].flags & cluMemFlag_joined);
-}
-
-static void test_restart_after_hold_expiry(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.holdMaxAge_ms = 5000u;
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    settle(&f, 1u);
-    f.in[0].current_mA = 95000;
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.st.chgBindSeen == 1u);
-
-    f.in[0].current_mA = 0;
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_holding);
-    step(&f, 1u, BIG_DT);
-    step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_holdExpired);
-    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_searching);
-}
-
-static void test_charge_and_discharge_loops_are_independent(void)
+/** THE TWO DIRECTIONS SHARE NO ARITHMETIC.  Charge and discharge sharing
+ *  differ, so each is solved on its own currents and its own limits. */
+static void test_charge_and_discharge_are_independent(void)
 {
     sFix f;
 
@@ -732,14 +546,18 @@ static void test_charge_and_discharge_loops_are_independent(void)
     fix_no_derate(&f);
     pack_online(&f.in[0], 0u, 100000u, 200000u);
     settle(&f, 1u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA    == 100000u);
-    TEST_ASSERT(f.out.pub.dischargeLoop_mA == 200000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA    ==  90000u);
+    TEST_ASSERT(f.out.pub.dischargeTarget_mA == 180000u);
 
     f.in[0].current_mA = -190000;
     step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);        /* untouched */
-    TEST_ASSERT(f.out.pub.dischargeLoop_mA != 200000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA    ==  90000u);   /* untouched    */
+    TEST_ASSERT(f.out.pub.dischargeTarget_mA == 180000u);
 }
+
+/* ============================================================================
+ * C — the participating set
+ * ============================================================================ */
 
 static void test_zero_limit_pack_is_out_of_the_participating_set(void)
 {
@@ -826,7 +644,7 @@ static void test_charge_limit_is_zero_when_charge_is_forbidden(void)
     pack_online(&f.in[1], 1u, 100000u, 100000u);
     settle(&f, 2u);
     {
-        const uint32_t learned = f.out.pub.chargeLoop_mA;
+        const uint32_t learned = f.out.pub.chargeTarget_mA;
 
         TEST_ASSERT(f.out.pub.chargeLimit_mA > 0u);
 
@@ -838,29 +656,32 @@ static void test_charge_limit_is_zero_when_charge_is_forbidden(void)
         TEST_ASSERT(f.out.pub.chargeLimit_mA == 0u);
         TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_forbidden);
         TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_chargeForbidden);
-        /* But the LOOP is untouched: a transient alarm must not destroy what
-         * the loop learned, and chargeSlewed_mA still shows what it would
-         * have said. */
-        TEST_ASSERT(f.out.pub.chargeLoop_mA == learned);
-        TEST_ASSERT(f.out.pub.chargeSlewed_mA > 0u);
+        /* But the RULE is untouched, and chargeDerated_mA still shows what
+         * would have gone out — which is what tells "not allowed" from
+         * "nothing to give". */
+        TEST_ASSERT(f.out.pub.chargeTarget_mA == learned);
+        TEST_ASSERT(f.out.pub.chargeDerated_mA > 0u);
         /* Discharge is untouched — permission is per direction. */
         TEST_ASSERT(f.out.pub.dischargeAllowed == 1u);
         TEST_ASSERT(f.out.pub.dischargeLimit_mA > 0u);
     }
 }
 
-/** THE CONVERSE DOES NOT HOLD.  A loop that has not yet earned headroom
- *  publishes a SMALL limit, not a refusal. */
+/** THE CONVERSE DOES NOT HOLD.  A tiny pack publishes a SMALL limit, not a
+ *  refusal — permission and magnitude are different statements.  This used to
+ *  be demonstrated with a slew starting at zero; with the rate limiter gone
+ *  the honest way to make a small limit is a small battery. */
 static void test_zero_limit_does_not_imply_forbidden(void)
 {
     sFix f;
 
     fix_init(&f);
-    f.tune.riseRate_mA_per_s = CLUSTER_RISE_MIN_MA_PER_S;
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    step(&f, 1u, 250u);                 /* first tick: the slew starts at 0  */
+    fix_no_derate(&f);
+    pack_online(&f.in[0], 0u, 100u, 100u);      /* a 0.1 A pack              */
+    step(&f, 1u, 250u);
 
     TEST_ASSERT(f.out.pub.chargeLimit_mA < 100u);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA > 0u);
     TEST_ASSERT(f.out.pub.chargeAllowed == 1u);
 }
 
@@ -899,101 +720,35 @@ static void test_all_unknown_switches_fall_back_to_permitted(void)
     TEST_ASSERT(f.out.pub.dischargeAllowed == 1u);
 }
 
-static void test_permitting_again_ramps_from_where_it_was(void)
+/** A REFUSAL AND ITS WITHDRAWAL BOTH TAKE EFFECT IMMEDIATELY, and that is the
+ *  point rather than an omission (design §14.8).  The cap is a cap: the
+ *  battery being emulated switches `0x351`'s current fields between discrete
+ *  states between 250 ms frames, and a sudden change of situation needs a
+ *  sudden response.  Revision 2 ramped back up here, which required an
+ *  asymmetry (fall fast, rise slow) that existed only to stop the rate limiter
+ *  causing the cascade it was meant to prevent.  With no rate limiter there is
+ *  no asymmetry to get wrong. */
+static void test_permission_and_its_withdrawal_both_take_effect_at_once(void)
 {
-    sFix f;
+    sFix     f;
+    uint32_t before;
 
     fix_init(&f);
     pack_online(&f.in[0], 0u, 100000u, 100000u);
     settle(&f, 1u);
+    before = f.out.pub.chargeLimit_mA;
+    TEST_ASSERT(before > 0u);
+
     f.in[0].alarms = (uint32_t)packAlarm_cellOverVoltage;
     step(&f, 1u, BIG_DT);
     TEST_ASSERT(f.out.pub.chargeAllowed == 0u);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA == 0u);
+    TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_forbidden);
 
     f.in[0].alarms = 0u;
-    step(&f, 1u, BIG_DT);
-    /* Without the restart the emitted limit would step 0 -> learned in one
-     * tick, which is a current step into real cells. */
-    TEST_ASSERT(f.out.pub.lastRestart == (uint8_t)cluRestart_permitted);
+    step(&f, 1u, 250u);
     TEST_ASSERT(f.out.pub.chargeAllowed == 1u);
-}
-
-/* ============================================================================
- * E — the slew
- * ============================================================================ */
-
-static void test_slew_decrease_is_immediate_increase_is_limited(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.riseRate_mA_per_s = 5000u;       /* 5 A/s, the shipping default   */
-    pack_online(&f.in[0], 0u, 200000u, 200000u);
-
-    /* THE FIRST TICK HAS NO INTERVAL — st->started is 0, so dt is 0 and the
-     * rise is the step floor alone.  That floor exists only so a slow rate
-     * does not stall on integer truncation of (rate * dt)/1000. */
-    step(&f, 1u, 250u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == CLUSTER_RISE_STEP_MIN_MA);
-    TEST_ASSERT(f.out.pub.chargeWhy == (uint8_t)cluLimitWhy_slew);
-    step(&f, 1u, 250u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == (CLUSTER_RISE_STEP_MIN_MA + 1250u));
-    step(&f, 1u, 250u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == (CLUSTER_RISE_STEP_MIN_MA + 2500u));
-
-    /* A collapse arrives in full at the next publish. */
-    f.in[0].chargeLimit_mA = 1000u;
-    step(&f, 1u, 250u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA == 1000u);
-}
-
-static void test_slew_step_is_clamped_at_dt_max(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.riseRate_mA_per_s = 1000u;
-    pack_online(&f.in[0], 0u, 500000u, 500000u);
-
-    step(&f, 1u, 250u);
-    /* A scheduling gap, a debugger halt or a config apply must not deliver a
-     * giant step: dt is clamped at 2000 ms whatever the wall clock says. */
-    step(&f, 1u, 600000u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA <= (250u + 2000u));
-}
-
-static void test_slew_is_wrap_safe_across_the_millisecond_rollover(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    pack_online(&f.in[0], 0u, 100000u, 100000u);
-    f.now_ms = 0xFFFFFF00u;
-    step(&f, 1u, 250u);
-    step(&f, 1u, 250u);                 /* now_ms has wrapped past 2^32      */
-    TEST_ASSERT(f.now_ms < 0x1000u);
-    TEST_ASSERT(f.out.pub.chargeLimit_mA > 0u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);
-}
-
-static void test_slew_rate_at_the_parse_bound_does_not_overflow(void)
-{
-    sFix f;
-
-    fix_init(&f);
-    fix_no_derate(&f);
-    f.tune.riseRate_mA_per_s = CLUSTER_RISE_MAX_MA_PER_S;
-    f.tune.limitMax_mA       = CLUSTER_LIMIT_MAX_MA;
-    pack_online(&f.in[0], 0u, CLUSTER_LIMIT_MAX_MA, CLUSTER_LIMIT_MAX_MA);
-    step(&f, 1u, CLUSTER_DT_MAX_MS);            /* no interval yet          */
-    step(&f, 1u, CLUSTER_DT_MAX_MS);
-    /* 1e5 x 2000 = 2e8, comfortably inside uint32 — the PARSE BOUND is what
-     * holds that, which is why it is load-bearing arithmetic. */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA ==
-                (CLUSTER_RISE_STEP_MIN_MA + 200000u));
+    TEST_ASSERT(f.out.pub.chargeLimit_mA == before);    /* the FULL cap, now */
 }
 
 /* ============================================================================
@@ -1108,6 +863,102 @@ static void test_cvl_includes_a_pack_that_refuses_to_charge(void)
     TEST_ASSERT(f.out.pub.fields & cluField_chargeVoltLimit);
 }
 
+/** THE SODAS DEFECT, 2026-09-09 — found by running the two-pack case for the
+ *  first time and fixed the same day.
+ *
+ *  `sodas2` advertised packCap_voltageLimits and returned 0 mV / 0 mV for four
+ *  minutes (its limits register group had not answered) while `sodas15`
+ *  returned 55 200 / 43 200.  The min took the zero, and the snapshot went out
+ *  with `chargeVoltLimit_mV: 0` and the field marked VALID — which by contract
+ *  2 of cluster.h is not "no limit" but an instruction to STOP CHARGING.  It
+ *  drove nothing only because no frame source exists yet. */
+static void test_a_pack_reporting_zero_volt_limits_does_not_capture_the_min(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
+    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    f.in[0].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[1].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[0].chargeVoltLimit_mV    = 0u;         /* advertises, has not
+                                                   answered yet             */
+    f.in[0].dischargeVoltLimit_mV = 0u;
+    f.in[1].chargeVoltLimit_mV    = 55200u;
+    f.in[1].dischargeVoltLimit_mV = 43200u;
+    step(&f, 2u, 250u);
+
+    TEST_ASSERT(f.out.pub.chargeVoltLimit_mV    == 55200u);
+    TEST_ASSERT(f.out.pub.dischargeVoltLimit_mV == 43200u);
+    TEST_ASSERT(f.out.pub.fields & (uint16_t)cluField_chargeVoltLimit);
+    TEST_ASSERT(f.out.pub.fields & (uint16_t)cluField_dischargeVoltLimit);
+    /* Nobody is missing: one pack answered both fields. */
+    TEST_ASSERT((f.out.pub.clusterAlarms &
+                 (uint32_t)cluAlarm_voltLimitMissing) == 0u);
+}
+
+/** AND IF NOBODY ANSWERS, THE FIELD IS CLEARED RATHER THAN PUBLISHED AS ZERO —
+ *  the §7.4 rule, now reachable through a pack that advertises as well as
+ *  through one that does not. */
+static void test_all_packs_reporting_zero_volt_limits_clears_the_field(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
+    f.in[0].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[0].chargeVoltLimit_mV    = 0u;
+    f.in[0].dischargeVoltLimit_mV = 0u;
+    step(&f, 1u, 250u);
+
+    TEST_ASSERT(f.out.pub.chargeVoltLimit_mV == 0u);
+    TEST_ASSERT((f.out.pub.fields & (uint16_t)cluField_chargeVoltLimit) == 0u);
+    TEST_ASSERT((f.out.pub.fields &
+                 (uint16_t)cluField_dischargeVoltLimit) == 0u);
+    TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_voltLimitMissing);
+}
+
+/** THE TWO FIELDS FAIL INDEPENDENTLY.  A pack may answer one register group
+ *  and not the other, and the healthy field must not be held hostage. */
+static void test_volt_limits_are_published_per_field(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
+    f.in[0].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[0].chargeVoltLimit_mV    = 56000u;
+    f.in[0].dischargeVoltLimit_mV = 0u;         /* this half is unanswered   */
+    step(&f, 1u, 250u);
+
+    TEST_ASSERT(f.out.pub.chargeVoltLimit_mV == 56000u);
+    TEST_ASSERT(f.out.pub.fields & (uint16_t)cluField_chargeVoltLimit);
+    TEST_ASSERT((f.out.pub.fields &
+                 (uint16_t)cluField_dischargeVoltLimit) == 0u);
+    TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_voltLimitMissing);
+}
+
+/** A DECODE ERROR YIELDS A HUGE NUMBER, and DVL is a max(), so the implausible
+ *  domain has to bound it from above as well as at zero. */
+static void test_an_implausible_volt_limit_is_not_taken(void)
+{
+    sFix f;
+
+    fix_init(&f);
+    pack_online(&f.in[0], 0u, 100000u, 100000u);
+    pack_online(&f.in[1], 1u, 100000u, 100000u);
+    f.in[0].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[1].caps |= (uint32_t)packCap_voltageLimits;
+    f.in[0].chargeVoltLimit_mV    = 56000u;
+    f.in[0].dischargeVoltLimit_mV = 43200u;
+    f.in[1].chargeVoltLimit_mV    = 56000u;
+    f.in[1].dischargeVoltLimit_mV = 0xFFFF0000u;    /* a wrong decodeType    */
+    step(&f, 2u, 250u);
+
+    TEST_ASSERT(f.out.pub.dischargeVoltLimit_mV == 43200u);
+    TEST_ASSERT(f.out.pub.fields & (uint16_t)cluField_dischargeVoltLimit);
+}
+
 static void test_voltage_is_the_mean_and_the_spread_is_reported(void)
 {
     sFix f;
@@ -1153,7 +1004,7 @@ static void test_temperature_is_max_and_alarms_are_ored(void)
     TEST_ASSERT(f.out.pub.alarms == (uint32_t)packAlarm_cellImbalance);
 }
 
-static void test_confidence_is_the_worst_contributor_and_capped_while_searching(void)
+static void test_confidence_is_the_worst_contributor_and_capped_while_predicting(void)
 {
     sFix f;
 
@@ -1167,8 +1018,10 @@ static void test_confidence_is_the_worst_contributor_and_capped_while_searching(
     f.in[0].sohConf_pm = 800u; f.in[1].sohConf_pm = 200u;
     settle(&f, 2u);
 
-    /* A cluster that has not yet measured its own capability should say so. */
-    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_searching);
+    /* A cluster that has not measured its own capability should say so — and
+     * with TWO packs the prediction genuinely is a guess, so the cap applies.
+     * (A one-pack cluster is exempt: there both rules give the same answer.) */
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_predicted);
     TEST_ASSERT(f.out.pub.socConf_pm == 300u);
     TEST_ASSERT(f.out.pub.sohConf_pm == 200u);
 }
@@ -1242,7 +1095,7 @@ static void test_share_is_an_observation_that_flags_the_greedy_pack(void)
     TEST_ASSERT(f.out.member[1].flags & cluMemFlag_shareOutlier);
 }
 
-static void test_a_circulating_pack_is_flagged_and_the_loop_holds(void)
+static void test_a_circulating_pack_is_flagged_and_each_direction_splits(void)
 {
     sFix f;
 
@@ -1253,13 +1106,15 @@ static void test_a_circulating_pack_is_flagged_and_the_loop_holds(void)
     settle(&f, 2u);
 
     /* Packs six millivolts apart at low bus current: one reads the opposite
-     * sign outright.  A circulating bus SHRINKS |S| in each direction, so the
-     * gate fails and the loop holds — which is the correct response. */
+     * sign outright.  A circulating bus is SPLIT — each direction sees only
+     * its own pack — so the charge answer is that ONE pack's capability
+     * (40 A against 100 A is a load of 400 pm, above the floor, so it
+     * measures): 40 000 x 900 / 400 = 90 000. */
     f.in[0].current_mA =  40000;
     f.in[1].current_mA = -38000;
     step(&f, 2u, BIG_DT);
     TEST_ASSERT(f.out.pub.clusterAlarms & cluAlarm_circulating);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 100000u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA == 90000u);
 }
 
 /* ============================================================================
@@ -1268,8 +1123,8 @@ static void test_a_circulating_pack_is_flagged_and_the_loop_holds(void)
 
 /** Open question 3, made enforceable.  n = 1 is the SAME code path — there is
  *  no `if (n == 1)` in cluster_calc.c — and the published limit is NOT L:
- *  at the limit loadMax = 1000 A/L, so the loop settles at loadTarget x L and
- *  the emitted value at loadTarget x derate x L. */
+ *  loadMax = 1000 |I|/L, so the target is margin x L whatever the current,
+ *  and the emitted value is margin x derate x L. */
 static void test_single_pack_is_the_pack(void)
 {
     sFix f;
@@ -1297,19 +1152,20 @@ static void test_single_pack_is_the_pack(void)
     TEST_ASSERT(f.out.pub.dischargeVoltLimit_mV == 44000u);
     TEST_ASSERT(f.out.pub.onlineCnt == 1u);
     TEST_ASSERT(f.out.pub.cond == (uint8_t)cluCond_online);
-    /* ...EXCEPT the two current limits, which carry the derate. */
-    TEST_ASSERT(f.out.pub.chargeLimit_mA    == 240000u);    /* 300 A x 0.80  */
-    TEST_ASSERT(f.out.pub.dischargeLimit_mA == 255000u);    /* 300 A x 0.85  */
+    /* ...EXCEPT the two current limits, which carry BOTH the safety margin
+     * and the derate: 300 A x 0.9 x 0.80 and x 0.9 x 0.85. */
+    TEST_ASSERT(f.out.pub.chargeTarget_mA   == 270000u);
+    TEST_ASSERT(f.out.pub.chargeLimit_mA    == 216000u);
+    TEST_ASSERT(f.out.pub.dischargeLimit_mA == 229500u);
 
-    /* And after a binding measurement taken AT the limit, the loop settles at
-     * loadTarget x L and the emitted value at loadTarget x derate x L.  The
-     * published limit is NOT L, and a test that asserted it was could not hold
-     * under a loop at all. */
-    f.in[0].current_mA = 240000;                            /* == published  */
+    /* And it is the SAME answer once current flows — one pack is the same
+     * number whichever rule produced it. */
+    f.in[0].current_mA = 216000;
     step(&f, 1u, BIG_DT);
-    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 800u);
-    TEST_ASSERT(f.out.pub.chargeLoop_mA == 270000u);        /* 0.9 x 300 A   */
-    TEST_ASSERT(f.out.pub.chargeDerated_mA == 216000u);     /* x 0.80        */
+    TEST_ASSERT(f.out.pub.chargeLoopState == (uint8_t)cluLoop_measured);
+    TEST_ASSERT(f.out.pub.chargeLoadMax_pm == 720u);
+    TEST_ASSERT(f.out.pub.chargeTarget_mA <= 270000u);
+    TEST_ASSERT((270000u - f.out.pub.chargeTarget_mA) < 500u);
 
     /* A single pack cannot diverge from itself. */
     TEST_ASSERT((f.out.pub.clusterAlarms & cluAlarm_socDiverge) == 0u);
@@ -1333,28 +1189,35 @@ static void test_zero_packs_is_a_valid_zero(void)
 /** THE PURE-CORE PROPERTY, ASSERTED RATHER THAN CLAIMED: memcpy the state,
  *  re-run the identical input, get an identical output.  If cluster_calc.c
  *  ever grew a file static this fails. */
-static void test_state_is_the_only_thing_carried(void)
+/** NOTHING IS CARRIED AT ALL — the strongest form this assertion has ever
+ *  taken.  It used to save and restore sClusterCalcState to prove the state
+ *  was the ONLY carrier; with the rate limiter deleted there is no state, so
+ *  two independent fixtures fed the same packs must agree bit for bit even
+ *  though one has a long history behind it and the other has none. */
+static void test_nothing_at_all_is_carried_between_ticks(void)
 {
-    sFix              f;
-    sClusterCalcState saved;
-    sClusterResult    first;
+    sFix f;
+    sFix fresh;
 
     fix_init(&f);
     pack_online(&f.in[0], 0u, 100000u, 100000u);
     pack_online(&f.in[1], 1u,  50000u,  50000u);
     settle(&f, 2u);
-    f.in[0].current_mA = 60000;
+    f.in[0].current_mA = 60000;                 /* a long, varied history    */
     f.in[1].current_mA = 30000;
     step(&f, 2u, BIG_DT);
-
-    saved = f.st;
+    f.in[0].current_mA = -5000;
     step(&f, 2u, BIG_DT);
-    first = f.out;
-
-    f.st = saved;
-    f.now_ms -= BIG_DT;
+    f.in[0].current_mA = 60000;
     step(&f, 2u, BIG_DT);
-    TEST_ASSERT_MEM_EQ(&first, &f.out, sizeof(first));
+
+    /* A fixture with NO history, given exactly the inputs of that last tick. */
+    fix_init(&fresh);
+    (void)memcpy(fresh.in, f.in, sizeof(fresh.in));
+    step(&fresh, 2u, BIG_DT);
+
+    fresh.out.pub.tick_ms = f.out.pub.tick_ms;  /* the stamp is the argument */
+    TEST_ASSERT_MEM_EQ(&f.out, &fresh.out, sizeof(f.out));
 }
 
 static void test_solve_rejects_bad_arguments(void)
@@ -1362,13 +1225,13 @@ static void test_solve_rejects_bad_arguments(void)
     sFix f;
 
     fix_init(&f);
-    TEST_ASSERT(ClusterCalc_Solve(NULL, 1u, &f.tune, &f.st, &f.sc, 0u,
+    TEST_ASSERT(ClusterCalc_Solve(NULL, 1u, &f.tune, &f.sc, 0u,
                                   &f.out) == cluErr_badArg);
     TEST_ASSERT(ClusterCalc_Solve(f.in, CLUSTER_PACK_MAX + 1u, &f.tune,
-                                  &f.st, &f.sc, 0u, &f.out) == cluErr_badArg);
-    TEST_ASSERT(ClusterCalc_Solve(f.in, 1u, NULL, &f.st, &f.sc, 0u,
+                                  &f.sc, 0u, &f.out) == cluErr_badArg);
+    TEST_ASSERT(ClusterCalc_Solve(f.in, 1u, NULL, &f.sc, 0u,
                                   &f.out) == cluErr_badArg);
-    TEST_ASSERT(ClusterCalc_Solve(f.in, 1u, &f.tune, &f.st, &f.sc, 0u,
+    TEST_ASSERT(ClusterCalc_Solve(f.in, 1u, &f.tune, &f.sc, 0u,
                                   NULL) == cluErr_badArg);
 }
 
@@ -1427,27 +1290,22 @@ int main(void)
     RUN_TEST(test_enum_bits_are_distinct);
     RUN_TEST(test_enum_values_are_not_renumbered);
 
-    RUN_TEST(test_loop_converges_in_one_step_greedy);
-    RUN_TEST(test_loop_converges_in_one_step_identical);
-    RUN_TEST(test_loop_does_not_update_when_the_bus_is_not_binding);
-    RUN_TEST(test_loop_never_exceeds_min_limit_over_share);
-    RUN_TEST(test_loop_does_not_learn_while_the_slew_is_still_ramping_in);
-    RUN_TEST(test_loop_still_learns_once_the_slew_has_settled);
-    RUN_TEST(test_loop_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit);
-    RUN_TEST(test_loop_saturates_load_for_a_zero_limit_pack);
-    RUN_TEST(test_loop_ignores_a_zero_loadmax);
-    RUN_TEST(test_loop_load_does_not_wrap_at_an_absurd_current);
+    RUN_TEST(test_measured_limit_reproduces_the_worked_example);
+    RUN_TEST(test_measured_limit_binds_on_fractional_load_not_current);
+    RUN_TEST(test_measured_limit_is_scale_invariant);
+    RUN_TEST(test_a_ramping_slew_can_no_longer_latch_the_limit_low);
+    RUN_TEST(test_below_the_floor_the_prediction_runs);
+    RUN_TEST(test_the_prediction_weights_the_weakest_pack_most);
+    RUN_TEST(test_the_prediction_never_exceeds_the_sum_of_limits);
+    RUN_TEST(test_a_single_pack_is_continuous_across_the_floor);
+    RUN_TEST(test_the_safety_margin_is_configurable_end_to_end);
+    RUN_TEST(test_load_rounds_up_so_a_small_bus_cannot_inflate_the_limit);
+    RUN_TEST(test_measurement_saturates_load_for_a_zero_limit_pack);
+    RUN_TEST(test_load_does_not_wrap_at_an_absurd_current);
     RUN_TEST(test_abs_of_int32_min_does_not_sign_extend);
-    RUN_TEST(test_loop_uses_only_the_controlled_direction);
+    RUN_TEST(test_measurement_uses_only_the_controlled_direction);
+    RUN_TEST(test_charge_and_discharge_are_independent);
 
-    RUN_TEST(test_start_is_min_limit_not_max);
-    RUN_TEST(test_restart_on_a_participant_limit_decrease);
-    RUN_TEST(test_no_restart_on_a_participant_limit_increase);
-    RUN_TEST(test_deadband_suppresses_noise_but_not_a_ramp);
-    RUN_TEST(test_restart_on_member_leave_never_raises_the_limit);
-    RUN_TEST(test_restart_when_a_pack_joins);
-    RUN_TEST(test_restart_after_hold_expiry);
-    RUN_TEST(test_charge_and_discharge_loops_are_independent);
     RUN_TEST(test_zero_limit_pack_is_out_of_the_participating_set);
     RUN_TEST(test_open_charge_switch_excludes_charge_only);
     RUN_TEST(test_all_packs_offline_publishes_zero);
@@ -1457,30 +1315,30 @@ int main(void)
     RUN_TEST(test_zero_limit_does_not_imply_forbidden);
     RUN_TEST(test_overvoltage_pack_that_isolated_itself_does_not_veto);
     RUN_TEST(test_all_unknown_switches_fall_back_to_permitted);
-    RUN_TEST(test_permitting_again_ramps_from_where_it_was);
+    RUN_TEST(test_permission_and_its_withdrawal_both_take_effect_at_once);
 
-    RUN_TEST(test_slew_decrease_is_immediate_increase_is_limited);
-    RUN_TEST(test_slew_step_is_clamped_at_dt_max);
-    RUN_TEST(test_slew_is_wrap_safe_across_the_millisecond_rollover);
-    RUN_TEST(test_slew_rate_at_the_parse_bound_does_not_overflow);
 
     RUN_TEST(test_soc_is_charge_weighted_not_averaged);
     RUN_TEST(test_soc_does_not_overflow_at_eight_thousand_amp_hours);
     RUN_TEST(test_soc_and_soh_fields_clear_when_their_denominator_is_zero);
     RUN_TEST(test_voltage_limits_are_invalid_when_nobody_advertises_them);
     RUN_TEST(test_cvl_includes_a_pack_that_refuses_to_charge);
+    RUN_TEST(test_a_pack_reporting_zero_volt_limits_does_not_capture_the_min);
+    RUN_TEST(test_all_packs_reporting_zero_volt_limits_clears_the_field);
+    RUN_TEST(test_volt_limits_are_published_per_field);
+    RUN_TEST(test_an_implausible_volt_limit_is_not_taken);
     RUN_TEST(test_voltage_is_the_mean_and_the_spread_is_reported);
     RUN_TEST(test_temperature_is_max_and_alarms_are_ored);
-    RUN_TEST(test_confidence_is_the_worst_contributor_and_capped_while_searching);
+    RUN_TEST(test_confidence_is_the_worst_contributor_and_capped_while_predicting);
     RUN_TEST(test_module_count_is_online_and_electrically_fresh);
 
     RUN_TEST(test_diverge_soc_flags_the_sodas_case_and_changes_no_limit);
     RUN_TEST(test_share_is_an_observation_that_flags_the_greedy_pack);
-    RUN_TEST(test_a_circulating_pack_is_flagged_and_the_loop_holds);
+    RUN_TEST(test_a_circulating_pack_is_flagged_and_each_direction_splits);
 
     RUN_TEST(test_single_pack_is_the_pack);
     RUN_TEST(test_zero_packs_is_a_valid_zero);
-    RUN_TEST(test_state_is_the_only_thing_carried);
+    RUN_TEST(test_nothing_at_all_is_carried_between_ticks);
     RUN_TEST(test_solve_rejects_bad_arguments);
     RUN_TEST(test_limit_never_exceeds_the_sum_of_limits);
 

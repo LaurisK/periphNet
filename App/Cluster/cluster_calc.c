@@ -1,15 +1,15 @@
 /*
  * cluster_calc.c
  *
- * THE PURE CORE of the battery cluster module: the closed-loop limit search
- * and its gate, the restart triggers, the input sanitiser, the slew, all
- * aggregation and the divergence detectors
- * (docs/design_battery_cluster.md §3).
+ * THE PURE CORE of the battery cluster module: the measured limit rule, its
+ * low-load prediction, the input sanitiser, all aggregation and the divergence
+ * detectors (docs/design_battery_cluster.md §3, revision 3).
  *
  * LIBC ONLY, ZERO FILE STATICS, NO Pack_ CALL, NO FLOAT.  Every working array
- * belongs to the caller; the only thing carried between ticks is
- * sClusterCalcState, and a host test asserts exactly that by memcpy'ing the
- * state, re-running and comparing.
+ * belongs to the caller, and SINCE THE RATE LIMITER WAS DELETED (§14.8)
+ * NOTHING AT ALL IS CARRIED BETWEEN TICKS: `ClusterCalc_Solve` is a pure
+ * function of (in, n, tune), with now_ms used only to stamp the snapshot.  A
+ * host test asserts it by running the same inputs twice and comparing.
  *
  * FOUR ARITHMETIC RULES THIS FILE EXISTS TO GET RIGHT (§3.5):
  *
@@ -22,9 +22,9 @@
  *   3. THE BUS SUM IS SIGNED and eight garbage int32 values overflow it.  It
  *      accumulates in int64_t.
  *   4. `|I| * 1000` OVERFLOWS uint32 above 4 294 967 mA, and a wrap there
- *      produces a SMALL number, which DISARMS the loop.  The intermediate is
- *      uint64 and the result saturates at 65535 only where it is narrowed for
- *      report.
+ *      produces a SMALL number, and a small loadMax is a LARGE limit — it is
+ *      the divisor.  The intermediate is uint64 and the result saturates at
+ *      65535 only where it is narrowed for report.
  */
 
 /* Includes -----------------------------------------------------------------*/
@@ -40,15 +40,6 @@
  *  passes are ONE piece of code seen twice.  Two copies would be two places
  *  for the gate to be got wrong. */
 typedef struct {
-    uint32_t *loop;             /* pre-derate, NEVER written to zero         */
-    uint32_t *slewed;
-    uint32_t *bindTick_ms;
-    uint32_t *prevLimit_mA;     /* CLUSTER_PACK_MAX entries                  */
-    uint32_t *prevPart;
-    uint16_t *lastLoadMax_pm;
-    uint8_t  *forbidden;
-    uint8_t  *bindSeen;
-    uint8_t  *slewing;
     uint16_t  derate_pm;
     uint8_t   charge;           /* 1 = charge, 0 = discharge                 */
     uint8_t   bindFlag;         /* eClusterMemberFlag                        */
@@ -58,21 +49,16 @@ typedef struct {
  *  sClusterOutput by the caller, so neither half can quietly grow a field the
  *  other lacks. */
 typedef struct {
-    uint32_t loop_mA;
+    uint32_t target_mA;
     uint32_t derated_mA;
-    uint32_t slewed_mA;
     uint32_t published_mA;
     uint32_t loadMax_pm;
     uint8_t  loopState;         /* eClusterLoopState                         */
     uint8_t  why;               /* eClusterLimitWhy                          */
     uint8_t  bindingIdx;
     uint8_t  allowed;
-    uint8_t  restart;           /* eClusterRestart                           */
     uint8_t  partCount;
-    uint8_t  binding;
-    uint8_t  clamped;
-    uint8_t  slewLimited;
-    uint8_t  left;
+    uint8_t  predicted;
     uint8_t  ceiling;
 } sDirOut;
 
@@ -81,10 +67,11 @@ typedef struct {
 static uint32_t AbsMa(int32_t v);
 static uint16_t Sat16(uint32_t v);
 static uint32_t MulDiv1000(uint32_t v, uint32_t num);
+static uint32_t PredictQuiet(const uint32_t *limit_mA, uint8_t cnt,
+                             uint16_t decay_pm);
 static void SolveDirection(const sClusterPackIn *in, uint8_t n,
-                           const sClusterTune *tune, sClusterCalcState *st,
-                           sClusterScratch *sc, sClusterResult *out,
-                           uint32_t now_ms, uint32_t dt_ms,
+                           const sClusterTune *tune, sClusterScratch *sc,
+                           sClusterResult *out,
                            const sDirCtx *d, sDirOut *o);
 
 /* Private functions --------------------------------------------------------*/
@@ -102,10 +89,10 @@ static uint32_t AbsMa(int32_t v)
 /**
  * @brief  Narrow for report, saturating.
  * @note   A PLAIN NARROWING SENDS 65536 TO EXACTLY 0, and zero is the value
- *         the loop reads as "no current, do not update" — so the most extreme
- *         overload the system can have would be indistinguishable from no
- *         current at all (defect L4).  load_pm exceeds 65535 above 65.5x a
- *         pack's own limit, which is inside the plausible domain.
+ *         rule reads as "nothing is flowing" — so the most extreme overload
+ *         the system can have would be indistinguishable from no current at
+ *         all (defect L4).  load_pm exceeds 65535 above 65.5x a pack's own
+ *         limit, which is inside the plausible domain.
  */
 static uint16_t Sat16(uint32_t v)
 {
@@ -118,37 +105,86 @@ static uint32_t MulDiv1000(uint32_t v, uint32_t num)
     return (uint32_t)(((uint64_t)v * (uint64_t)num) / 1000u);
 }
 
+/**
+ * @brief  THE LOW-LOAD PREDICTION: d*L(1) + d^2*L(2) + ... over the
+ *         participants' own limits, SMALLEST FIRST (design §3.2.2).
+ *
+ * A measurement needs current; below lowLoadFloor_pm there is none worth
+ * dividing by, and the honest answer is a conservative guess rather than a
+ * ratio of two noise figures.  SMALLEST FIRST is what makes it conservative:
+ * the weakest pack is trusted most, and each further pack is discounted
+ * again, so the sum approaches but never reaches sum(L_i) — this never assumes
+ * N packs share evenly, which is the assumption that has no evidence at rest.
+ *
+ * A SINGLE PACK GETS d x L, WHICH IS EXACTLY WHAT THE MEASURED RULE GIVES IT
+ * at any current (|S|/(|S|/L) == L).  So the one-pack site is continuous
+ * across the floor and never steps when the sun comes out.
+ *
+ * @note  Two 32-byte stack arrays, not sClusterScratch: they die with the
+ *        call, so they are not carried state and the "zero file statics"
+ *        property is untouched.
+ */
+static uint32_t PredictQuiet(const uint32_t *limit_mA, uint8_t cnt,
+                             uint16_t decay_pm)
+{
+    uint32_t sorted[CLUSTER_PACK_MAX];
+    uint64_t acc = 0u;
+    uint64_t w   = (uint64_t)decay_pm;
+    uint8_t  i;
+    uint8_t  j;
+
+    if ((limit_mA == NULL) || (cnt == 0u) || (cnt > CLUSTER_PACK_MAX)) {
+        return 0u;
+    }
+    for (i = 0u; i < cnt; i++) {
+        sorted[i] = limit_mA[i];
+    }
+    /* Insertion sort, ASCENDING.  At most eight elements, so the simplest
+     * correct sort is also the right one. */
+    for (i = 1u; i < cnt; i++) {
+        const uint32_t v = sorted[i];
+
+        for (j = i; (j > 0u) && (sorted[j - 1u] > v); j--) {
+            sorted[j] = sorted[j - 1u];
+        }
+        sorted[j] = v;
+    }
+    for (i = 0u; i < cnt; i++) {
+        acc += ((uint64_t)sorted[i] * w) / 1000u;
+        w    = (w * (uint64_t)decay_pm) / 1000u;
+    }
+    return (acc > (uint64_t)CLUSTER_LIMIT_MAX_MA) ? CLUSTER_LIMIT_MAX_MA
+                                                  : (uint32_t)acc;
+}
+
 /* ==========================================================================
  * One direction — §3.1 through §3.7
  * ========================================================================== */
 
+/* NO STATE AND NO CLOCK REACH HERE.  Revision 2 needed the loop variable, the
+ * binding stamps and a time to age them; revision 3 needed the slew's carried
+ * value and an interval.  Neither remains — this is a pure function of one
+ * tick's packs and the tune, and there is nothing left for a future change to
+ * quietly make stateful. */
 static void SolveDirection(const sClusterPackIn *in, uint8_t n,
-                           const sClusterTune *tune, sClusterCalcState *st,
-                           sClusterScratch *sc, sClusterResult *out,
-                           uint32_t now_ms, uint32_t dt_ms,
+                           const sClusterTune *tune, sClusterScratch *sc,
+                           sClusterResult *out,
                            const sDirCtx *d, sDirOut *o)
 {
     uint8_t *const part       = d->charge ? sc->partChg : sc->partDsg;
-    uint32_t       partMask   = 0u;
-    uint32_t       minL_mA    = 0u;
+    uint32_t       partL_mA[CLUSTER_PACK_MAX];
     uint64_t       absS_mA    = 0u;
     uint32_t       loadMax_pm = 0u;
-    uint32_t       loopBefore;
-    uint8_t        haveMin    = 0u;
+    uint32_t       target;
     uint8_t        bindIdx    = CLUSTER_PACK_NONE;
     uint8_t        partCount  = 0u;
     uint8_t        anyClosed  = 0u;
     uint8_t        anyKnown   = 0u;
     uint8_t        alarmVeto  = 0u;
-    uint8_t        fell       = 0u;
-    uint8_t        join       = 0u;
-    uint8_t        leave      = 0u;
-    uint8_t        restart    = (uint8_t)cluRestart_none;
     uint8_t        i;
 
     (void)memset(o, 0, sizeof(*o));
     o->bindingIdx = CLUSTER_PACK_NONE;
-    loopBefore    = *d->loop;
 
     /* --- §3.1 the participating set ------------------------------------ */
     for (i = 0u; i < n; i++) {
@@ -174,17 +210,14 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
         if (L == 0u) {
             continue;                       /* a zero limit IS an open path  */
         }
-        part[i] = 1u;
-        partMask |= (1u << i);
+        part[i]             = 1u;
+        partL_mA[partCount] = L;    /* PACKED, not slot-indexed: the
+                                       prediction sorts them and does not care
+                                       which slot each came from             */
         partCount++;
-        if ((haveMin == 0u) || (L < minL_mA)) {
-            minL_mA = L;
-            haveMin = 1u;
-        }
     }
 
-    /* --- permission (§7.1), decided BEFORE the loop so the forbidden ->
-     *     allowed edge is available as a restart trigger ----------------- */
+    /* --- permission (§7.1) --------------------------------------------- */
     for (i = 0u; i < n; i++) {
         const sClusterMember *m = &out->member[i];
         const uint8_t  sw   = d->charge ? in[i].chargeSwitch
@@ -220,8 +253,8 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
         /* NOBODY CAN REPORT A SWITCH.  Granted iff a non-zero limit will be
          * published, which is exactly "there is a participant" — and phrasing
          * it that way rather than "the previously published limit is
-         * non-zero" is what stops a board whose slew starts at zero from
-         * forbidding itself forever. */
+         * non-zero" is what phrases the grant in terms of the bus rather than
+         * of the last thing published. */
         o->allowed = (uint8_t)((partCount > 0u) ? 1u : 0u);
     }
 
@@ -230,8 +263,8 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
      * A WIDER SET THAN THE PARTICIPANTS, deliberately: a pack that is online,
      * fresh and advertising limits but whose own limit has collapsed to zero
      * is OVER its limit by definition, and it is still bolted to the busbar.
-     * Saturating its load at 1000 makes the loop reduce, which is correct;
-     * excluding it would leave the loop blind to the one pack that most needs
+     * Saturating its load at 1000 makes the rule reduce, which is correct;
+     * excluding it would leave the rule blind to the one pack that most needs
      * it.  A pack WITHOUT packCap_currentLimits is excluded, because its
      * limit is unknown rather than zero. */
     for (i = 0u; i < n; i++) {
@@ -258,19 +291,18 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
             m->flags |= (uint32_t)cluMemFlag_limitSaturated;
         } else {
             /* ROUNDED UP, AND THIS IS THE SAFE DIRECTION, NOT A ROUNDING
-             * PREFERENCE.  The update DIVIDES BY loadMax, so a load truncated
+             * PREFERENCE.  The rule DIVIDES BY loadMax, so a load truncated
              * DOWN yields a limit rounded UP — and the error is unbounded in
              * ratio exactly where load_pm is small.  Measured: a bus of 10 mA
              * against a 4.779 A pack gives a true load of 1.4 pm, truncates to
-             * 1, and the loop leaps to 9.0 A against a 6.8 A ceiling — 32 %
-             * over, with the gate open and every other rule satisfied.
-             * Rounding up restores the proof exactly: loadMax >= 1000 I_b/L_b
-             * gives loop' <= (loadTarget/bindFrac) x min(L_i/f_i), which at
-             * the parse rule bindFrac >= loadTarget is min(L_i/f_i) itself. */
+             * 1, and the answer leaps to 9.0 A against a 6.8 A ceiling — 32 %
+             * over, with every other rule satisfied.  Rounding up is what
+             * makes |I_i| <= (loadMax/1000) x L_i true for EVERY pack, and
+             * that inequality summed over the bus is the proof that the
+             * measured limit can never exceed sum(L_i). */
             load_pm = (uint32_t)((((uint64_t)a * 1000u) + (uint64_t)L - 1u) /
                                  (uint64_t)L);
         }
-        sc->load_pm[i] = load_pm;
         m->load_pm     = Sat16(load_pm);
         if (load_pm > loadMax_pm) {
             loadMax_pm = load_pm;
@@ -279,228 +311,102 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
     }
     o->loadMax_pm = loadMax_pm;
 
-    /* --- §3.3 what restarts the search --------------------------------- */
-    leave = (uint8_t)(((*d->prevPart & ~partMask) != 0u) ? 1u : 0u);
-    join  = (uint8_t)(((partMask & ~*d->prevPart) != 0u) ? 1u : 0u);
-
-    for (i = 0u; i < n; i++) {
-        const uint32_t prev = d->prevLimit_mA[i];
-        uint32_t       L;
-        uint32_t       thr;
-
-        if ((part[i] == 0u) || (prev == 0u)) {
-            continue;
-        }
-        L   = d->charge ? out->member[i].chargeLimit_mA
-                        : out->member[i].dischargeLimit_mA;
-        thr = prev - MulDiv1000(prev, (uint32_t)tune->limitDeadband_pm);
-        if (L < thr) {
-            fell = 1u;
-            out->member[i].flags |= (uint32_t)cluMemFlag_limitFell;
-        }
-    }
-    for (i = 0u; i < n; i++) {
-        if (((partMask & (1u << i)) != 0u) &&
-            ((*d->prevPart & (1u << i)) == 0u)) {
-            out->member[i].flags |= (uint32_t)cluMemFlag_joined;
-        }
-        if (((partMask & (1u << i)) == 0u) &&
-            ((*d->prevPart & (1u << i)) != 0u)) {
-            out->member[i].flags |= (uint32_t)cluMemFlag_left;
-        }
-    }
-
-    if (st->started == 0u) {
-        restart = (uint8_t)cluRestart_init;
-    } else if (st->pendingRestart != (uint8_t)cluRestart_none) {
-        restart = st->pendingRestart;
-    } else if (leave != 0u) {
-        restart = (uint8_t)cluRestart_memberLeft;
-    } else if (fell != 0u) {
-        restart = (uint8_t)cluRestart_limitFell;
-    } else if (join != 0u) {
-        restart = (uint8_t)cluRestart_memberJoined;
-    } else if ((*d->forbidden != 0u) && (o->allowed != 0u)) {
-        restart = (uint8_t)cluRestart_permitted;
-    } else if ((*d->bindSeen != 0u) &&
-               ((uint32_t)(now_ms - *d->bindTick_ms) > tune->holdMaxAge_ms)) {
-        restart = (uint8_t)cluRestart_holdExpired;
-    }
-
-    if (restart != (uint8_t)cluRestart_none) {
-        if (haveMin != 0u) {
-            uint32_t seed = minL_mA;
-
-            /* A LEAVE MAY LOWER THE LOOP AND MUST NEVER RAISE IT.  Removing a
-             * pack can only RAISE min(L_i), and the departed pack is still
-             * bolted to the busbar — so restarting to the new, higher floor
-             * is the one unsafe direction of an otherwise safe rule
-             * (defect L3).  An implausibility drop reaches here as a leave
-             * and takes the same clamp. */
-            if ((leave != 0u) && (loopBefore != 0u) && (seed > loopBefore)) {
-                seed = loopBefore;
-            }
-            *d->loop = seed;
-        }
-        *d->bindSeen = 0u;
-        /* THE DEADBAND REFERENCE IS LATCHED HERE AND ONLY HERE.  Against a
-         * per-tick reference a pack stepping its limit down 1 % per tick — a
-         * JK approaching full charge, or in the cold — never trips at all,
-         * because a deadband suppresses NOISE and a monotonic ramp is not
-         * noise. */
-        for (i = 0u; i < CLUSTER_PACK_MAX; i++) {
-            d->prevLimit_mA[i] = ((i < n) && (part[i] != 0u))
-                               ? (d->charge ? out->member[i].chargeLimit_mA
-                                            : out->member[i].dischargeLimit_mA)
-                               : 0u;
-        }
-    }
-    o->restart = restart;
-    o->left    = leave;
-
-    /* --- §3.2.1 THE GATE, then the update ------------------------------
+    /* --- §3.2 THE RULE — a pure function of THIS tick -------------------
      *
-     * THE UPDATE IS ONLY MEANINGFUL AT THE LIMIT.  When the inverter is
-     * loafing, loadMax says nothing about what would happen at the limit and
-     * the update is nonsense — 100 A published, 10 A drawn, and the rule
-     * computes 1125 A, which then LATCHES because at 1125 A the bus really
-     * does load the worst pack to exactly the setpoint.  A wrong answer that
-     * looks converged is worse than one that oscillates.
+     * SCALE THE BUS UNTIL THE HARDEST-WORKING PACK REACHES ITS OWN LIMIT.
+     * Every pack satisfies |I_i| <= f x L_i for f = loadMax/1000, so |S| / f
+     * is the bus current at which the binding pack sits exactly at L_b — and
+     * summing that inequality proves |S| / f <= sum(L_i), so the answer can
+     * NEVER exceed the packs' combined rating.  That is a proof, not a clamp:
+     * revision 2's upward step clamp bounded a recursion, and the recursion
+     * is gone.
      *
-     * THE MEASUREMENT IS TAKEN AT THE EMITTED (post-derate, post-slew) VALUE.
-     * That is what folds the derate into the setpoint: the loop variable
-     * settles at loadTarget x min(L_i/f_i) and the emitted value at
-     * loadTarget x derate x min(L_i/f_i), both at or below the binding pack's
-     * own limit for EVERY derate (defect L1). */
-    /* AND NOT WHILE THE SLEW WAS STILL CLIMBING TOWARD THE LOOP.  A value the
-     * rate limiter is still moving is not a limit the inverter is respecting
-     * — it is a number this board is walking upward through the bus current —
-     * so `|S| >= published x bindFrac` is satisfied for a reason that has
-     * nothing to do with the battery being at its limit, and the update
-     * ratchets the loop DOWN to wherever the ramp happened to cross the load.
+     * NOTHING IS CARRIED AND THERE IS NO GATE.  Revision 2 measured the bus
+     * against ITS OWN PUBLISHED VALUE, which made the rule self-referential:
+     * the measurement was meaningful only at the limit, so it needed a gate,
+     * the gate needed a settled publish, and a slew still ramping in
+     * satisfied it for a reason that had nothing to do with the battery —
+     * latching the loop 36x low on real hardware (§13.2).  A ratio of two
+     * MEASURED currents is scale-invariant, so none of that arises: it is as
+     * correct at 2 A as at 200 A, provided the shares are real.
      *
-     * IT IS A TRAP, NOT A TRANSIENT, because it then latches: the loop lands
-     * low, the emitted value follows it, and the gate can never re-open —
-     * reopening needs a bus draw at 90 % of a limit the loop has just made
-     * too small to reach.  MEASURED ON BOARD 1 (Pd1.1.50, 2026-09-07): a
-     * 150 A pack ramping in against a steady 1.007 A charge settled at a
-     * published limit of 4.1 A, `why: notBinding`, and stayed there — a 36x
-     * throughput loss in the safe direction.
+     * THE ONE ASSUMPTION: that the shares hold as the bus scales.  The closed
+     * loop did not need it — it re-measured at the new limit — and the margin
+     * is what pays for it.  This is the whole trade of revision 3, and it
+     * buys an answer on a site that never saturates its battery, which is
+     * every site we have (bindingSample stayed 0 for 12 h on board 1).
      *
-     * The condition is LAST tick's, because the current this tick measures
-     * was drawn against last tick's emitted value.  Skipping an update is
-     * unconditionally safe: it can only leave a limit lower than it might
-     * have been.  Downward corrections are untouched — a fall is instant and
-     * is never slew-limited. */
-    if ((partCount > 0u) && (loadMax_pm > 0u) && (*d->slewed > 0u) &&
-        (*d->slewing == 0u) &&
-        ((absS_mA * 1000u) >=
-         ((uint64_t)*d->slewed * (uint64_t)tune->bindFrac_pm))) {
-        uint32_t target = (uint32_t)(((uint64_t)*d->slewed *
-                                      (uint64_t)tune->loadTarget_pm) /
-                                     (uint64_t)loadMax_pm);
-
-        /* CLAMPED UPWARD ONLY.  A reduction is the safety action, so bounding
-         * it bounds the safety action; garbage is stopped by the plausibility
-         * pass, where it enters. */
-        if (*d->loop != 0u) {
-            const uint64_t cap = ((uint64_t)*d->loop *
-                                  (uint64_t)CLUSTER_STEP_UP_MAX_PM) / 1000u;
-
-            if ((uint64_t)target > cap) {
-                target     = (uint32_t)cap;
-                o->clamped = 1u;
-            }
-        }
-        /* NEVER ZERO: loop' = published x t / loadMax is multiplicative, so
-         * zero is an absorbing state the loop could not leave. */
-        if (target == 0u) {
-            target = 1u;
-        }
-        *d->loop        = target;
-        *d->bindSeen    = 1u;
-        *d->bindTick_ms = now_ms;
-        o->binding      = 1u;
-        o->bindingIdx   = bindIdx;
+     * BELOW lowLoadFloor_pm THE SHARES ARE NOT REAL.  The floor is compared
+     * against loadMax — "is any pack working hard enough for its share to
+     * mean anything" — and deliberately NOT against the published value,
+     * because that comparison is exactly the self-reference §13.2 came
+     * through. */
+    if (partCount == 0u) {
+        target        = 0u;
+        o->loopState  = (uint8_t)cluLoop_idle;
+    } else if ((loadMax_pm > 0u) &&
+               (loadMax_pm >= (uint32_t)tune->lowLoadFloor_pm)) {
+        /* loadMax_pm is rounded UP above, which is the safe direction here:
+         * it is the DIVISOR, so a load rounded up yields a limit rounded
+         * down. */
+        target       = (uint32_t)((absS_mA * (uint64_t)tune->safetyMargin_pm) /
+                                  (uint64_t)loadMax_pm);
+        o->loopState = (uint8_t)cluLoop_measured;
         if (bindIdx < n) {
+            o->bindingIdx               = bindIdx;
             out->member[bindIdx].flags |= (uint32_t)d->bindFlag;
         }
-    }
-
-    if (partCount == 0u) {
-        o->loopState = (uint8_t)cluLoop_idle;
-    } else if (*d->bindSeen == 0u) {
-        o->loopState = (uint8_t)cluLoop_searching;
-    } else if (o->binding == 0u) {
-        o->loopState = (uint8_t)cluLoop_holding;
     } else {
-        const uint32_t now  = *d->loop;
-        const uint32_t was  = loopBefore;
-        const uint32_t diff = (now > was) ? (now - was) : (was - now);
-
-        o->loopState = (((uint64_t)diff * 1000u) <=
-                        ((uint64_t)was * (uint64_t)tune->convergeTol_pm))
-                     ? (uint8_t)cluLoop_converged
-                     : (uint8_t)cluLoop_searching;
+        target       = PredictQuiet(partL_mA, partCount,
+                                    tune->predictDecay_pm);
+        o->predicted = 1u;
+        o->loopState = (uint8_t)cluLoop_predicted;
     }
 
-    /* --- the derate, the configured ceiling, then §3.7's rate limiter --- */
-    o->loop_mA    = *d->loop;
-    o->derated_mA = MulDiv1000(*d->loop, (uint32_t)d->derate_pm);
+    /* --- the derate and the configured ceiling.  THAT IS THE WHOLE CHAIN ---
+     *
+     * THERE IS NO RATE LIMITER.  R2.5 required one until 2026-09-09, on three
+     * arguments of which none survived scrutiny (requirements R2.5, design
+     * §14.8).  The decisive one:
+     *
+     *   THIS IS A CAP, AND THE BATTERY WE EMULATE SWITCHES IT INSTANTLY.  The
+     *   Dyness capture has `0x351`'s current fields jumping between discrete
+     *   states between 250 ms frames — 39.76 A discharge to 11.20 A is a 3.5x
+     *   step, shipped by a real battery into a working site.  Ramping a field
+     *   the emulated device steps is a DEVIATION from the thing being
+     *   emulated, not a safety margin over it.
+     *
+     *   AND A SUDDEN CHANGE OF SITUATION NEEDS A SUDDEN RESPONSE.  A pack
+     *   dropping off the bus leaves the survivors carrying its share; if the
+     *   cap does not collapse with it they are driven past their own limits
+     *   and open one after another.  The old asymmetry (fall instantly, rise
+     *   slowly) existed precisely to keep that edge safe — which is to say the
+     *   rate limiter needed a special case to avoid causing the accident it
+     *   was supposed to prevent.  With no rate limiter there is no asymmetry
+     *   to get wrong: the cap is the present answer in both directions.
+     *
+     * Nothing protected by the slew is unprotected now: each pack's own BMS
+     * limit and contactor bound its current, and §3.2.1 proves this value
+     * never exceeds margin x sum(L_i). */
+    o->target_mA  = target;
+    o->derated_mA = MulDiv1000(target, (uint32_t)d->derate_pm);
     if (o->derated_mA > tune->limitMax_mA) {
         o->derated_mA = tune->limitMax_mA;
         o->ceiling    = 1u;
     }
 
-    {
-        const uint32_t target = (partCount == 0u) ? 0u : o->derated_mA;
-
-        if (target <= *d->slewed) {
-            *d->slewed = target;                    /* falls INSTANTLY       */
-        } else {
-            uint32_t step = (uint32_t)(((uint64_t)tune->riseRate_mA_per_s *
-                                        (uint64_t)dt_ms) / 1000u);
-
-            /* The floor exists ONLY so a slow rate does not stall on integer
-             * truncation of (rate * dt)/1000. */
-            if (step < CLUSTER_RISE_STEP_MIN_MA) {
-                step = CLUSTER_RISE_STEP_MIN_MA;
-            }
-            if (target < (*d->slewed + step)) {
-                *d->slewed = target;
-            } else {
-                *d->slewed    += step;
-                o->slewLimited = 1u;
-            }
-            /* A rise the limiter had to bound means the emitted value is
-             * BELOW what the loop is asking for, so the next tick must not
-             * learn from it. */
-        }
-    }
-    o->slewed_mA = *d->slewed;
-
-    /* PERMISSION AND LIMIT AGREE, ALWAYS.  The zeroing applies to the EMITTED
-     * value and never to the loop: a transient alarm must not destroy what the
-     * loop learned. */
-    *d->slewing        = o->slewLimited;
-    o->published_mA    = (o->allowed != 0u) ? *d->slewed : 0u;
-    *d->forbidden      = (uint8_t)((o->allowed != 0u) ? 0u : 1u);
-    o->partCount       = partCount;
-    *d->lastLoadMax_pm = Sat16(loadMax_pm);
-    *d->prevPart       = partMask;
+    /* PERMISSION AND LIMIT AGREE, ALWAYS.  A refused direction publishes a
+     * zero cap as well as a cleared permission flag; `derated_mA` still shows
+     * what would have gone out, which is what an operator needs to tell "not
+     * allowed" from "nothing to give". */
+    o->published_mA = (o->allowed != 0u) ? o->derated_mA : 0u;
+    o->partCount    = partCount;
 
     /* --- why, in the stated priority order ----------------------------- */
     {
-        uint8_t why = (uint8_t)cluLimitWhy_start;
+        uint8_t why = (o->predicted != 0u) ? (uint8_t)cluLimitWhy_predicted
+                                           : (uint8_t)cluLimitWhy_measured;
 
-        if (o->binding != 0u) {
-            why = (uint8_t)cluLimitWhy_binding;
-        } else if (*d->bindSeen != 0u) {
-            why = (uint8_t)cluLimitWhy_notBinding;
-        }
-        if (o->slewLimited != 0u) {
-            why = (uint8_t)cluLimitWhy_slew;
-        }
         if (o->ceiling != 0u) {
             why = (uint8_t)cluLimitWhy_ceiling;
         }
@@ -524,30 +430,17 @@ static void SolveDirection(const sClusterPackIn *in, uint8_t n,
 
 /* Exported functions -------------------------------------------------------*/
 
-void ClusterCalc_Reset(sClusterCalcState *st, uint8_t reason)
-{
-    if (st == NULL) {
-        return;
-    }
-    /* THE WHOLE STATE, not merely the slew: every value in it is slot-indexed
-     * and a re-pointed slot makes all of them meaningless. */
-    (void)memset(st, 0, sizeof(*st));
-    st->pendingRestart = reason;
-}
-
 int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
-                      const sClusterTune *tune, sClusterCalcState *st,
-                      sClusterScratch *sc, uint32_t now_ms,
-                      sClusterResult *out)
+                      const sClusterTune *tune, sClusterScratch *sc,
+                      uint32_t now_ms, sClusterResult *out)
 {
     sDirCtx  dChg;
     sDirCtx  dDsg;
     sDirOut  oChg;
     sDirOut  oDsg;
-    uint32_t dt_ms;
     uint8_t  i;
 
-    if ((tune == NULL) || (st == NULL) || (sc == NULL) || (out == NULL)) {
+    if ((tune == NULL) || (sc == NULL) || (out == NULL)) {
         return cluErr_badArg;
     }
     if ((n > CLUSTER_PACK_MAX) || ((in == NULL) && (n > 0u))) {
@@ -562,11 +455,6 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     out->pub.dischargeBindingIdx = CLUSTER_PACK_NONE;
     for (i = 0u; i < CLUSTER_PACK_MAX; i++) {
         out->member[i].packIdx = CLUSTER_PACK_NONE;
-    }
-
-    dt_ms = (st->started != 0u) ? (uint32_t)(now_ms - st->lastTick_ms) : 0u;
-    if (dt_ms > CLUSTER_DT_MAX_MS) {
-        dt_ms = CLUSTER_DT_MAX_MS;      /* a debugger halt is not a step     */
     }
 
     /* ======================================================================
@@ -591,8 +479,15 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
             continue;
         }
         if (p->cond != (uint8_t)packCond_online) {
+            /* MEMBER LOST IS NOW A STATE, NOT AN EDGE.  Revision 2 raised it
+             * from a participation transition, which needed a carried mask;
+             * "a pack this cluster is configured for resolved to a real pack
+             * that is not usable" says the same thing without carrying
+             * anything, and keeps saying it while the condition lasts rather
+             * than for the single tick it began. */
             m->state = (uint8_t)cluMember_absent;
             m->why   = (uint8_t)cluWhy_notOnline;
+            out->pub.clusterAlarms |= (uint32_t)cluAlarm_memberLost;
             continue;
         }
         if (p->elecAge_ms > (uint32_t)tune->elecMaxAge_ms) {
@@ -602,6 +497,7 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
              * this module may do arithmetic with. */
             m->state = (uint8_t)cluMember_stale;
             m->why   = (uint8_t)cluWhy_electricalStale;
+            out->pub.clusterAlarms |= (uint32_t)cluAlarm_memberLost;
             continue;
         }
         if (AbsMa(p->current_mA) > (uint32_t)CLUSTER_PLAUS_CURRENT_MA) {
@@ -631,37 +527,20 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     }
 
     /* ======================================================================
-     * Pass 2 — the two loops.  Independent by construction: charge and
-     * discharge sharing differ, so each keeps its own learned value.
+     * Pass 2 — the two directions.  Independent by construction: charge and
+     * discharge sharing differ, so each is solved on its own currents.
+     * NEITHER CARRIES ANYTHING between ticks.
      * ====================================================================== */
-    dChg.loop           = &st->loopCharge_mA;
-    dChg.slewed         = &st->pubCharge_mA;
-    dChg.bindTick_ms    = &st->bindChgTick_ms;
-    dChg.prevLimit_mA   = st->prevLimitChg_mA;
-    dChg.prevPart       = &st->prevPartChg;
-    dChg.lastLoadMax_pm = &st->lastLoadMaxChg_pm;
-    dChg.forbidden      = &st->chgForbidden;
-    dChg.bindSeen       = &st->chgBindSeen;
-    dChg.slewing        = &st->chgSlewing;
-    dChg.derate_pm      = tune->chargeDerate_pm;
-    dChg.charge         = 1u;
-    dChg.bindFlag       = (uint8_t)cluMemFlag_bindingCharge;
+    dChg.derate_pm = tune->chargeDerate_pm;
+    dChg.charge    = 1u;
+    dChg.bindFlag  = (uint8_t)cluMemFlag_bindingCharge;
 
-    dDsg.loop           = &st->loopDischarge_mA;
-    dDsg.slewed         = &st->pubDischarge_mA;
-    dDsg.bindTick_ms    = &st->bindDsgTick_ms;
-    dDsg.prevLimit_mA   = st->prevLimitDsg_mA;
-    dDsg.prevPart       = &st->prevPartDsg;
-    dDsg.lastLoadMax_pm = &st->lastLoadMaxDsg_pm;
-    dDsg.forbidden      = &st->dsgForbidden;
-    dDsg.bindSeen       = &st->dsgBindSeen;
-    dDsg.slewing        = &st->dsgSlewing;
-    dDsg.derate_pm      = tune->dischargeDerate_pm;
-    dDsg.charge         = 0u;
-    dDsg.bindFlag       = (uint8_t)cluMemFlag_bindingDischarge;
+    dDsg.derate_pm = tune->dischargeDerate_pm;
+    dDsg.charge    = 0u;
+    dDsg.bindFlag  = (uint8_t)cluMemFlag_bindingDischarge;
 
-    SolveDirection(in, n, tune, st, sc, out, now_ms, dt_ms, &dChg, &oChg);
-    SolveDirection(in, n, tune, st, sc, out, now_ms, dt_ms, &dDsg, &oDsg);
+    SolveDirection(in, n, tune, sc, out, &dChg, &oChg);
+    SolveDirection(in, n, tune, sc, out, &dDsg, &oDsg);
 
     /* Refine the member state now both directions have run: a pack that
      * participates in neither gets the REASON it did not. */
@@ -685,9 +564,8 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
         }
     }
 
-    out->pub.chargeLoop_mA       = oChg.loop_mA;
+    out->pub.chargeTarget_mA     = oChg.target_mA;
     out->pub.chargeDerated_mA    = oChg.derated_mA;
-    out->pub.chargeSlewed_mA     = oChg.slewed_mA;
     out->pub.chargeLimit_mA      = oChg.published_mA;
     out->pub.chargeLoadMax_pm    = Sat16(oChg.loadMax_pm);
     out->pub.chargeLoopState     = oChg.loopState;
@@ -695,9 +573,8 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     out->pub.chargeBindingIdx    = oChg.bindingIdx;
     out->pub.chargeAllowed       = oChg.allowed;
 
-    out->pub.dischargeLoop_mA    = oDsg.loop_mA;
+    out->pub.dischargeTarget_mA  = oDsg.target_mA;
     out->pub.dischargeDerated_mA = oDsg.derated_mA;
-    out->pub.dischargeSlewed_mA  = oDsg.slewed_mA;
     out->pub.dischargeLimit_mA   = oDsg.published_mA;
     out->pub.dischargeLoadMax_pm = Sat16(oDsg.loadMax_pm);
     out->pub.dischargeLoopState  = oDsg.loopState;
@@ -705,26 +582,8 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     out->pub.dischargeBindingIdx = oDsg.bindingIdx;
     out->pub.dischargeAllowed    = oDsg.allowed;
 
-    /* The more significant of the two, so an operator sees the event rather
-     * than whichever direction happened to run second. */
-    out->pub.lastRestart = (oChg.restart != (uint8_t)cluRestart_none)
-                         ? oChg.restart : oDsg.restart;
-
-    if (oChg.clamped != 0u)     { out->ev |= (uint32_t)cluCalcEv_stepClampedChg; }
-    if (oDsg.clamped != 0u)     { out->ev |= (uint32_t)cluCalcEv_stepClampedDsg; }
-    if (oChg.slewLimited != 0u) { out->ev |= (uint32_t)cluCalcEv_slewChg; }
-    if (oDsg.slewLimited != 0u) { out->ev |= (uint32_t)cluCalcEv_slewDsg; }
-    if (oChg.binding != 0u)     { out->ev |= (uint32_t)cluCalcEv_bindingChg; }
-    if (oDsg.binding != 0u)     { out->ev |= (uint32_t)cluCalcEv_bindingDsg; }
-    if (oChg.restart != (uint8_t)cluRestart_none) {
-        out->ev |= (uint32_t)cluCalcEv_restartChg;
-    }
-    if (oDsg.restart != (uint8_t)cluRestart_none) {
-        out->ev |= (uint32_t)cluCalcEv_restartDsg;
-    }
-    if ((oChg.left != 0u) || (oDsg.left != 0u)) {
-        out->pub.clusterAlarms |= (uint32_t)cluAlarm_memberLost;
-    }
+    if (oChg.predicted != 0u)   { out->ev |= (uint32_t)cluCalcEv_predictedChg; }
+    if (oDsg.predicted != 0u)   { out->ev |= (uint32_t)cluCalcEv_predictedDsg; }
     /* A GENUINE REFUSAL, not an empty bus: with no participant there is
      * nothing to refuse, and cluAlarm_allOffline / cluAlarm_noMembers already
      * say what is wrong.  Raising both would make "charging is forbidden" the
@@ -757,7 +616,8 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
         int16_t  tMax = 0, tMin = 0;
         uint16_t socConf = 1000u, sohConf = 1000u;
         uint16_t socMin  = 0u, socMax = 0u;
-        uint8_t  nVolt = 0u, nCap = 0u, nName = 0u, nVoltLim = 0u;
+        uint8_t  nVolt = 0u, nCap = 0u, nName = 0u;
+        uint8_t  nCvl = 0u, nDvl = 0u;
         uint8_t  nTemp = 0u, nSwitch = 0u;
 
         for (i = 0u; i < n; i++) {
@@ -805,14 +665,42 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
              * pack at cell over-voltage drops out of P_chg at exactly the
              * moment its low ceiling matters most.  Taking these over
              * participants only would delete it there (§7.1). */
+            /* A ZERO IS "NOT REPORTED", NOT "ZERO VOLTS", AND THE TWO ARE
+             * COUNTED SEPARATELY.  The capability bit says a pack CAN report
+             * these; it does not say it HAS.  MEASURED ON SODAS 2026-09-09:
+             * `sodas2` advertised packCap_voltageLimits and returned
+             * 0 mV / 0 mV for four minutes while `sodas15` returned
+             * 55 200 / 43 200, so the min put a CVL of ZERO on the published
+             * snapshot with the field marked VALID — which by contract 2 of
+             * cluster.h is not "no limit" but an instruction to STOP
+             * CHARGING.  §3.8 already refuses to INVENT this field when
+             * nobody advertises it; this is the same scepticism applied to a
+             * pack that advertises and then does not answer.
+             *
+             * SEPARATE COUNTERS because the two fields fail independently: a
+             * pack may answer one register group and not the other, and a
+             * zero DVL is harmless to a max() while a zero CVL captures a
+             * min().  Folding them into one count made the healthy field
+             * hostage to the broken one.
+             *
+             * The upper bound is the same plausibility domain the voltage
+             * itself uses: a decode error yields a huge number, which a
+             * max() would take. */
             if ((p->caps & (uint32_t)packCap_voltageLimits) != 0u) {
-                if ((nVoltLim == 0u) || (p->chargeVoltLimit_mV < cvl)) {
-                    cvl = p->chargeVoltLimit_mV;
+                if ((p->chargeVoltLimit_mV > 0u) &&
+                    (p->chargeVoltLimit_mV <= CLUSTER_PLAUS_VOLTAGE_MV)) {
+                    if ((nCvl == 0u) || (p->chargeVoltLimit_mV < cvl)) {
+                        cvl = p->chargeVoltLimit_mV;
+                    }
+                    nCvl++;
                 }
-                if ((nVoltLim == 0u) || (p->dischargeVoltLimit_mV > dvl)) {
-                    dvl = p->dischargeVoltLimit_mV;
+                if ((p->dischargeVoltLimit_mV > 0u) &&
+                    (p->dischargeVoltLimit_mV <= CLUSTER_PLAUS_VOLTAGE_MV)) {
+                    if ((nDvl == 0u) || (p->dischargeVoltLimit_mV > dvl)) {
+                        dvl = p->dischargeVoltLimit_mV;
+                    }
+                    nDvl++;
                 }
-                nVoltLim++;
             }
             if (((p->caps & (uint32_t)packCap_temperatures) != 0u) &&
                 (p->tempMax_dC <= CLUSTER_PLAUS_TEMP_MAX_DC) &&
@@ -868,9 +756,16 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
             out->pub.socConf_pm = socConf;
             out->pub.sohConf_pm = sohConf;
             /* A CLUSTER THAT HAS NOT YET MEASURED ITS OWN CAPABILITY SHOULD
-             * SAY SO. */
-            if ((out->pub.chargeLoopState == (uint8_t)cluLoop_searching) ||
-                (out->pub.dischargeLoopState == (uint8_t)cluLoop_searching)) {
+             * SAY SO — but ONLY WHERE THE PREDICTION IS ACTUALLY A GUESS.
+             * With one online pack both rules give margin x L, so the
+             * prediction is exact and capping would report a one-pack site as
+             * permanently unsure for no reason.  With two or more the
+             * prediction assumes a sharing it has not seen, and that IS
+             * worth saying. */
+            if ((out->pub.onlineCnt > 1u) &&
+                ((out->pub.chargeLoopState == (uint8_t)cluLoop_predicted) ||
+                 (out->pub.dischargeLoopState ==
+                  (uint8_t)cluLoop_predicted))) {
                 if (out->pub.socConf_pm > 300u) {
                     out->pub.socConf_pm = 300u;
                 }
@@ -879,13 +774,20 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
 
         /* §7.4: the cluster DECLARES the dependency and refuses to publish.
          * It does not invent the field and it does not publish zero — a zero
-         * CVL is a valid, meaningful and catastrophic instruction. */
-        if (nVoltLim > 0u) {
-            out->pub.chargeVoltLimit_mV    = cvl;
+         * CVL is a valid, meaningful and catastrophic instruction.
+         *
+         * PER FIELD, not per pack.  Publishing the half that IS known while
+         * declaring the half that is not is strictly better than withholding
+         * both, and the alarm fires if EITHER is missing. */
+        if (nCvl > 0u) {
+            out->pub.chargeVoltLimit_mV = cvl;
+            out->pub.fields |= (uint16_t)cluField_chargeVoltLimit;
+        }
+        if (nDvl > 0u) {
             out->pub.dischargeVoltLimit_mV = dvl;
-            out->pub.fields |= (uint16_t)cluField_chargeVoltLimit |
-                               (uint16_t)cluField_dischargeVoltLimit;
-        } else if (out->pub.onlineCnt > 0u) {
+            out->pub.fields |= (uint16_t)cluField_dischargeVoltLimit;
+        }
+        if (((nCvl == 0u) || (nDvl == 0u)) && (out->pub.onlineCnt > 0u)) {
             out->pub.clusterAlarms |= (uint32_t)cluAlarm_voltLimitMissing;
         } else {
             /* nothing online: a missing voltage limit is not news */
@@ -901,7 +803,7 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
 
         /* --- divergence (R3.2): REPORTED, NEVER A CONTROL INPUT ---------
          * The control response to a greedy pack is ALREADY produced by the
-         * loop; a second one would fight it. */
+         * limit rule; a second one would fight it. */
         if ((nCap >= 2u) &&
             ((uint32_t)(socMax - socMin) > (uint32_t)tune->socDiverge_pm)) {
             out->pub.clusterAlarms |= (uint32_t)cluAlarm_socDiverge;
@@ -936,7 +838,6 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
                 s = (uint32_t)(((uint64_t)AbsMa(m->current_mA) * 1000u) /
                                sumAbsI);
                 m->share_pm     = Sat16(s);
-                sc->share_pm[i] = m->share_pm;
                 if (m->share_pm > worst) {
                     worst    = m->share_pm;
                     worstIdx = i;
@@ -978,8 +879,5 @@ int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
     }
     out->pub.valid = (uint8_t)((out->pub.onlineCnt > 0u) ? 1u : 0u);
 
-    st->lastTick_ms    = now_ms;
-    st->started        = 1u;
-    st->pendingRestart = (uint8_t)cluRestart_none;
     return cluErr_ok;
 }

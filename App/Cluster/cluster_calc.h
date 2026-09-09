@@ -1,17 +1,18 @@
 /**
  * @file    cluster_calc.h
- * @brief   THE PURE CORE: the closed-loop limit search and its gate, the
- *          restart triggers, the input sanitiser, the slew and all
- *          aggregation.  MODULE-INTERNAL (docs/design_battery_cluster.md §2).
+ * @brief   THE PURE CORE: the measured limit rule, its low-load prediction,
+ *          the input sanitiser and all aggregation.  MODULE-INTERNAL
+ *          (docs/design_battery_cluster.md §2, revision 3).
  *
  * LIBC ONLY.  NO FreeRTOS, NO HAL, NO Trice, NO flash — AND NO Pack_.  A call
  * into the live pack module is a call into a lock, and would make this file
  * non-pure and untestable at once, so its ENTIRE input is the sClusterPackIn
  * array the caller fills.  pack_fsm.c is the precedent and the shape.
  *
- * TIME IS ALWAYS AN ARGUMENT, never read.  Every age is an unsigned
- * difference; nothing compares two absolute stamps, so 2^32 ms (~49.7 days)
- * wraps harmlessly and a host test can drive the clock.
+ * TIME IS ALWAYS AN ARGUMENT, never read — and since §14.8 it is not used for
+ * arithmetic at all: `now_ms` stamps the snapshot, ages are supplied by the
+ * caller inside sClusterPackIn, and no interval is measured anywhere.  The
+ * 2^32 ms wrap therefore cannot reach a limit.
  *
  * ZERO FILE STATICS, exactly as pack_fsm.c has none — which is what makes
  * "the state is the only thing carried" provable rather than asserted.  Every
@@ -54,40 +55,23 @@ typedef struct {                                    /* 64 B                  */
 
 /** Everything the loop carries from one tick to the next.  Slot-indexed
  *  throughout, which is why a configuration adoption must reset ALL of it. */
-typedef struct {                                    /* 112 B                 */
-    uint32_t loopCharge_mA, loopDischarge_mA;    /* what the loop holds      */
-    uint32_t pubCharge_mA, pubDischarge_mA;      /* after the slew           */
-    uint32_t lastTick_ms;
-    uint32_t bindChgTick_ms, bindDsgTick_ms;     /* last binding sample      */
-    uint32_t prevLimitChg_mA[CLUSTER_PACK_MAX];  /* deadband reference,
-                                                    LATCHED AT RESTART and
-                                                    only at restart          */
-    uint32_t prevLimitDsg_mA[CLUSTER_PACK_MAX];
-    uint32_t prevPartChg, prevPartDsg;           /* participation bitmask —
-                                                    join / leave detection   */
-    uint16_t lastLoadMaxChg_pm, lastLoadMaxDsg_pm;
-    uint8_t  chgForbidden, dsgForbidden;         /* forbidden->allowed edge  */
-    uint8_t  chgBindSeen, dsgBindSeen;
-    /* WAS THE SLEW STILL RATE-LIMITING WHEN IT PRODUCED THE VALUE THE NEXT
-     * TICK WILL MEASURE AGAINST?  Carried per direction, because the gate
-     * needs LAST tick's answer: the measurement it is about to take was made
-     * against last tick's emitted value. */
-    uint8_t  chgSlewing, dsgSlewing;
-    uint8_t  started;
-    uint8_t  pendingRestart;                     /* eClusterRestart the
-                                                    CALLER saw — adoption is
-                                                    the one trigger the pure
-                                                    core cannot observe       */
-} sClusterCalcState;                             /* exactly 112 B, no tail
-                                                    padding: the two slew
-                                                    flags took the reserve   */
+/* THERE IS NO CARRIED STATE.  `sClusterCalcState` (112 B at revision 2, cut to
+ * 16 when the loop went, deleted outright when the rate limiter went — §14.8)
+ * held the loop variable, the binding stamps, the deadband references, the
+ * participation masks, the ramp-in flags and finally the slew.  Every one of
+ * them served a mechanism that no longer exists, and with the last of them the
+ * module became a PURE FUNCTION: two calls with the same packs and the same
+ * tune produce the same limits, whatever happened before. */
 
 /** CALLER-OWNED WORKING MEMORY.  Without this the pure core would need file
- *  statics and "the state is the only thing carried" would be unprovable. */
-typedef struct {                                    /* 96 B                  */
-    uint32_t load_pm[CLUSTER_PACK_MAX];
-    uint32_t absI_mA[CLUSTER_PACK_MAX];
-    uint16_t share_pm[CLUSTER_PACK_MAX];
+ *  statics and "the state is the only thing carried" would be unprovable.
+ *
+ *  16 B, DOWN FROM 96.  It held three more arrays — `load_pm`, `absI_mA` and
+ *  `share_pm` — of which `absI_mA` was never referenced at all and the other
+ *  two were WRITTEN AND NEVER READ: the per-member copies in sClusterMember
+ *  are what the arithmetic and the observability surface both use.  They were
+ *  the estimator hierarchy's working set and outlived it by two revisions. */
+typedef struct {                                    /* 16 B                  */
     uint8_t  partChg[CLUSTER_PACK_MAX];
     uint8_t  partDsg[CLUSTER_PACK_MAX];
 } sClusterScratch;
@@ -96,14 +80,8 @@ typedef struct {                                    /* 96 B                  */
  *  cluster.c can keep its counters without re-deriving them from the output,
  *  which is how two views of one tick drift apart. */
 typedef enum {
-    cluCalcEv_stepClampedChg = 1u << 0,
-    cluCalcEv_stepClampedDsg = 1u << 1,
-    cluCalcEv_slewChg        = 1u << 2,
-    cluCalcEv_slewDsg        = 1u << 3,
-    cluCalcEv_bindingChg     = 1u << 4,
-    cluCalcEv_bindingDsg     = 1u << 5,
-    cluCalcEv_restartChg     = 1u << 6,
-    cluCalcEv_restartDsg     = 1u << 7,
+    cluCalcEv_predictedChg   = 1u << 0,
+    cluCalcEv_predictedDsg   = 1u << 1,
 } eClusterCalcEvent;
 
 typedef struct {                                    /* 376 B                 */
@@ -117,31 +95,27 @@ typedef struct {                                    /* 376 B                 */
 /* Exported functions -------------------------------------------------------*/
 
 /**
- * @brief  One whole aggregation pass: sanitise, classify, run both loops,
- *         aggregate, detect divergence.
+ * @brief  One whole aggregation pass: sanitise, classify, solve both
+ *         directions, aggregate, detect divergence.
  *
  * @param  in - n pack inputs, slot-indexed
  * @param  n - configured member count, 0..CLUSTER_PACK_MAX
  * @param  tune - the live tunables
- * @param  st - carried state; zeroed by the caller means "start of life"
  * @param  scratch - caller-owned working memory, contents undefined on entry
- * @param  now_ms - monotonic milliseconds
+ * @param  now_ms - monotonic milliseconds; STAMPS THE SNAPSHOT AND NOTHING
+ *                  ELSE.  No value is aged and no interval is measured, so
+ *                  the 2^32 ms wrap cannot affect a limit
  * @param  out - written in full; `seq` is the caller's to stamp
  * @retval cluErr_ok, cluErr_badArg
  */
 int ClusterCalc_Solve(const sClusterPackIn *in, uint8_t n,
-                      const sClusterTune *tune, sClusterCalcState *st,
-                      sClusterScratch *scratch, uint32_t now_ms,
-                      sClusterResult *out);
+                      const sClusterTune *tune, sClusterScratch *scratch,
+                      uint32_t now_ms, sClusterResult *out);
 
-/**
- * @brief  Force the next Solve to restart both searches.
- *
- * The caller uses this for cluRestart_configAdopted, which it alone can see.
- * Resets the WHOLE state: every value in it is slot-indexed and a re-pointed
- * slot makes all of them meaningless.
- */
-void ClusterCalc_Reset(sClusterCalcState *st, uint8_t reason);
+/* THERE IS NO ClusterCalc_Reset().  A configuration adoption used to need one,
+ * to drop slot-indexed state that a re-pointed member set made meaningless.
+ * Nothing is indexed by slot across a tick any more, so adopting a new member
+ * set is simply the next Solve. */
 
 #ifdef __cplusplus
 }

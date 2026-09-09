@@ -7,7 +7,6 @@
  * TWO OF THE BOUNDS HERE ARE LOAD-BEARING ARITHMETIC, not validation hygiene,
  * and they are tested as such:
  *   cfg_rejects_bindFrac_below_loadTarget   — the gate's ceiling (defect L2)
- *   cfg_rejects_a_riseRate_above_the_bound  — the slew's uint32 headroom
  *
  * -Werror=switch is scoped onto cluster_cfg.c for this target too, so a new
  * enumerator without a name fails HERE — which is where a developer looks
@@ -101,17 +100,23 @@ static void test_cfg_defaults_are_applied_when_keys_are_absent(void)
     sClusterCfg cfg;
 
     TEST_ASSERT(parse(SODAS, &cfg, NULL) == cluErr_ok);
-    TEST_ASSERT(cfg.tune.riseRate_mA_per_s  == CLUSTER_DFLT_RISE_MA_PER_S);
-    TEST_ASSERT(cfg.tune.loadTarget_pm      == CLUSTER_DFLT_LOAD_TARGET_PM);
-    TEST_ASSERT(cfg.tune.bindFrac_pm        == CLUSTER_DFLT_BIND_FRAC_PM);
+    TEST_ASSERT(cfg.tune.safetyMargin_pm    == CLUSTER_DFLT_SAFETY_MARGIN_PM);
+    TEST_ASSERT(cfg.tune.lowLoadFloor_pm    == CLUSTER_DFLT_LOW_LOAD_FLOOR_PM);
+    TEST_ASSERT(cfg.tune.predictDecay_pm    == CLUSTER_DFLT_PREDICT_DECAY_PM);
     /* The JK's own measured derations, carried so the board is no more
      * aggressive than the battery it replaces. */
     TEST_ASSERT(cfg.tune.chargeDerate_pm    == 800u);
     TEST_ASSERT(cfg.tune.dischargeDerate_pm == 850u);
-    TEST_ASSERT(cfg.tune.elecMaxAge_ms      == 5000u);
-    TEST_ASSERT(cfg.tune.holdMaxAge_ms      == 3600000u);
+    /* 8000, not 5000: measured on board 1, the JK's electrical group
+     * refreshes on a ~5 s sawtooth and an equal gate has no margin. */
+    TEST_ASSERT(cfg.tune.elecMaxAge_ms      == 8000u);
     TEST_ASSERT(cfg.tune.voltDiverge_mV     == 500u);
-    TEST_ASSERT(cfg.version == CLUSTER_CFG_VERSION);
+    /* THE DOCUMENT KEEPS ITS OWN STAMP.  SODAS says version 1 and is still
+     * read: a v1 document that names no retired tune key is legal under v2,
+     * and only the CFG_VERSION default applies when a document omits it.
+     * A v1 document that DOES carry the retired keys is refused by name,
+     * which is the intended migration — see the retired-key test below. */
+    TEST_ASSERT(cfg.version == 1u);
 }
 
 static void test_cfg_reads_a_whole_tune_block(void)
@@ -119,20 +124,19 @@ static void test_cfg_reads_a_whole_tune_block(void)
     sClusterCfg cfg;
     static const char doc[] =
         "{\"members\":[\"a\"],\"tune\":{"
-        "\"riseRate_mA_per_s\":2500,\"limitMax_mA\":400000,"
-        "\"holdMaxAge_ms\":600000,\"voltDiverge_mV\":250,"
-        "\"elecMaxAge_ms\":3000,\"loadTarget_pm\":850,"
-        "\"bindFrac_pm\":880,\"limitDeadband_pm\":30,"
-        "\"convergeTol_pm\":40,\"chargeDerate_pm\":750,"
+        "\"limitMax_mA\":400000,"
+        "\"voltDiverge_mV\":250,"
+        "\"elecMaxAge_ms\":3000,\"safetyMargin_pm\":850,"
+        "\"lowLoadFloor_pm\":120,\"predictDecay_pm\":880,"
+        "\"chargeDerate_pm\":750,"
         "\"dischargeDerate_pm\":900,\"socDiverge_pm\":150,"
         "\"shareDiverge_pm\":650}}";
 
     TEST_ASSERT(parse(doc, &cfg, NULL) == cluErr_ok);
-    TEST_ASSERT(cfg.tune.riseRate_mA_per_s == 2500u);
     TEST_ASSERT(cfg.tune.limitMax_mA == 400000u);
-    TEST_ASSERT(cfg.tune.holdMaxAge_ms == 600000u);
-    TEST_ASSERT(cfg.tune.loadTarget_pm == 850u);
-    TEST_ASSERT(cfg.tune.bindFrac_pm == 880u);
+    TEST_ASSERT(cfg.tune.safetyMargin_pm == 850u);
+    TEST_ASSERT(cfg.tune.lowLoadFloor_pm == 120u);
+    TEST_ASSERT(cfg.tune.predictDecay_pm == 880u);
     TEST_ASSERT(cfg.tune.dischargeDerate_pm == 900u);
     TEST_ASSERT(cfg.tune.shareDiverge_pm == 650u);
 }
@@ -198,51 +202,31 @@ static void test_cfg_rejects_an_illegal_member_name(void)
                 == cluErr_badArg);
 }
 
-/** DEFECT L2, AS A PARSE RULE.  The gate's ceiling is
- *  (loadTarget_pm / bindFrac_pm) x min(L_i/f_i).  An operator lowering
- *  bindFrac_pm to chase binding samples — the natural response to
- *  `bindingSampleChg: 0` in the status — would move that ceiling to 1.8x
- *  every pack's own limit with no alarm and every other test still green. */
-static void test_cfg_rejects_bindFrac_below_loadTarget(void)
+/** THE RETIRED TUNE KEYS ARE REFUSED BY NAME, which is what makes each
+ *  arithmetic revision's migration loud instead of silent.  A stored
+ *  configuration carrying one would otherwise parse with that setting quietly
+ *  dropped, and the operator would never learn their margin or their ramp had
+ *  moved.  Five went with the closed loop's gate (revision 3) and
+ *  `riseRate_mA_per_s` went with the rate limiter (design §14.8). */
+static void test_cfg_rejects_the_retired_loop_tunables(void)
 {
     sClusterCfg       cfg;
     sClusterCfgResult res;
+    static const char *retired[] = {
+        "loadTarget_pm", "bindFrac_pm", "limitDeadband_pm",
+        "convergeTol_pm", "holdMaxAge_ms", "riseRate_mA_per_s",
+    };
+    unsigned i;
 
-    TEST_ASSERT(parse("{\"members\":[\"a\"],\"tune\":"
-                      "{\"loadTarget_pm\":900,\"bindFrac_pm\":500}}",
-                      &cfg, &res) == cluErr_badArg);
-    TEST_ASSERT(strcmp(res.field, "bindFrac_pm") == 0);
+    for (i = 0u; i < (sizeof(retired) / sizeof(retired[0])); i++) {
+        char doc[128];
 
-    /* And in the other key order, which is why the rule is checked after the
-     * whole document rather than inside parse_tune. */
-    TEST_ASSERT(parse("{\"members\":[\"a\"],\"tune\":"
-                      "{\"bindFrac_pm\":500,\"loadTarget_pm\":900}}",
-                      &cfg, &res) == cluErr_badArg);
-    TEST_ASSERT(strcmp(res.field, "bindFrac_pm") == 0);
-
-    /* Equal is legal, and is the shipping default: the ceiling is then
-     * exactly min(L_i/f_i). */
-    TEST_ASSERT(parse("{\"members\":[\"a\"],\"tune\":"
-                      "{\"bindFrac_pm\":900,\"loadTarget_pm\":900}}",
-                      &cfg, &res) == cluErr_ok);
-}
-
-static void test_cfg_rejects_a_riseRate_above_the_overflow_bound(void)
-{
-    sClusterCfg       cfg;
-    sClusterCfgResult res;
-
-    /* rate x dt must stay inside uint32 with dt clamped at 2000 ms. */
-    TEST_ASSERT(parse("{\"members\":[\"a\"],\"tune\":"
-                      "{\"riseRate_mA_per_s\":100001}}", &cfg, &res)
-                == cluErr_badArg);
-    TEST_ASSERT(strcmp(res.field, "riseRate_mA_per_s") == 0);
-
-    /* ZERO IS REJECTED rather than meaning "frozen": the step floor would
-     * still let it climb at 40 mA/s, which is a surprise, not a policy. */
-    TEST_ASSERT(parse("{\"members\":[\"a\"],\"tune\":"
-                      "{\"riseRate_mA_per_s\":0}}", &cfg, NULL)
-                == cluErr_badArg);
+        (void)snprintf(doc, sizeof(doc),
+                       "{\"members\":[\"a\"],\"tune\":{\"%s\":900}}",
+                       retired[i]);
+        TEST_ASSERT(parse(doc, &cfg, &res) == cluErr_badArg);
+        TEST_ASSERT(strcmp(res.field, retired[i]) == 0);
+    }
 }
 
 static void test_cfg_rejects_limitMax_zero_or_above_the_macro(void)
@@ -319,7 +303,7 @@ static void test_cfg_export_round_trips(void)
     static const char doc[] =
         "{\"version\":1,\"profile\":\"pylon_lv\","
         "\"members\":[\"sodas_a\",\"sodas_b\"],"
-        "\"tune\":{\"riseRate_mA_per_s\":2500,\"chargeDerate_pm\":750}}";
+        "\"tune\":{\"limitMax_mA\":400000,\"chargeDerate_pm\":750}}";
 
     TEST_ASSERT(parse(doc, &a, NULL) == cluErr_ok);
 
@@ -382,9 +366,6 @@ static void test_names_cover_every_enumerator_and_are_json_safe(void)
     for (i = 0u; i < (unsigned)cluLoop_last; i++) {
         check_name(Cluster_LoopStateName((uint8_t)i));
     }
-    for (i = 0u; i < (unsigned)cluRestart_last; i++) {
-        check_name(Cluster_RestartName((uint8_t)i));
-    }
     for (i = 0u; i < (unsigned)cluLimitWhy_last; i++) {
         check_name(Cluster_LimitWhyName((uint8_t)i));
     }
@@ -412,7 +393,6 @@ static void test_names_are_bounded_and_never_null(void)
     TEST_ASSERT(strcmp(Cluster_MemberStateName(200u), "?") == 0);
     TEST_ASSERT(strcmp(Cluster_MemberWhyName(200u), "?") == 0);
     TEST_ASSERT(strcmp(Cluster_LoopStateName(200u), "?") == 0);
-    TEST_ASSERT(strcmp(Cluster_RestartName(200u), "?") == 0);
     TEST_ASSERT(strcmp(Cluster_LimitWhyName(200u), "?") == 0);
     TEST_ASSERT(strcmp(Cluster_AlarmName(1u << 30), "?") == 0);
     TEST_ASSERT(strcmp(Cluster_MemberFlagName(1u << 30), "?") == 0);
@@ -436,8 +416,7 @@ int main(void)
     RUN_TEST(test_cfg_rejects_a_duplicate_member_name);
     RUN_TEST(test_cfg_rejects_more_than_pack_max_members);
     RUN_TEST(test_cfg_rejects_an_illegal_member_name);
-    RUN_TEST(test_cfg_rejects_bindFrac_below_loadTarget);
-    RUN_TEST(test_cfg_rejects_a_riseRate_above_the_overflow_bound);
+    RUN_TEST(test_cfg_rejects_the_retired_loop_tunables);
     RUN_TEST(test_cfg_rejects_limitMax_zero_or_above_the_macro);
     RUN_TEST(test_cfg_rejects_out_of_range_per_mille_tunables);
     RUN_TEST(test_cfg_refuses_a_newer_document_version);

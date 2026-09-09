@@ -6,28 +6,32 @@
  * consumer of App/Pack/pack.h and a producer of one settled snapshot; it owns
  * no peripheral, no CAN handle, no Modbus and no socket.
  *
- * THE LIMIT IS MEASURED, NOT ESTIMATED (docs/design_battery_cluster.md §3.2):
+ * THE LIMIT IS MEASURED, NOT SEARCHED (docs/design_battery_cluster.md §3.2,
+ * revision 3).  It is a PURE FUNCTION OF THIS TICK — no feedback, no carried
+ * loop variable, no gate:
  *
  *      loadMax_pm = max over packs of ( |I_i| * 1000 / L_i )
- *      loop'      = published * tune.loadTarget_pm / loadMax_pm
+ *      target     = tune.safetyMargin_pm * |S| / loadMax_pm
  *
- * updated ONLY while the bus is actually being driven to the published limit.
- * There is no share estimator, no conductance fit and no separate safety
- * guard; there is one loop, and its gate is the single most important thing in
- * the module.
+ * Read it as: scale the whole bus up until the HARDEST-WORKING pack reaches
+ * its own limit, then keep a margin.  |S| is the summed magnitude over packs
+ * flowing this way, so with two equal 300 A packs drawing 100 A and 80 A the
+ * bus could carry 180 x (300/100) = 540 A and the module publishes 486 A.
  *
- * THE MEASUREMENT IS TAKEN AT THE EMITTED VALUE, WHICH IS WHAT FOLDS THE
- * DERATE INTO THE SETPOINT (§3.2, defect L1).  `published` above is the number
- * on the wire — already derated — so the fixed point of the emitted value is
+ * IT CAN NEVER EXCEED margin x sum(L_i), and that is a proof rather than a
+ * clamp: every pack satisfies |I_i| <= f x L_i for f = loadMax, so
+ * |S| <= f x sum(L_i) and |S|/f <= sum(L_i).  Revision 2's upward step clamp
+ * existed to bound a recursion and is gone with it.
  *
- *      published*  =  loadTarget_pm * derate_pm / 1e6  x  min(L_i / f_i)
+ * BELOW tune.lowLoadFloor_pm THE RATIO IS NOISE — two small numbers divided —
+ * so a geometric prediction over the participants' own limits runs instead,
+ * SMALLEST FIRST:
  *
- * and the loop variable settles at loadTarget_pm/1000 x min(L_i/f_i).  BOTH
- * ARE AT OR BELOW THE BINDING PACK'S OWN LIMIT, for every derate, which is the
- * property the cascade reading (loop converged pre-derate, derate applied
- * afterwards) does not have: that one settles the inner variable 12.5 % ABOVE
- * the binding pack's limit and emits it the instant an operator raises the
- * derate to 1000.
+ *      target = d*L(1) + d^2*L(2) + d^3*L(3) + ...   ,  d = predictDecay_pm
+ *
+ * which is conservative against sum(L_i) and never trusts N packs to share
+ * evenly.  A SINGLE PACK IS CONTINUOUS ACROSS THE FLOOR — both rules give
+ * margin x L — so the one-pack site never sees a step.
  *
  * WHAT THIS MODULE WILL NOT DO: command a pack; invent a number a pack does
  * not publish; take a lock; hand out a pointer into live state; run a float;
@@ -53,8 +57,8 @@
  *      with no evidence behind it, while the channel known to work says 96 A
  *      is fine, is the same failure this module refuses to make with a zero
  *      CVL, inverted.  THE CONVERSE DOES NOT HOLD: a zero limit does not imply
- *      a forbidden direction — a loop that has not yet earned headroom
- *      publishes a small limit, not a refusal.
+ *      a forbidden direction — a bus with no participant publishes zero
+ *      without refusing anything.
  *
  *   4. TRANSMIT ONLY ON cluErr_ok.  Not "stop on stale" — POSITIVE, because
  *      notReady, busy, stale and unprovisioned all mean the same thing to a
@@ -106,22 +110,17 @@ _Static_assert(CLUSTER_PACK_MAX == PACK_MAX,
 #define CLUSTER_PACK_NONE           0xFFu
 #define CLUSTER_OUTPUT_MAX_AGE_MS   3000u
 
-/** THE LOOP'S SETPOINT, per-mille of a pack's own limit.  The remaining 10 %
- *  absorbs sharing shifting between one tick and the next. */
-#define CLUSTER_DFLT_LOAD_TARGET_PM 900u
+/** THE SAFETY MARGIN, per-mille of what the measurement says the bus could
+ *  carry.  The remaining 10 % absorbs sharing shifting between one tick and
+ *  the next — which is the ONE assumption revision 3 makes and the closed
+ *  loop did not (design §3.2). */
+#define CLUSTER_DFLT_SAFETY_MARGIN_PM 900u
 
-/** A NUMERICAL bound, not a physical one: it keeps `published * loadTarget_pm`
- *  inside uint32 (which overflows above 4 772 185 mA at 900 pm).
- *  cluster_cfg.c rejects a configured limitMax_mA that is zero or above this,
- *  so the bound is LOAD-BEARING ARITHMETIC and a host test asserts it as
- *  such. */
+/** A NUMERICAL bound, not a physical one.  cluster_cfg.c rejects a configured
+ *  limitMax_mA that is zero or above this, so the bound is LOAD-BEARING
+ *  ARITHMETIC and a host test asserts it as such.  The limit arithmetic
+ *  itself is uint64 throughout and does not depend on it. */
 #define CLUSTER_LIMIT_MAX_MA        1000000u        /* 1000 A                 */
-
-/* Bound on ONE UPWARD update.  THERE IS DELIBERATELY NO DOWNWARD CLAMP: a
- * clamp on the safety action is a contradiction.  Garbage is handled where it
- * enters, by the plausibility pass, not here. */
-#define CLUSTER_STEP_UP_MAX_PM      4000u
-#define CLUSTER_DFLT_CONVERGE_TOL_PM 50u
 
 /** THREE MACRO CLASSES, AND THE PREFIX SAYS WHICH:
  *    CLUSTER_DFLT_*     a DEFAULT for a sClusterTune field.  The live value is
@@ -142,19 +141,10 @@ _Static_assert(CLUSTER_PACK_MAX == PACK_MAX,
 #define CLUSTER_PLAUS_TEMP_MAX_DC   1500            /* +150.0 degC            */
 #define CLUSTER_PLAUS_TEMP_MIN_DC   (-500)          /*  -50.0 degC            */
 
-/** riseRate_mA_per_s == 0 is REJECTED at parse rather than meaning "frozen":
- *  the step floor would still let it climb at 40 mA/s, which is a surprise,
- *  not a policy.  That floor exists ONLY so a slow rate does not stall on
- *  integer truncation of (rate * dt)/1000. */
-#define CLUSTER_RISE_MIN_MA_PER_S   100u
-#define CLUSTER_RISE_MAX_MA_PER_S   100000u
-#define CLUSTER_RISE_STEP_MIN_MA    10u
-#define CLUSTER_DT_MAX_MS           2000u
-
 /* Exported types -----------------------------------------------------------*/
 
 /* ==========================================================================
- * Enums — APPEND-ONLY, NEVER RENUMBERED.  Nine Cluster_*Name() accessors
+ * Enums.  Eight Cluster_*Name() accessors
  * follow, each a switch ((eType)v) — CAST TO THE ENUM TYPE, because
  * -Werror=switch does nothing on a uint8_t — fallback AFTER the switch, never
  * a `default:`.  All nine live in cluster_cfg.c, which joins
@@ -204,64 +194,38 @@ typedef enum {
     cluWhy_last
 } eClusterMemberWhy;
 
-/** WHERE THE LOOP IS.  cluLimitWhy_ answers the different question "why is the
- *  number this"; an operator asks them separately. */
+/** WHICH OF THE TWO RULES PRODUCED THE TARGET.  cluLimitWhy_ answers the
+ *  different question "why is the EMITTED number this"; an operator asks them
+ *  separately, and the slew or the ceiling can override a target either rule
+ *  produced. */
 typedef enum {
     cluLoop_idle = 0,           /* no participant in this direction           */
-    cluLoop_searching,          /* at the start value; NO binding sample yet  */
-    cluLoop_holding,            /* has a learned value; the bus is not driving
-                                   the limit.  ON A TYPICAL SITE THIS IS THE
-                                   COMMON STATE and it is correct             */
-    cluLoop_converged,
+    cluLoop_measured,           /* from live current — the normal state       */
+    cluLoop_predicted,          /* the bus is too quiet to measure; the
+                                   geometric fallback ran instead             */
     cluLoop_last
 } eClusterLoopState;
 
-/** WHY THE SEARCH RESTARTED. */
-typedef enum {
-    cluRestart_none = 0,
-    cluRestart_init,
-    cluRestart_configAdopted,   /* slots re-point at different packs, so EVERY
-                                   slot-indexed value is meaningless          */
-    cluRestart_limitFell,       /* past limitDeadband_pm.  An INCREASE does
-                                   not restart: safe at the smaller limit is
-                                   safe at the larger one                     */
-    cluRestart_memberJoined,
-    cluRestart_memberLeft,      /* the pack is still bolted to the busbar.
-                                   Losing sight of it must NEVER license a
-                                   higher limit                               */
-    cluRestart_holdExpired,
-    cluRestart_permitted,       /* forbidden -> allowed.  Without this the
-                                   emitted limit steps 0 -> learned in one
-                                   tick, a current step into real cells       */
-    cluRestart_last
-} eClusterRestart;
-
 /** The values PARTITION: exactly one applies, reported in the order
- *  forbidden > noParticipant > ceiling > slew > binding > notBinding > start.
+ *  forbidden > noParticipant > ceiling > predicted > measured.
  *  DECLARATION ORDER IS STORAGE ORDER and is deliberately not the priority
  *  order; neither may be inferred from the other. */
 typedef enum {
     cluLimitWhy_noParticipant = 0,
     cluLimitWhy_forbidden,          /* 0 mA; the direction is not allowed     */
-    cluLimitWhy_start,              /* at the safe OPENING value min(L_i).
-                                       NOT the fixed point's lower bound —
-                                       two different numbers, and conflating
-                                       them is how one gets coded as the
-                                       other.  See design §3.3               */
-    cluLimitWhy_notBinding,         /* holding; the bus is not driving it     */
-    cluLimitWhy_binding,            /* a binding measurement set it this tick */
-    cluLimitWhy_slew,
+    cluLimitWhy_measured,           /* margin * |S| / max(I_i/L_i)            */
+    cluLimitWhy_predicted,          /* below lowLoadFloor_pm; the geometric
+                                       sum over participants ran instead      */
     cluLimitWhy_ceiling,
     cluLimitWhy_last
 } eClusterLimitWhy;
 
-/* THE NON-ZERO START CLOSES AN ABSORBING STATE.  loop' = published * t /
- * loadMax is multiplicative, so once the loop reaches 0 it can never leave:
- * the gate |S| >= published * bindFrac/1000 is trivially satisfied at 0 and
- * the update computes 0 * anything = 0 forever.  Hence chargeLoop_mA is NEVER
- * written to zero: the noParticipant and forbidden paths zero only the EMITTED
- * value, and a pack returning or a direction being re-permitted raises a
- * restart that re-seeds the loop. */
+/* THERE IS NO ABSORBING STATE TO CLOSE.  Revision 2's loop was recursive —
+ * loop' = published * t / loadMax — so a zero could never be left and the
+ * whole restart machinery existed to re-seed it.  Revision 3's target is a
+ * PURE FUNCTION of this tick's currents and limits: it carries nothing, so a
+ * quiet tick, a forbidden direction or a pack leaving costs nothing that the
+ * next tick does not simply recompute. */
 
 typedef enum {
     cluField_voltage            = 1u << 0,
@@ -295,25 +259,24 @@ typedef enum {
 } eClusterAlarm;
 
 typedef enum {
-    cluMemFlag_bindingCharge    = 1u << 0,  /* it set loadMax this tick       */
+    cluMemFlag_bindingCharge    = 1u << 0,  /* it set loadMax, so IT is the
+                                               pack the limit is scaled from  */
     cluMemFlag_bindingDischarge = 1u << 1,
     cluMemFlag_socOutlier       = 1u << 2,
     cluMemFlag_shareOutlier     = 1u << 3,
     cluMemFlag_circulating      = 1u << 4,
-    cluMemFlag_limitFell        = 1u << 5,
-    cluMemFlag_joined           = 1u << 6,
-    cluMemFlag_left             = 1u << 7,
-    cluMemFlag_implausible      = 1u << 8,
-    cluMemFlag_limitSaturated   = 1u << 9,  /* L_i == 0 with |I_i| > 0, so
+    cluMemFlag_implausible      = 1u << 5,
+    cluMemFlag_limitSaturated   = 1u << 6,  /* L_i == 0 with |I_i| > 0, so
                                                load_pm saturated at 1000
                                                rather than dividing           */
 } eClusterMemberFlag;
 
 /* ==========================================================================
- * The published snapshot — 112 bytes.
- * THE FOUR-NUMBER CAUSAL CHAIN per direction — loop -> derated -> slewed ->
+ * The published snapshot — 104 bytes.
+ * THE THREE-NUMBER CAUSAL CHAIN per direction — target -> derated ->
  * published — is carried in full rather than derived, so an adapter renders
- * "why is the limit this" with NO arithmetic of its own.
+ * "why is the limit this" with NO arithmetic of its own.  It was four until
+ * the rate limiter was deleted (§14.8).
  * ========================================================================== */
 
 typedef struct {
@@ -332,14 +295,12 @@ typedef struct {
                                        that refuses to charge                 */
     uint32_t dischargeVoltLimit_mV;
 
-    uint32_t chargeLoop_mA;         /* what the loop holds, pre-derate        */
-    uint32_t dischargeLoop_mA;
-    uint32_t chargeDerated_mA;
+    uint32_t chargeTarget_mA;       /* what the rule produced, pre-derate     */
+    uint32_t dischargeTarget_mA;
+    uint32_t chargeDerated_mA;      /* published == derated UNLESS forbidden,
+                                       when published is 0 and derated still
+                                       shows what the rule would have said    */
     uint32_t dischargeDerated_mA;
-    uint32_t chargeSlewed_mA;       /* published == slewed UNLESS forbidden,
-                                       when published is 0 and slewed still
-                                       shows what the loop would have said    */
-    uint32_t dischargeSlewed_mA;
 
     uint32_t alarms;                /* ePackAlarm, OR over ONLINE packs — the
                                        PACK MODULE'S vocabulary, republished
@@ -352,7 +313,8 @@ typedef struct {
     uint16_t sohConf_pm;
     uint16_t voltSpread_mV;
     uint16_t fields;                /* eClusterField                          */
-    uint16_t chargeLoadMax_pm;      /* THE LOOP'S INPUT, exposed              */
+    uint16_t chargeLoadMax_pm;      /* max(I_i/L_i) — THE RULE'S DIVISOR, and
+                                       what lowLoadFloor_pm is compared to    */
     uint16_t dischargeLoadMax_pm;
     int16_t  tempMax_dC;
     int16_t  tempMin_dC;
@@ -369,8 +331,7 @@ typedef struct {
     uint8_t  dischargeLoopState;
     uint8_t  chargeBindingIdx;      /* member SLOT, or CLUSTER_PACK_NONE      */
     uint8_t  dischargeBindingIdx;
-    uint8_t  lastRestart;           /* eClusterRestart                        */
-    uint8_t  rsvd[3];
+    uint8_t  rsvd[4];
 } sClusterOutput;
 
 /* ==========================================================================
@@ -391,7 +352,8 @@ typedef struct {
     uint16_t share_pm;              /* |I_i| / |S|.  AN OBSERVATION ONLY — the
                                        estimators are gone, the requirement to
                                        REPORT share divergence is not         */
-    uint16_t load_pm;               /* the loop's whole input                 */
+    uint16_t load_pm;               /* |I_i| / L_i.  The largest of these over
+                                       the bus is the rule's whole divisor    */
     uint16_t soc_pm;
     uint8_t  packIdx;
     uint8_t  state;                 /* eClusterMemberState                    */
@@ -409,11 +371,10 @@ typedef struct {
     uint32_t packCfgSkipCnt;        /* ticks discarded because the pack table
                                        was rebuilt under the member walk      */
     uint32_t noParticipantChgCnt, noParticipantDsgCnt;
-    uint32_t bindingSampleChgCnt;   /* ticks the loop actually learned from.
-                                       EXPECT A SMALL FRACTION                */
-    uint32_t bindingSampleDsgCnt;
-    uint32_t restartChgCnt, restartDsgCnt;
-    uint32_t stepClampedCnt, slewLimitedCnt;
+    uint32_t predictedChgCnt;       /* ticks the bus was too quiet to measure
+                                       and the geometric fallback ran.  ON A
+                                       TYPICAL SITE THIS IS THE MAJORITY      */
+    uint32_t predictedDsgCnt;
     uint32_t forbiddenChgCnt, forbiddenDsgCnt;
     uint32_t voltLimitMissingCnt;
     uint32_t divergeSocCnt, divergeShareCnt;
@@ -523,12 +484,10 @@ const char *Cluster_CondName(uint8_t cond);
 const char *Cluster_MemberStateName(uint8_t state);
 const char *Cluster_MemberWhyName(uint8_t why);
 const char *Cluster_LoopStateName(uint8_t state);
-const char *Cluster_RestartName(uint8_t reason);
 const char *Cluster_LimitWhyName(uint8_t why);
 const char *Cluster_AlarmName(uint32_t bit);
 const char *Cluster_MemberFlagName(uint32_t bit);
 const char *Cluster_FieldName(uint32_t bit);
-void        Cluster_LogStatus(void);
 
 #ifdef __cplusplus
 }

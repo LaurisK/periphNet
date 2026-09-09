@@ -73,7 +73,6 @@ static sClusterCfgRecord  s_cfgRec;
 static sClusterPackIn     s_in[CLUSTER_PACK_MAX];
 static sClusterResult     s_res[2];
 static sClusterScratch    s_scratch;
-static sClusterCalcState  s_calc;
 static sPackState         s_packScratch;
 static sClusterStats      s_stats;
 
@@ -117,7 +116,6 @@ static void PackConfigChanged(const sPackEvent *ev, void *ctx)
 static void AdoptStaged(void)
 {
     s_cfg = s_cfgRec.cfg;
-    ClusterCalc_Reset(&s_calc, (uint8_t)cluRestart_configAdopted);
     s_provisioned = (uint8_t)((s_cfg.count > 0u) ? 1u : 0u);
     /* THE PENDING FLAG IS THE OWNERSHIP TOKEN and is cleared LAST: until it
      * is, Cluster_ConfigApply refuses with cluErr_busy and s_cfgRec belongs
@@ -271,7 +269,6 @@ int Cluster_Init(void)
     }
     s_stats.provisioned = s_provisioned;
 
-    ClusterCalc_Reset(&s_calc, (uint8_t)cluRestart_init);
     /* THE GENERATION STAYS AT ZERO so every accessor answers cluErr_notReady
      * until a real publish has happened.  A frame source must never transmit
      * a snapshot that is merely zeroed .bss. */
@@ -323,7 +320,7 @@ void Cluster_Tick(uint32_t now_ms)
         const uint8_t   idle = (uint8_t)(s_active ^ 1u);
         sClusterResult *r    = &s_res[idle];
 
-        if (ClusterCalc_Solve(s_in, n, &s_cfg.tune, &s_calc, &s_scratch,
+        if (ClusterCalc_Solve(s_in, n, &s_cfg.tune, &s_scratch,
                               now_ms, r) != cluErr_ok) {
             return;
         }
@@ -342,25 +339,11 @@ void Cluster_Tick(uint32_t now_ms)
         if (r->pub.dischargeWhy == (uint8_t)cluLimitWhy_noParticipant) {
             s_stats.noParticipantDsgCnt++;
         }
-        if ((r->ev & (uint32_t)cluCalcEv_bindingChg) != 0u) {
-            s_stats.bindingSampleChgCnt++;
+        if ((r->ev & (uint32_t)cluCalcEv_predictedChg) != 0u) {
+            s_stats.predictedChgCnt++;
         }
-        if ((r->ev & (uint32_t)cluCalcEv_bindingDsg) != 0u) {
-            s_stats.bindingSampleDsgCnt++;
-        }
-        if ((r->ev & (uint32_t)cluCalcEv_restartChg) != 0u) {
-            s_stats.restartChgCnt++;
-        }
-        if ((r->ev & (uint32_t)cluCalcEv_restartDsg) != 0u) {
-            s_stats.restartDsgCnt++;
-        }
-        if ((r->ev & ((uint32_t)cluCalcEv_stepClampedChg |
-                      (uint32_t)cluCalcEv_stepClampedDsg)) != 0u) {
-            s_stats.stepClampedCnt++;
-        }
-        if ((r->ev & ((uint32_t)cluCalcEv_slewChg |
-                      (uint32_t)cluCalcEv_slewDsg)) != 0u) {
-            s_stats.slewLimitedCnt++;
+        if ((r->ev & (uint32_t)cluCalcEv_predictedDsg) != 0u) {
+            s_stats.predictedDsgCnt++;
         }
         if (r->pub.chargeAllowed == 0u)    { s_stats.forbiddenChgCnt++; }
         if (r->pub.dischargeAllowed == 0u) { s_stats.forbiddenDsgCnt++; }
@@ -505,7 +488,6 @@ int Cluster_ConfigErase(void)
     /* Every slot-indexed value now refers to nothing.  The next tick
      * publishes zero limits, which is exactly what an unprovisioned board
      * should say. */
-    ClusterCalc_Reset(&s_calc, (uint8_t)cluRestart_configAdopted);
     return cluErr_ok;
 }
 
@@ -518,24 +500,3 @@ int Cluster_Stats(sClusterStats *out)
     return cluErr_ok;
 }
 
-void Cluster_LogStatus(void)
-{
-    sClusterOutput o;
-
-    if (CopySnapshot(&o, NULL, 0u, NULL) != cluErr_ok) {
-        TRice("[Clu] no snapshot yet (members %u, provisioned %u)\n",
-              (unsigned)s_cfg.count, (unsigned)s_provisioned);
-        return;
-    }
-    TRice("[Clu] %s %u/%u online, %u mV, %d mA, soc %u pm\n",
-          Cluster_CondName(o.cond), (unsigned)o.onlineCnt,
-          (unsigned)o.memberCnt, (unsigned)o.voltage_mV,
-          (int)o.current_mA, (unsigned)o.soc_pm);
-    TRice("[Clu] chg %u mA (%s/%s) dsg %u mA (%s/%s)\n",
-          (unsigned)o.chargeLimit_mA,
-          Cluster_LoopStateName(o.chargeLoopState),
-          Cluster_LimitWhyName(o.chargeWhy),
-          (unsigned)o.dischargeLimit_mA,
-          Cluster_LoopStateName(o.dischargeLoopState),
-          Cluster_LimitWhyName(o.dischargeWhy));
-}

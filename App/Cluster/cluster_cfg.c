@@ -16,18 +16,16 @@
  * so a stale config fails by name instead of losing a setting silently.
  * pack_cfg.c is the precedent, down to the rd_* wrappers.
  *
- * TWO PARSE RULES ARE LOAD-BEARING ARITHMETIC, NOT VALIDATION HYGIENE, and
- * host tests assert them as such:
+ * NO PARSE RULE IS LOAD-BEARING ARITHMETIC ANY MORE, and that is worth saying
+ * because two used to be.  `bindFrac_pm >= loadTarget_pm` went with the gate it
+ * guarded; `riseRate_mA_per_s <= CLUSTER_RISE_MAX_MA_PER_S` bounded the rate
+ * limiter's `rate * dt` and went with the rate limiter (§14.8).  Every field is
+ * now bounded on its own account, and the limit's safety property
+ * (`target <= sum(L_i)`) belongs to the arithmetic rather than to any setting.
  *
- *   bindFrac_pm >= loadTarget_pm.  The gate's ceiling has the closed form
- *   (loadTarget_pm / bindFrac_pm) x min(L_i/f_i).  An operator setting
- *   bindFrac_pm = 500 to chase binding samples — the natural response to
- *   `bindingSampleChg: 0` in the status — would move that ceiling to 1.8x
- *   every pack's own limit, with no alarm and every other test still green.
- *
- *   riseRate_mA_per_s <= CLUSTER_RISE_MAX_MA_PER_S.  The slew computes
- *   rate * dt in uint32 with dt clamped at 2000 ms; 1e5 x 2000 = 2e8 is safe
- *   and an unbounded rate is not.
+ * THE RETIRED KEYS ARE STILL REFUSED BY NAME, not ignored — unknown keys are
+ * rejected, so a stored document naming one fails loudly instead of silently
+ * losing the setting it thought it was making.
  */
 
 /* Includes -----------------------------------------------------------------*/
@@ -216,31 +214,14 @@ static int parse_tune(sCfgReader *r, sClusterTune *t, sClusterCfgResult *res)
             return 0;
         }
 
-        if (strcmp(key, "riseRate_mA_per_s") == 0) {
-            if (((uint32_t)v < CLUSTER_RISE_MIN_MA_PER_S) ||
-                ((uint32_t)v > CLUSTER_RISE_MAX_MA_PER_S)) {
-                /* ZERO IS REJECTED rather than meaning "frozen": the step
-                 * floor would still let it climb at 40 mA/s, which is a
-                 * surprise, not a policy.  The upper bound is what keeps
-                 * rate * dt inside uint32. */
-                SetFailure(res, -1, key, "outside the permitted rate range");
-                return 0;
-            }
-            t->riseRate_mA_per_s = (uint32_t)v;
-        } else if (strcmp(key, "limitMax_mA") == 0) {
+        if (strcmp(key, "limitMax_mA") == 0) {
             if (((uint32_t)v == 0u) || ((uint32_t)v > CLUSTER_LIMIT_MAX_MA)) {
-                /* LOAD-BEARING ARITHMETIC: published x loadTarget_pm must stay
-                 * inside uint32, which it does below 4 772 185 mA at 900 pm. */
+                /* A configured ceiling on the emitted value.  The limit
+                 * arithmetic is uint64 throughout and does not need it. */
                 SetFailure(res, -1, key, "must be in (0, 1000000] mA");
                 return 0;
             }
             t->limitMax_mA = (uint32_t)v;
-        } else if (strcmp(key, "holdMaxAge_ms") == 0) {
-            if ((uint32_t)v == 0u) {
-                SetFailure(res, -1, key, "must be positive");
-                return 0;
-            }
-            t->holdMaxAge_ms = (uint32_t)v;
         } else if (strcmp(key, "voltDiverge_mV") == 0) {
             t->voltDiverge_mV = (uint32_t)v;
         } else if (strcmp(key, "elecMaxAge_ms") == 0) {
@@ -249,30 +230,31 @@ static int parse_tune(sCfgReader *r, sClusterTune *t, sClusterCfgResult *res)
                 return 0;
             }
             t->elecMaxAge_ms = (uint16_t)v;
-        } else if (strcmp(key, "loadTarget_pm") == 0) {
-            if (((uint32_t)v == 0u) || ((uint32_t)v >= 1000u)) {
-                SetFailure(res, -1, key, "must be in (0, 1000) per-mille");
-                return 0;
-            }
-            t->loadTarget_pm = (uint16_t)v;
-        } else if (strcmp(key, "bindFrac_pm") == 0) {
+        } else if (strcmp(key, "safetyMargin_pm") == 0) {
+            /* 1000 IS PERMITTED AND MEANS "NO MARGIN", which is a legitimate
+             * (if brave) operator choice: the bound target <= sum(L_i) holds
+             * at 1000 exactly as it does at 900. */
             if (((uint32_t)v == 0u) || ((uint32_t)v > 1000u)) {
                 SetFailure(res, -1, key, "must be in (0, 1000] per-mille");
                 return 0;
             }
-            t->bindFrac_pm = (uint16_t)v;
-        } else if (strcmp(key, "limitDeadband_pm") == 0) {
-            if ((uint32_t)v >= CLUSTER_DEADBAND_MAX_PM) {
+            t->safetyMargin_pm = (uint16_t)v;
+        } else if (strcmp(key, "lowLoadFloor_pm") == 0) {
+            /* ZERO IS PERMITTED and means "always measure".  It is not
+             * dangerous — loadMax_pm > 0 is checked separately, so a bus with
+             * nothing flowing still predicts — but it does mean trusting a
+             * share ratio taken at any current at all. */
+            if ((uint32_t)v >= CLUSTER_LOW_LOAD_FLOOR_MAX_PM) {
                 SetFailure(res, -1, key, "must be below 500 per-mille");
                 return 0;
             }
-            t->limitDeadband_pm = (uint16_t)v;
-        } else if (strcmp(key, "convergeTol_pm") == 0) {
-            if ((uint32_t)v > 1000u) {
-                SetFailure(res, -1, key, "must be at most 1000 per-mille");
+            t->lowLoadFloor_pm = (uint16_t)v;
+        } else if (strcmp(key, "predictDecay_pm") == 0) {
+            if (((uint32_t)v == 0u) || ((uint32_t)v > 1000u)) {
+                SetFailure(res, -1, key, "must be in (0, 1000] per-mille");
                 return 0;
             }
-            t->convergeTol_pm = (uint16_t)v;
+            t->predictDecay_pm = (uint16_t)v;
         } else if (strcmp(key, "chargeDerate_pm") == 0) {
             if (((uint32_t)v == 0u) || ((uint32_t)v > 1000u)) {
                 SetFailure(res, -1, key, "must be in (0, 1000] per-mille");
@@ -324,15 +306,12 @@ void ClusterCfg_Defaults(sClusterTune *tune)
         return;
     }
     (void)memset(tune, 0, sizeof(*tune));
-    tune->riseRate_mA_per_s  = CLUSTER_DFLT_RISE_MA_PER_S;
     tune->limitMax_mA        = CLUSTER_DFLT_LIMIT_MAX_MA;
-    tune->holdMaxAge_ms      = CLUSTER_DFLT_HOLD_MAX_AGE_MS;
     tune->voltDiverge_mV     = CLUSTER_DFLT_VOLT_DIVERGE_MV;
     tune->elecMaxAge_ms      = CLUSTER_DFLT_ELEC_MAX_AGE_MS;
-    tune->loadTarget_pm      = CLUSTER_DFLT_LOAD_TARGET_PM;
-    tune->bindFrac_pm        = CLUSTER_DFLT_BIND_FRAC_PM;
-    tune->limitDeadband_pm   = CLUSTER_DFLT_LIMIT_DEADBAND_PM;
-    tune->convergeTol_pm     = CLUSTER_DFLT_CONVERGE_TOL_PM;
+    tune->safetyMargin_pm    = CLUSTER_DFLT_SAFETY_MARGIN_PM;
+    tune->lowLoadFloor_pm    = CLUSTER_DFLT_LOW_LOAD_FLOOR_PM;
+    tune->predictDecay_pm    = CLUSTER_DFLT_PREDICT_DECAY_PM;
     tune->chargeDerate_pm    = CLUSTER_DFLT_CHARGE_DERATE_PM;
     tune->dischargeDerate_pm = CLUSTER_DFLT_DISCHARGE_DERATE_PM;
     tune->socDiverge_pm      = CLUSTER_DFLT_SOC_DIVERGE_PM;
@@ -479,16 +458,9 @@ int ClusterCfg_Parse(fClusterByteSource src, void *srcCtx, sClusterCfg *out,
         return cluErr_badArg;
     }
 
-    /* THE GATE'S CEILING IS (loadTarget_pm / bindFrac_pm) x min(L_i/f_i).
-     * Checked HERE and not in parse_tune, because the two keys may arrive in
-     * either order and a pairwise rule cannot be enforced by whichever
-     * happens to be read second. */
-    if (out->tune.bindFrac_pm < out->tune.loadTarget_pm) {
-        SetFailure(res, -1, "bindFrac_pm",
-                   "must be at least loadTarget_pm");
-        return cluErr_badArg;
-    }
-
+    /* NO CROSS-FIELD RULE SURVIVES REVISION 3.  Every tune field is bounded
+     * on its own, and the limit's safety property (target <= sum(L_i)) is a
+     * property of the arithmetic rather than of any pair of settings. */
     if (out->version == 0u) {
         out->version = CLUSTER_CFG_VERSION;
     }
@@ -553,22 +525,19 @@ int ClusterCfg_Serialize(const sClusterCfg *cfg, fClusterByteSink sink,
 
     if (emit(sink, ctx,
              "],\"tune\":{"
-             "\"riseRate_mA_per_s\":%lu,\"limitMax_mA\":%lu,"
-             "\"holdMaxAge_ms\":%lu,\"voltDiverge_mV\":%lu,"
-             "\"elecMaxAge_ms\":%u,\"loadTarget_pm\":%u,"
-             "\"bindFrac_pm\":%u,\"limitDeadband_pm\":%u,"
-             "\"convergeTol_pm\":%u,\"chargeDerate_pm\":%u,"
+             "\"limitMax_mA\":%lu,"
+             "\"voltDiverge_mV\":%lu,"
+             "\"elecMaxAge_ms\":%u,\"safetyMargin_pm\":%u,"
+             "\"lowLoadFloor_pm\":%u,\"predictDecay_pm\":%u,"
+             "\"chargeDerate_pm\":%u,"
              "\"dischargeDerate_pm\":%u,\"socDiverge_pm\":%u,"
              "\"shareDiverge_pm\":%u}}",
-             (unsigned long)cfg->tune.riseRate_mA_per_s,
              (unsigned long)cfg->tune.limitMax_mA,
-             (unsigned long)cfg->tune.holdMaxAge_ms,
              (unsigned long)cfg->tune.voltDiverge_mV,
              (unsigned)cfg->tune.elecMaxAge_ms,
-             (unsigned)cfg->tune.loadTarget_pm,
-             (unsigned)cfg->tune.bindFrac_pm,
-             (unsigned)cfg->tune.limitDeadband_pm,
-             (unsigned)cfg->tune.convergeTol_pm,
+             (unsigned)cfg->tune.safetyMargin_pm,
+             (unsigned)cfg->tune.lowLoadFloor_pm,
+             (unsigned)cfg->tune.predictDecay_pm,
              (unsigned)cfg->tune.chargeDerate_pm,
              (unsigned)cfg->tune.dischargeDerate_pm,
              (unsigned)cfg->tune.socDiverge_pm,
@@ -578,7 +547,7 @@ int ClusterCfg_Serialize(const sClusterCfg *cfg, fClusterByteSink sink,
     return cluErr_ok;
 }
 
-/* --- the nine enum-name accessors ---------------------------------------
+/* --- the eight enum-name accessors ---------------------------------------
  *
  * WRITTEN AS A SWITCH WITH THE FALLBACK *AFTER* IT, never in a `default:` —
  * a `default:` satisfies -Wswitch and so defeats the whole mechanism.  Each
@@ -647,26 +616,9 @@ const char *Cluster_LoopStateName(uint8_t state)
 {
     switch ((eClusterLoopState)state) {
     case cluLoop_idle:      return "idle";
-    case cluLoop_searching: return "searching";
-    case cluLoop_holding:   return "holding";
-    case cluLoop_converged: return "converged";
+    case cluLoop_measured:  return "measured";
+    case cluLoop_predicted: return "predicted";
     case cluLoop_last:      break;
-    }
-    return "?";
-}
-
-const char *Cluster_RestartName(uint8_t reason)
-{
-    switch ((eClusterRestart)reason) {
-    case cluRestart_none:          return "none";
-    case cluRestart_init:          return "init";
-    case cluRestart_configAdopted: return "configAdopted";
-    case cluRestart_limitFell:     return "limitFell";
-    case cluRestart_memberJoined:  return "memberJoined";
-    case cluRestart_memberLeft:    return "memberLeft";
-    case cluRestart_holdExpired:   return "holdExpired";
-    case cluRestart_permitted:     return "permitted";
-    case cluRestart_last:          break;
     }
     return "?";
 }
@@ -676,10 +628,8 @@ const char *Cluster_LimitWhyName(uint8_t why)
     switch ((eClusterLimitWhy)why) {
     case cluLimitWhy_noParticipant: return "noParticipant";
     case cluLimitWhy_forbidden:     return "forbidden";
-    case cluLimitWhy_start:         return "start";
-    case cluLimitWhy_notBinding:    return "notBinding";
-    case cluLimitWhy_binding:       return "binding";
-    case cluLimitWhy_slew:          return "slew";
+    case cluLimitWhy_measured:      return "measured";
+    case cluLimitWhy_predicted:     return "predicted";
     case cluLimitWhy_ceiling:       return "ceiling";
     case cluLimitWhy_last:          break;
     }
@@ -714,9 +664,6 @@ const char *Cluster_MemberFlagName(uint32_t bit)
     case cluMemFlag_socOutlier:       return "socOutlier";
     case cluMemFlag_shareOutlier:     return "shareOutlier";
     case cluMemFlag_circulating:      return "circulating";
-    case cluMemFlag_limitFell:        return "limitFell";
-    case cluMemFlag_joined:           return "joined";
-    case cluMemFlag_left:             return "left";
     case cluMemFlag_implausible:      return "implausible";
     case cluMemFlag_limitSaturated:   return "limitSaturated";
     }

@@ -2888,20 +2888,21 @@ static size_t cluster_json_bits(char *js, size_t cap, size_t pos,
 /** One direction of the four-number causal chain, so an adapter renders "why
  *  is the limit this" with no arithmetic of its own. */
 static size_t cluster_json_dir(char *js, size_t cap, size_t pos,
-                               const char *label, uint32_t loop_mA,
-                               uint32_t derated_mA, uint32_t slewed_mA,
+                               const char *label, uint32_t target_mA,
+                               uint32_t derated_mA,
                                uint32_t published_mA, uint16_t loadMax_pm,
                                uint8_t state, uint8_t why, uint8_t bindingIdx)
 {
     pos = Json_Cat(js, cap, pos,
         "\"%s\":{\"state\":\"%s\",\"loadMax_pm\":%u,"
-        "\"loop_mA\":%u,\"derated_mA\":%u,\"slewed_mA\":%u,"
+        "\"target_mA\":%u,\"derated_mA\":%u,"
         "\"published_mA\":%u,\"why\":\"%s\",\"bindingPack\":",
         label, Cluster_LoopStateName(state), (unsigned)loadMax_pm,
-        (unsigned)loop_mA, (unsigned)derated_mA, (unsigned)slewed_mA,
+        (unsigned)target_mA, (unsigned)derated_mA,
         (unsigned)published_mA, Cluster_LimitWhyName(why));
-    /* null, not 255: at the start value NOBODY is binding, and a sentinel
-     * index rendered as a number invites a reader to look up slot 255. */
+    /* null, not 255: while the limit is PREDICTED nobody is binding it, and
+     * a sentinel index rendered as a number invites a reader to look up slot
+     * 255. */
     if (bindingIdx == CLUSTER_PACK_NONE) {
         pos = Json_Cat(js, cap, pos, "null}");
     } else {
@@ -3000,17 +3001,16 @@ static void handle_cluster_status(struct netconn *conn, int withPacks)
                             (uint32_t)(~o.fields) &
                             ((uint32_t)cluField_switches * 2u - 1u),
                             (uint32_t)cluField_switches, Cluster_FieldName);
-    pos = Json_Cat(js, bodyCap, pos, "},\"loop\":{\"lastRestart\":\"%s\",",
-                   Cluster_RestartName(o.lastRestart));
+    pos = Json_Cat(js, bodyCap, pos, "},\"limit\":{");
     pos = cluster_json_dir(js, bodyCap, pos, "charge",
-                           o.chargeLoop_mA, o.chargeDerated_mA,
-                           o.chargeSlewed_mA, o.chargeLimit_mA,
+                           o.chargeTarget_mA, o.chargeDerated_mA,
+                           o.chargeLimit_mA,
                            o.chargeLoadMax_pm, o.chargeLoopState,
                            o.chargeWhy, o.chargeBindingIdx);
     pos = Json_Cat(js, bodyCap, pos, ",");
     pos = cluster_json_dir(js, bodyCap, pos, "discharge",
-                           o.dischargeLoop_mA, o.dischargeDerated_mA,
-                           o.dischargeSlewed_mA, o.dischargeLimit_mA,
+                           o.dischargeTarget_mA, o.dischargeDerated_mA,
+                           o.dischargeLimit_mA,
                            o.dischargeLoadMax_pm, o.dischargeLoopState,
                            o.dischargeWhy, o.dischargeBindingIdx);
     pos = Json_Cat(js, bodyCap, pos, "},\"packs\":[");
@@ -3067,18 +3067,16 @@ static void handle_cluster_status(struct netconn *conn, int withPacks)
 
     pos = Json_Cat(js, CLUSTER_JSON_CAP, pos,
                    truncated ? "],\"truncated\":true," : "],");
-    /* bindingSample* IS EXPECTED TO BE A SMALL FRACTION OF ticks, and on a
-     * quiet site zero: the loop only learns while something is actually asking
-     * the battery for current.  It is reported so that is visible rather than
-     * mistaken for a fault -- and so nobody "fixes" it by lowering
-     * bindFrac_pm, which the parser refuses for exactly that reason. */
+    /* predicted* IS EXPECTED TO BE THE MAJORITY ON A QUIET SITE, and that is
+     * the normal state rather than a fault: below lowLoadFloor_pm there is no
+     * current worth dividing by, so the geometric prediction runs instead of
+     * the measurement.  It is reported so an operator can see WHICH rule
+     * produced the number they are looking at. */
     (void)Json_Cat(js, CLUSTER_JSON_CAP, pos,
         "\"stats\":{\"ticks\":%u,\"publishes\":%u,\"packReadFail\":%u,"
         "\"nameUnresolved\":%u,\"packCfgSkip\":%u,"
         "\"noParticipantChg\":%u,\"noParticipantDsg\":%u,"
-        "\"bindingSampleChg\":%u,\"bindingSampleDsg\":%u,"
-        "\"restartChg\":%u,\"restartDsg\":%u,"
-        "\"stepClamped\":%u,\"slewLimited\":%u,"
+        "\"predictedChg\":%u,\"predictedDsg\":%u,"
         "\"forbiddenChg\":%u,\"forbiddenDsg\":%u,\"voltLimitMissing\":%u,"
         "\"divergeSoc\":%u,\"divergeShare\":%u,\"sanitised\":%u,"
         "\"getBusy\":%u,\"getNotReady\":%u,\"cfgPending\":%s}}",
@@ -3086,9 +3084,7 @@ static void handle_cluster_status(struct netconn *conn, int withPacks)
         (unsigned)st.packReadFailCnt, (unsigned)st.nameUnresolvedCnt,
         (unsigned)st.packCfgSkipCnt,
         (unsigned)st.noParticipantChgCnt, (unsigned)st.noParticipantDsgCnt,
-        (unsigned)st.bindingSampleChgCnt, (unsigned)st.bindingSampleDsgCnt,
-        (unsigned)st.restartChgCnt, (unsigned)st.restartDsgCnt,
-        (unsigned)st.stepClampedCnt, (unsigned)st.slewLimitedCnt,
+        (unsigned)st.predictedChgCnt, (unsigned)st.predictedDsgCnt,
         (unsigned)st.forbiddenChgCnt, (unsigned)st.forbiddenDsgCnt,
         (unsigned)st.voltLimitMissingCnt,
         (unsigned)st.divergeSocCnt, (unsigned)st.divergeShareCnt,
