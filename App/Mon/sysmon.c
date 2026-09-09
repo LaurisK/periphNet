@@ -78,6 +78,14 @@ static const sExternalTask s_externalTasks[] = {
     /* LWIP/Target/ethernetif.c: INTERFACE_THREAD_STACK_SIZE, local to that
      * CubeMX-owned file and therefore not reachable from here. */
     { "EthIf",        (uint16_t)(1024u / sizeof(StackType_t))              },
+    /* LWIP/App/lwip.c starts a SECOND thread from the same constant -- the
+     * PHY link-state poller.  It was missing here, so it reported a
+     * configured depth of 0 and its stack percentage was meaningless (the
+     * high-water mark itself was always right; there was nothing to divide
+     * it by).  Getting the depth wrong costs a wrong percentage and nothing
+     * else, which is exactly why leaving it absent was cheap enough to
+     * survive unnoticed. */
+    { "EthLink",      (uint16_t)(1024u / sizeof(StackType_t))              },
 };
 
 /* --------------------------------------------------------------------------

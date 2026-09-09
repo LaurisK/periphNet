@@ -1120,7 +1120,18 @@ static void handle_crash_delete(struct netconn *conn)
  * costs nothing when nobody is asking, which is the normal case.
  * -------------------------------------------------------------------------- */
 
-#define SYS_STATUS_BUF_SIZE 3072u
+/* 4096, not 3072.  ONE TASK OBJECT IS ~210 BYTES AND THERE ARE UP TO
+ * SYSMON_MAX_TASKS (16) OF THEM, so 3072 held about eleven and the roll-back
+ * below silently dropped the rest -- with "tasks_total":14 still in the same
+ * reply saying they existed.  The tasks that fell off the end were whichever
+ * FreeRTOS happened to enumerate last, which on this board included
+ * tcpip_thread: the one task carrying the WireGuard ChaCha20-Poly1305 chain,
+ * and so the single most interesting stack figure on a tunnel-only device.
+ * A stack report that omits tasks without saying so is worse than no report,
+ * because it reads as a complete one.  16 * 210 + the ~390-byte summary is
+ * ~3.8 KB; this is a transient pvPortMalloc, so it costs nothing when nobody
+ * is asking. */
+#define SYS_STATUS_BUF_SIZE 4096u
 
 /* Body cap: appends stop here so the closing "]}" -- appended against the
  * full size -- always fits.  See RESP_BODY_CAP. */
@@ -1134,6 +1145,7 @@ static void handle_system_status(struct netconn *conn)
     char           *buf;
     size_t          off;
     uint8_t         n;
+    uint8_t         listed = 0u;
 
     buf = (char *)pvPortMalloc(SYS_STATUS_BUF_SIZE);
     if (buf == NULL) {
@@ -1156,7 +1168,7 @@ static void handle_system_status(struct netconn *conn)
         "\"iwdg\":{\"gap_max_ms\":%lu,\"since_kick_ms\":%lu,"
         "\"timeout_ms\":16400},"
         "\"tasks_total\":%u,\"tasks_stale\":%u,\"stack_warnings\":%u,"
-        "\"stack_warn_words\":%u,"
+        "\"stack_warn_words\":%u,\"tasks_sampled\":%u,"
         "\"tasks\":[",
         (unsigned long)sum.uptime_sec,
         (unsigned)sum.cpuLoad_permille,
@@ -1172,7 +1184,8 @@ static void handle_system_status(struct netconn *conn)
         (unsigned long)sum.iwdgGapMax_ms,
         (unsigned long)sum.iwdgSinceKick_ms,
         (unsigned)sum.taskCnt, (unsigned)sum.staleCnt,
-        (unsigned)sum.stackWarnCnt, (unsigned)SYSMON_STACK_WARN_WORDS);
+        (unsigned)sum.stackWarnCnt, (unsigned)SYSMON_STACK_WARN_WORDS,
+        (unsigned)n);
 
     for (uint8_t i = 0u; i < n; i++) {
         const sSysMonTaskInfo *t = &tasks[i];
@@ -1203,9 +1216,13 @@ static void handle_system_status(struct netconn *conn)
             buf[off] = '\0';
             break;
         }
+        listed++;
     }
 
-    (void)Json_Cat(buf, SYS_STATUS_BUF_SIZE, off, "]}");
+    /* "tasks_listed" vs "tasks_sampled" vs "tasks_total" is how a reader
+     * tells a complete report from a clipped one.  It used to be guesswork. */
+    (void)Json_Cat(buf, SYS_STATUS_BUF_SIZE, off, "],\"tasks_listed\":%u}",
+                   (unsigned)listed);
     send_json(conn, "200 OK", buf);
     vPortFree(buf);
 }

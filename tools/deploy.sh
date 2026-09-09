@@ -80,9 +80,13 @@ api()      { curl -s -m 20 "http://$HOST$1"; }
 api_post() { curl -s -m 30 -X POST "http://$HOST$1"; }
 # Renders JSON booleans as `true`/`false`, not Python's True/False -- the
 # comparisons below read like the JSON an operator sees with curl.
+# Accepts a dotted path ("heap.free") as well as a plain key, so a nested
+# field can be read without a second parser.
 jget()     { python3 -c "import sys,json
 try:
-    v=json.load(sys.stdin).get('$1','')
+    v=json.load(sys.stdin)
+    for k in '$1'.split('.'):
+        v=v[k]
     print('true' if v is True else 'false' if v is False else v)
 except Exception:
     print('')" 2>/dev/null; }
@@ -172,7 +176,12 @@ fi
 if [ "$DO_FW" = 1 ]; then
     step "Health"
     SYS=$(api /api/system/status)
-    say "uptime=$(echo "$SYS" | jget uptime)s cpu=$(echo "$SYS" | jget cpu_load)permille heap_free=$(echo "$SYS" | jget heap_free)"
+    # The field names here are the ones /api/system/status actually emits:
+    # uptime_sec, cpu_load_permille and a NESTED heap.free.  This line asked
+    # for uptime/cpu_load/heap_free and so printed "uptime=s cpu=permille
+    # heap_free=" on every deployment this script has ever done -- the one
+    # health line you read after an install, empty.
+    say "uptime=$(echo "$SYS" | jget uptime_sec)s cpu=$(echo "$SYS" | jget cpu_load_permille)permille heap_free=$(echo "$SYS" | jget heap.free) stale=$(echo "$SYS" | jget tasks_stale)"
     CRASH=$(api /api/crash/latest)
     if [ "$(echo "$CRASH" | jget valid)" = "true" ]; then
         say "WARNING: a crash log is present -- read it before confirming:"
