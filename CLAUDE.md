@@ -20,7 +20,7 @@ the design assessment of moving that wait to a timer + callback:
 
 **Everything Modbus lives in one document: [docs/modbus.md](docs/modbus.md)** — the design (§2), shipped behaviour (§3), config JSON, operator reference, test contract, and known limits. **§3 is what is on the board; §2 is what it is being rebuilt into, and none of §2 is implemented yet** (`App/Modbus/modbus.h` is a proposed header that nothing includes). §2 covers the subscription API, a frame-level port contract with a test port instead of test hooks, devices/types/parameters (baud and port are config, not API), and an event-driven scheduler of per-device timers — no poll loop. §2.16 sequences it: steps 1–7 extract the API with behaviour held constant, 8–14 replace the engine. Still undesigned and listed in §12: dialects beyond an address stride, consumer-side rate policy, and **rate-limiting the gateway seam** — nothing bounds how fast a `:502` client may submit raw transfers, and the failure mode is bus starvation of the JK poll rather than a crash. §4.11 is the gateway seam itself.
 
-**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The AGGREGATION half of that path now exists too**: `App/Cluster/` presents N packs on one DC bus to an inverter as one battery ([docs/design_battery_cluster.md](docs/design_battery_cluster.md), implemented 2026-09-07). **`Pd1.1.51` is confirmed and golden on board 1** and publishing a complete Pylontech `0x351` — the first time this project has been able to. **The two-pack case is still unexercised**: board 1 has one JK, and sodas (the site with two on one bus) was offline. §13 of that doc has the run, including the ramp-in defect only hardware found. Its headline is that **the current limit is MEASURED, not searched** (**revision 3 of the arithmetic, 2026-09-09**, §3.2 and §14 of that doc): `target = safetyMargin_pm x |S| / max(I_i/L_i)` — scale the whole bus up until the hardest-working pack reaches its own limit, then keep 90 %. It is a **pure function of one tick** — no feedback, no gate, no restart triggers, nothing carried but the rate limiter — which deletes the §13.2 ramp-in trap by construction and, far more importantly, **produces an answer on a site that never saturates its battery**. That matters because the old closed loop's gate **never once opened in 11.9 h on board 1** (`bindingSampleChg: 0`); a rule that only works on a saturated bus works on no site we own. Below `lowLoadFloor_pm` (100 ‰ of a pack's own limit) the share ratio is noise and a geometric prediction over the participants' limits runs instead, **smallest first**: `0.9 L(1) + 0.81 L(2) + ...`. **It can never exceed `margin x sum(L_i)`, and that is a proof rather than a clamp.** It costs one assumption (shares hold as the bus scales) and **10 % on a single-pack cluster** — board 1 publishes 108 A where it used to publish 120 A — both accepted deliberately. **`sClusterCalcState` IS GONE ENTIRELY and `ClusterCalc_Solve` is a PURE FUNCTION of `(in, n, tune)`** — 112 bytes of carried state to none. The rate limiter was the last thing it held and R2.5 was **withdrawn 2026-09-09** (§14.8): `0x351` is a **cap**, and the Dyness capture shows the emulated battery stepping its current fields 3.5x between 250 ms frames, so ramping a field the real device steps is a deviation from it rather than a margin over it — and a pack dropping off the bus needs the cap to collapse *with* it, or the survivors take its share and open one after another. The old "fall fast, rise slow" asymmetry existed only to stop the rate limiter causing the cascade it was meant to prevent; with no rate limiter there is no asymmetry to get wrong. `sClusterTune` went from 13 knobs to 9. **`CLUSTER_CFG_VERSION` is 2 and the five retired tune keys are rejected BY NAME, so a stored revision-2 configuration will NOT load and the board comes up `unprovisioned` until it is re-uploaded** (`configs/cluster_zaliakalnis.json`, `configs/cluster_sodas.json`). It fixes the sodas defect where the inverter sees one of two JK packs and is told 660 Ah at 21 % when the bus holds 1254.7 Ah at 47.3 %. **It drives nothing yet, but the reason has changed**: the §7.4 blocker is GONE — `pack_jkbms` now produces `packCap_voltageLimits` from the JK's per-cell `charge_voltage`/`power_off_voltage` and its own `cell_count` (56.0 V / 43.2 V measured on a 16S pack), so `0x351` is fully populated and no longer contractually un-transmittable. What is missing now is only the frame source itself, plus the CAN bus-role defect. **The CAN half of that path also exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN and HA both down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
+**Current phase:** the device is growing from a bridge into an edge controller — poll a JK BMS on the same/second RS485 bus, fuse with inverter data, and present a synthetic Pylontech pack to the inverter over CAN (`App/Can/`). **The AGGREGATION half of that path now exists too**: `App/Cluster/` presents N packs on one DC bus to an inverter as one battery ([docs/design_battery_cluster.md](docs/design_battery_cluster.md), implemented 2026-09-07). **`Pd1.1.51` is confirmed and golden on board 1** and publishing a complete Pylontech `0x351` — the first time this project has been able to. **The two-pack case is still unexercised**: board 1 has one JK, and sodas (the site with two on one bus) was offline. §13 of that doc has the run, including the ramp-in defect only hardware found. Its headline is that **the current limit is MEASURED, not searched** (**revision 3 of the arithmetic, 2026-09-09**, §3.2 and §14 of that doc): `target = safetyMargin_pm x |S| / max(I_i/L_i)` — scale the whole bus up until the hardest-working pack reaches its own limit, then keep 90 %. It is a **pure function of one tick** — no feedback, no gate, no restart triggers, nothing carried but the rate limiter — which deletes the §13.2 ramp-in trap by construction and, far more importantly, **produces an answer on a site that never saturates its battery**. That matters because the old closed loop's gate **never once opened in 11.9 h on board 1** (`bindingSampleChg: 0`); a rule that only works on a saturated bus works on no site we own. Below `lowLoadFloor_pm` (100 ‰ of a pack's own limit) the share ratio is noise and a geometric prediction over the participants' limits runs instead, **smallest first**: `0.9 L(1) + 0.81 L(2) + ...`. **It can never exceed `margin x sum(L_i)`, and that is a proof rather than a clamp.** It costs one assumption (shares hold as the bus scales) and **10 % on a single-pack cluster** — board 1 publishes 108 A where it used to publish 120 A — both accepted deliberately. **`sClusterCalcState` IS GONE ENTIRELY and `ClusterCalc_Solve` is a PURE FUNCTION of `(in, n, tune)`** — 112 bytes of carried state to none. The rate limiter was the last thing it held and R2.5 was **withdrawn 2026-09-09** (§14.8): `0x351` is a **cap**, and the Dyness capture shows the emulated battery stepping its current fields 3.5x between 250 ms frames, so ramping a field the real device steps is a deviation from it rather than a margin over it — and a pack dropping off the bus needs the cap to collapse *with* it, or the survivors take its share and open one after another. The old "fall fast, rise slow" asymmetry existed only to stop the rate limiter causing the cascade it was meant to prevent; with no rate limiter there is no asymmetry to get wrong. `sClusterTune` went from 13 knobs to 9. **`CLUSTER_CFG_VERSION` is 2 and the five retired tune keys are rejected BY NAME, so a stored revision-2 configuration will NOT load and the board comes up `unprovisioned` until it is re-uploaded** (`configs/cluster_zaliakalnis.json`, `configs/cluster_sodas.json`). It fixes the sodas defect where the inverter sees one of two JK packs and is told 660 Ah at 21 % when the bus holds 1254.7 Ah at 47.3 %. **It drives nothing yet, but the reason has changed**: the §7.4 blocker is GONE — `pack_jkbms` now produces `packCap_voltageLimits` from the JK's per-cell `charge_voltage`/`power_off_voltage` and its own `cell_count` (56.0 V / 43.2 V measured on a 16S pack), so `0x351` is fully populated and no longer contractually un-transmittable. **THE FRAME SOURCE NOW EXISTS**: `App/BatComm/` is the battery communication module — a dialect (`dyness_lv` today, an imitation of the PowerBrick the Solis at zaliakalnis already accepts, asserted BYTE FOR BYTE against the field capture in `tests/test_batcomm.c`), a peripheral (**which cell the INVERTER is on, which also closes the CAN bus-role defect**) and a source (`cluster`, or one `pack` as a straight translator) — all three configuration, none compiled in ([docs/design_battery_comm.md](docs/design_battery_comm.md), 2026-09-09). **Not yet run on hardware, and it emits nothing until an operator both uploads a configuration and asks for `bms` mode.** The scale question the capture left open is settled by the modules' nameplate — 560 Ah, so the STANDARD 0.1 A / 1 Ah, which overturns `docs/reference_dyness_can_capture_2026-09-05.md` §3.2's argument for 0.01 A. **The CAN half of that path also exists**: a CAN1/CAN2 store-and-forward bridge that is transparent between battery and inverter, registers every identifier that crosses it, and can BREAK toward the inverter and be answered by a registered frame source instead — which is exactly the takeover the cluster needs ([docs/design_can_bridge.md](docs/design_can_bridge.md)). **Not yet run on hardware.** That makes autonomy (correct operation with the WAN and HA both down) a hard requirement, and constrains how remote access is done. Direction and open questions: [docs/design_remote_access_and_autonomy.md](docs/design_remote_access_and_autonomy.md).
 
 ## Build and Flash
 
@@ -56,9 +56,15 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
 
   | Region | Used | Limit | | Free |
   |---|---|---|---|---|
-  | Flash (`.text`+`.rodata`+`.data`+vectors+header) | 307,940 | 491,520 | **62.7 %** | **183.6 KB** |
-  | Main SRAM (`.bss`+`.data`+heap/stack) | 128,700 | 131,072 | **98.2 %** | 2.3 KB |
-  | CCM (`.ccmram`+`.ccmheap`) | 59,124 | 65,536 | **90.2 %** | 6.3 KB |
+  | Flash (`.text`+`.rodata`+`.data`+vectors+header) | 318,740 | 491,520 | **64.8 %** | **168.7 KB** |
+  | Main SRAM (`.bss`+`.data`+heap/stack) | 128,616 | 131,072 | **98.1 %** | 2.4 KB |
+  | CCM (`.ccmram`+`.ccmheap`+`.ccmnoinit`) | 59,464 | 65,536 | **90.7 %** | 5.9 KB |
+
+  *(Re-measured 2026-09-09 with `App/BatComm` in; the 2026-09-07 figures were
+  307,940 / 128,700 / 59,124. The module itself is ~7.7 KB of flash, 85 B of
+  main SRAM and 292 B of CCM — its CPU-only snapshots are deliberately in
+  `.ccmram`, and only its nvDb record stays in main SRAM because
+  `NvDb_Read`/`Write` want a DMA-reachable buffer.)*
 
   **THE BUILD IS OPTIMISED PER BUCKET, NOT PER BUILD TYPE.** Until 2026-09-07
   `CMAKE_BUILD_TYPE` was unset while `CMAKE_C_FLAGS_DEBUG` and
@@ -84,6 +90,11 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
   buys flash and nothing else here, so the profile is not a way out of the
   `.bss` budget.
 
+  *(That four-row table is the 2026-09-07 comparison and its absolute figures
+  have since moved — see the region table above for `mixed` today. The RATIOS
+  between profiles are what it is for; re-measure before quoting a number from
+  it.)*
+
   Why mixed rather than a whole-tree `-O2`: **vendor code** (HAL, lwIP,
   FreeRTOS, USB, BSP, wireguard-lwip, trice) is the majority of the image,
   nobody steps through it and nobody is going to fix it, so it goes at `-Os`;
@@ -108,7 +119,7 @@ cmake --build build -j8 && ./flash_nokill.sh flash_application.jlink
   Two vendor warnings appear only once the optimiser runs
   (`x25519.c` `-Wstringop-overread`, `triceDoubleBuffer.c`
   `-Wmaybe-uninitialized`); both were analysed as false positives and are
-  silenced per file in `CMakeLists.txt`, with the reasoning there. The 22
+  silenced per file in `CMakeLists.txt`, with the reasoning there. The 24
   host unit tests pass built at `-O2 -fno-strict-aliasing`.
 
   **Measured 2026-09-05 with the Modbus TCP gateway in.** Removing MQTT
@@ -247,7 +258,12 @@ not DMA — DMA1 S3/S4 belong to the flash now):
 ./tools/trice log -p COM -args "/dev/ttyUSB0:460800" -i ./til.json -li ./li.json
 ```
 
-**Host-native unit tests** (no ARM toolchain; **the battery cluster's limit
+**Host-native unit tests** (no ARM toolchain; **the dyness_lv CAN frame
+encoder, asserted BYTE FOR BYTE against the PowerBrick payloads captured in the
+field** — that capture is the only reference for a dialect nobody can
+re-measure without standing in front of the cabinet, and the alternative to a
+host test is discovering a swapped field on a live inverter with a live battery
+behind it; **the battery cluster's limit
 arithmetic — the measured rule, its low-load geometric prediction, the slew
 and all the aggregation — which R4.6 makes a REQUIREMENT rather than a
 convenience, because what is being computed is a current limit for a live
@@ -368,9 +384,11 @@ manifest + trailing CRC32), so no metadata lives in the boot status.
              └───────────────────┘   canLog (4MB) and clusterCfg above wgCfg
 ```
 
-**`nvdbUser_webUi` (64 KB) is the newest user and `NVDB_TARGET_VER` is
-now 5** — the gzipped web page, ~5.3 KB used of 64 KB. Before it,
-`nvdbUser_clusterCfg` (4 KB) made it 4. A new user is itself a layout change even when the placement policy
+**`nvdbUser_batCommCfg` (4 KB) is the newest user and `NVDB_TARGET_VER` is
+now 6** — which dialect the board speaks to the inverter, which cell the
+inverter is on and which source feeds it. Before it, `nvdbUser_webUi` (64 KB,
+the gzipped web page, ~5.3 KB used) made it 5 and `nvdbUser_clusterCfg` (4 KB)
+made it 4. A new user is itself a layout change even when the placement policy
 does not otherwise move; it appends above the pinned areas, so the
 bootloader contract (`FwuCtl_BlContractHolds()`) is unaffected.
 
@@ -488,6 +506,20 @@ PeriphNet/
                                   #   register + trace ring), bms_reader and
                                   #   bms_sim (now an ordinary subscriber and
                                   #   the bridge's frame source), pylontech.h
+    BatComm/                      # THE BATTERY COMMUNICATION MODULE: what the
+                                  #   board SAYS to the inverter.  batcomm.h
+                                  #   (the only consumer header), batcomm_frame
+                                  #   (THE PURE ENCODER -- one sBatCommIn, one
+                                  #   slot, one frame; libc-only, zero file
+                                  #   statics, no CAN and no float, so the
+                                  #   captured PowerBrick payloads are asserted
+                                  #   byte-for-byte on a host), batcomm_cfg
+                                  #   (JSON + six name accessors), batcomm.c
+                                  #   (the bridge's frame-source callback on
+                                  #   Tmr Svc, the source binding, nvDb, and
+                                  #   the hand-the-wire-back fallback).  A
+                                  #   consumer of App/Cluster OR App/Pack and a
+                                  #   producer of frames; owns no peripheral
       Cluster/                      # THE BATTERY CLUSTER MODULE: N packs on one
                                   #   DC bus presented to an inverter as ONE
                                   #   battery.  cluster.h (the only consumer
@@ -972,6 +1004,11 @@ Two independent sections: **image management** (`/api/image/*`, owned by
 | `/api/cluster/config` | POST | **202 Accepted** — the configuration is STAGED and adopted by the next tick, never applied inline; **409** while a stage is pending; 422 names the member index and key |
 | `/api/cluster/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
 | `/api/cluster/config` | DELETE | Erase it; the board becomes **unprovisioned** and the published limits fall to zero at the next tick. There is no built-in default |
+| `/api/batcomm/status` | GET | The battery communication module: dialect, which cell the inverter is on, which source, `state` + `why` as **names**, the fallback policy and whether the override is still held — plus **the numbers as they went on the wire** (`input`, with the validity mask beside them). That last is the point of the endpoint: everything else can be inferred from the configuration, but "what is the inverter actually being told" cannot |
+| `/api/batcomm/config` | GET | Active configuration, re-serialised (data-faithful) |
+| `/api/batcomm/config` | POST | **200, not 202** — unlike the cluster this is LIVE when it returns: the swap happens with the frame source disarmed, so there is no staged state. A `peripheral` that moved additionally bounces both CAN cells, with a log line. 422 names the offending key |
+| `/api/batcomm/config/verify` | POST | Same parser, same pass, same result struct — writes nothing |
+| `/api/batcomm/config` | DELETE | Erase it; the module disarms and the board stops answering the inverter. **The bus roles in force are NOT reverted** — they describe a cabinet, and a cabinet does not rewire itself because a document was deleted |
 | `/api/can/status` | GET | The CAN bridge: mode, which cell is battery and which inverter, bitrate, the frame source, the override list, per-direction forward/suppress/drop counters, and both cells' health (rx/tx, overruns, errors, bus-off, ESR REC/TEC, TX queue depth) |
 | `/api/can/traffic?bus=N` | GET | The identifier register of one bus: per ID the counts, last payload, age, **observed period band** and how often the payload actually changed — which is how a live measurement is told from a constant |
 | `/api/can/trace` | GET | The newest N frames of the trace ring, oldest first (`?n=`, default 32) |
@@ -1277,7 +1314,7 @@ what the switch is for during bring-up.
   - `.ccmheap` (48KB) — the FreeRTOS heap (`configAPPLICATION_ALLOCATED_HEAP=1`, `ucHeap[]` in `App/system.c`). **It is a separate section precisely so `System_Init()` does not zero it**: tasks are already allocated from the heap by the time that memset runs. Any new CCM section must stay out of the `_sccmram.._eccmram` range for the same reason.
 - **One file owns the bxCAN cells, and CMake enforces it** — no `HAL_CAN_*` name and no CAN handle anywhere in `App/` except `App/Can/can_bus.c`. The HAL offers ONE weak RX-FIFO-pending callback for both cells, so whoever defines it takes a link-level monopoly: that is how `bms_reader.c` came to block `pack_pylontech` outright. Consumers subscribe by `(bus, id, mask)`, and **every subscriber callback runs in the RX ISR** — copy, count, enqueue, return
 - **The CAN bridge is store-and-forward, not a wire** — each side is its own collision domain and the board ACKs on both, arbitration is per side (the TX FIFO is chronological so a burst is not re-sorted by identifier), error frames do not cross, one frame time of latency is added, and **both sides must run the same bitrate**; a rate that does not divide PCLK1/14 exactly is refused rather than rounded. Free for the 1 Hz one-way Pylontech dialect, and stated in [docs/design_can_bridge.md](docs/design_can_bridge.md) §3 because none of it is academic for a different protocol
-- **There is no persisted CAN configuration** — mode, bitrate and bus roles are compile-time defaults, so a change made over the tunnel lasts until the next reset. **This is now a known defect, not just a simplification** — zaliakalnis is wired with the battery on CAN1, which the image asserts is the inverter side, and `bms` mode would take over the wrong cell silently ([docs/issue_can_bus_roles_not_configurable.md](docs/issue_can_bus_roles_not_configurable.md)). Adding one means a new nvDb user, which means moving the layout that is still pinned to the bootloader
+- **CAN MODE AND BITRATE ARE STILL COMPILE-TIME DEFAULTS** — a change made over the tunnel (`POST /api/can/mode`) lasts until the next reset. **THE BUS ROLES ARE NOT, any more**: `App/BatComm`'s `peripheral` key says which cell the inverter is on and `BatComm_Init()` applies it with `CanBridge_SetRoles()` before the bridge starts, which closes the dangerous half of [docs/issue_can_bus_roles_not_configurable.md](docs/issue_can_bus_roles_not_configurable.md) — `bms` mode silently taking over the wrong cell on a board (zaliakalnis) wired with the battery on CAN1. An **unprovisioned** board still comes up on the compiled-in roles, deliberately: nothing changes for a board nobody has configured
 - **`:502` IS AN UNGATED WRITE PATH, AND THE TUNNEL IS ITS ONLY AUTHORIZATION.** The Modbus TCP gateway is transparent both ways by decision, not by omission ([docs/design_solis_modbus_link.md](docs/design_solis_modbus_link.md) §7.2): a raw transfer consults no point, no access bit and no `writeMin`/`writeMax`, so anything reaching that port can write any holding register on a live inverter with a live battery behind it. Three things follow and none may be relaxed casually — the listener binds the **tunnel address and never `IP_ADDR_ANY`**; a board with no tunnel configured **serves nothing** rather than falling back to the site LAN; and §4.6's point-model protection is untouched but applies **only** to `Modbus_Request` / `POST /api/modbus/write`, never to `Modbus_RawTransfer`
 - **A gateway request is a queued client of the engine, never a second bus master** — it rides the same request FIFO as `Modbus_Request`, so it takes its turn behind scheduled sequences and cannot displace the 1 Hz Pylontech CAN obligation. That is what keeps autonomy a scheduling property rather than an access rule, and it is why the `mbtcp` task sits *below* the engine's priority
 - **FC16 is framed verbatim on the gateway path and never decomposed** — `count` registers from `addr` go out as one write-multiple frame, and the **client's** function code is passed through rather than the capability's `writeFc`. Solis's Remote Dispatch block (44100-44112) is silently dropped by the inverter if it arrives as scattered single-register writes, so this is correctness, not style. The integration suite asserts it on the **frame length**, because an outcome assertion would pass against two FC06 writes

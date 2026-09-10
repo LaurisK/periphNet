@@ -134,6 +134,15 @@ typedef enum {
      * area empty still answers `GET /` and says how to fill it. */
     nvdbUser_webUi,
 
+    /* App/BatComm — which dialect the board speaks to the inverter, which
+     * cell the inverter is on, and which source feeds it
+     * (docs/design_battery_comm.md §5).  ONE user, 4 KB, rarely written.  The
+     * PERIPHERAL half of it is the fact
+     * docs/issue_can_bus_roles_not_configurable.md is about: until this user
+     * existed, which cell faced the inverter was a #define, and `bms` mode on
+     * a board wired the other way round would have taken over the battery. */
+    nvdbUser_batCommCfg,
+
     nvdbUser_last               /* sentinel — a count, never stored         */
 } eNvDbUser;
 

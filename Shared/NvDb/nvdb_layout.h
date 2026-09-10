@@ -36,7 +36,7 @@ extern "C" {
  * directory does not already record it, unless an operator has taken
  * ownership (NVDB_DIRFLAG_OPERATOR). */
 #define NVDB_TARGET_NAME        "periphnet"
-#define NVDB_TARGET_VER         5u
+#define NVDB_TARGET_VER         6u
 
 /* ==========================================================================
  * Mode and status

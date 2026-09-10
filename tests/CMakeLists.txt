@@ -297,6 +297,29 @@ target_include_directories(test_wg_ladder PRIVATE
 )
 add_test(NAME wg_ladder COMMAND test_wg_ladder)
 
+# App/BatComm: the pure frame encoder and the configuration parser
+# (docs/design_battery_comm.md).  The encoder is host-tested for the same
+# reason cluster_calc is, only more so: what it produces is a wire format for a
+# live inverter with a live battery behind it, and the only reference for that
+# format is a capture nobody can repeat without standing in front of the
+# cabinet.
+add_executable(test_batcomm
+    test_batcomm.c
+    ${JSON_CORE}
+    ${PROJECT_ROOT}/App/BatComm/batcomm_cfg.c
+    ${PROJECT_ROOT}/App/BatComm/batcomm_frame.c
+)
+target_include_directories(test_batcomm PRIVATE
+    ${UNIT_INCLUDES}
+    ${PROJECT_ROOT}
+)
+# The same -Werror=switch the firmware build scopes to batcomm_cfg.c.
+set_source_files_properties(${PROJECT_ROOT}/App/BatComm/batcomm_cfg.c
+    TARGET_DIRECTORY test_batcomm
+    PROPERTIES COMPILE_OPTIONS "-Werror=switch"
+)
+add_test(NAME batcomm COMMAND test_batcomm)
+
 add_executable(test_cluster_cfg
     test_cluster_cfg.c
     ${JSON_CORE}

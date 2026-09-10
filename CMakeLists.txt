@@ -693,6 +693,58 @@ set(CLUSTER_PURE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.c
 )
 
+# --- BatComm module boundaries (docs/design_battery_comm.md §4) ---------------
+# THREE RULES, the same shape the cluster uses and for the same reason: this
+# module sits between two others and a protocol, and the thing that keeps it
+# reviewable is that its ENCODER cannot reach any of them.
+
+# 1. The pure encoder and the configuration are libc-only.  No RTOS, no flash,
+#    no CAN, no call into the live pack or cluster module -- their entire input
+#    is the arguments, which is what lets tests/test_batcomm.c assert the
+#    captured PowerBrick payloads on a host.
+foreach(_pure App/BatComm/batcomm_frame.c App/BatComm/batcomm_cfg.c)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}")
+        file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${_pure}" _hits
+             REGEX "HAL_|osThread|osTimer|osMessage|osKernel|xQueue|xTask|vTask|taskENTER_CRITICAL|TRice|NvDb_|W25Q128_|CanBus_|CanBridge_|Pack_[A-Z]|Cluster_[A-Z]")
+        if(_hits)
+            message(FATAL_ERROR
+                    "${_pure} must stay libc-only and free of live-module "
+                    "calls: ${_hits}")
+        endif()
+    endif()
+endforeach()
+
+# 2. Consumers see batcomm.h and nothing else from the module.
+file(GLOB_RECURSE _bc_consumers CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/*.h")
+foreach(_f ${_bc_consumers})
+    if(_f MATCHES "App/BatComm/")
+        continue()
+    endif()
+    file(STRINGS "${_f}" _hits
+         REGEX "^[ \t]*#[ \t]*include[ \t]*[\"<](App/BatComm/)?batcomm_(cfg|frame)\\.h")
+    if(_hits)
+        message(FATAL_ERROR
+                "BatComm module boundary: ${_f} reaches past batcomm.h: ${_hits}")
+    endif()
+endforeach()
+
+# 3. NO LOCK AND NO CRITICAL SECTION anywhere in the module.  The frame source
+#    runs on `Tmr Svc` at priority 2 with a 256-word stack; a module that
+#    blocked there would stall every Modbus mbtick with it.
+file(GLOB _bc_srcs CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/BatComm/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/App/BatComm/*.h")
+foreach(_f ${_bc_srcs})
+    file(STRINGS "${_f}" _hits
+         REGEX "osMutex|vPortEnterCritical|taskENTER_CRITICAL|portENTER_CRITICAL|taskDISABLE_INTERRUPTS|__disable_irq")
+    if(_hits)
+        message(FATAL_ERROR
+                "BatComm: no lock and no critical section (${_f}): ${_hits}")
+    endif()
+endforeach()
+
 # --- CAN module boundary (docs/design_can_bridge.md §5) -----------------------
 # ONE FILE OWNS THE bxCAN CELLS.  The class of bug this prevents has already
 # happened once: App/Can/bms_reader.c re-initialised CAN2 and defined the only
@@ -980,6 +1032,9 @@ set(ENUM_NAME_SOURCES
     # Nine accessors, instances fifteen through twenty-three
     # (docs/design_battery_cluster.md constraint 12).
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.c
+    # Five more accessors, instances twenty-four through twenty-eight
+    # (docs/design_battery_comm.md §5).
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/BatComm/batcomm_cfg.c
 )
 set_source_files_properties(${ENUM_NAME_SOURCES}
     TARGET_DIRECTORY application.elf
@@ -996,6 +1051,20 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_cfg.
     "-Werror=switch;-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"
 )
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/Cluster/cluster_calc.c
+    TARGET_DIRECTORY application.elf
+    PROPERTIES COMPILE_OPTIONS
+    "-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"
+)
+
+# batcomm_frame.c produces a WIRE FORMAT: every field is an integer count and a
+# float anywhere in it is a rounding rule nobody wrote down.  batcomm_cfg.c is
+# in both lists, so its options are spelled once, together.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/BatComm/batcomm_cfg.c
+    TARGET_DIRECTORY application.elf
+    PROPERTIES COMPILE_OPTIONS
+    "-Werror=switch;-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"
+)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/App/BatComm/batcomm_frame.c
     TARGET_DIRECTORY application.elf
     PROPERTIES COMPILE_OPTIONS
     "-Wdouble-promotion;-Wfloat-conversion;-Wfloat-equal;-Werror=double-promotion;-Werror=float-conversion"

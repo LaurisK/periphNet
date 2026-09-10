@@ -35,6 +35,7 @@
 #include "usbd_cdc.h"
 #include "App/Modbus/modbus.h"
 #include "App/Modbus/modbus_trice_sink.h"
+#include "App/BatComm/batcomm.h"
 #include "App/Cluster/cluster.h"
 #include "App/Pack/pack.h"
 #include "App/Net/wg_link.h"
@@ -42,6 +43,7 @@
 #include "App/Net/wg_time.h"
 #include "App/system.h"
 #include "bl_app_contract.h"
+#include "image_mgmt.h"
 #include "version.h"
 #include "boot_status.h"
 /* The Modbus module is reached through its ONE public header: a consumer may
@@ -228,8 +230,22 @@ static void send_body(struct netconn *conn, const char *status,
     send_all(conn, body, strlen(body));
 }
 
+/* THE EVENT-STREAM SEAM.  When the delta endpoint is evaluating a module it
+ * sets s_evCapture, and every existing status handler becomes an event source
+ * with no change of its own: the handler still builds its JSON exactly as it
+ * does for a direct GET, but the body is fingerprinted and forwarded here
+ * instead of being written as a standalone response.  Doing it in this one
+ * function is what keeps /api/events from needing a second copy of twenty-odd
+ * builders that would then drift from the ones GET serves. */
+static uint8_t s_evCapture;
+static void    ev_capture(const char *status, const char *json);
+
 static void send_json(struct netconn *conn, const char *status, const char *json)
 {
+    if (s_evCapture != 0u) {
+        ev_capture(status, json);
+        return;
+    }
     send_body(conn, status, "application/json", json);
 }
 
@@ -3212,6 +3228,206 @@ static void handle_cluster_cfg_delete(struct netconn *conn)
 }
 
 /* --------------------------------------------------------------------------
+ * Battery communication — what the board says to the inverter
+ *
+ * NO CLI COUNTERPART BEYOND `batcomm status`, and that is the same reasoning
+ * the cluster uses: the CLI needs physical access, which on a tunnel-only
+ * board is a site visit, so the surface that CHANGES anything lives here.
+ * -------------------------------------------------------------------------- */
+
+#define BATCOMM_JSON_CAP    1280u
+
+/** GET /api/batcomm/status — what is being spoken, to which cell, from which
+ *  source, and THE NUMBERS AS THEY WENT ON THE WIRE.  The last is the point
+ *  of the endpoint: everything else can be inferred from the configuration,
+ *  but "what is the inverter actually being told" cannot. */
+static void handle_batcomm_status(struct netconn *conn)
+{
+    sBatCommStatus st;
+    char          *buf;
+    size_t         off;
+
+    if (BatComm_GetStatus(&st) != batErr_ok) {
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"state unavailable\"}");
+        return;
+    }
+
+    buf = (char *)pvPortMalloc(BATCOMM_JSON_CAP);
+    if (buf == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+
+    off = Json_Cat(buf, BATCOMM_JSON_CAP, 0u,
+        "{\"provisioned\":%s,\"enabled\":%s,\"armed\":%s,"
+        "\"protocol\":\"%s\",\"source\":\"%s\",\"pack\":\"",
+        st.provisioned ? "true" : "false",
+        st.enabled ? "true" : "false",
+        st.armed ? "true" : "false",
+        BatComm_ProtoName((eBatCommProto)st.proto),
+        BatComm_SourceName((eBatCommSource)st.source));
+    off = Json_CatEscaped(buf, BATCOMM_JSON_CAP, off, st.packName);
+    off = Json_Cat(buf, BATCOMM_JSON_CAP, off,
+        "\",\"pack_idx\":%d,"
+        "\"inverter_bus\":%u,\"battery_bus\":%u,"
+        "\"battery_bus_is_input\":%s,"
+        "\"state\":\"%s\",\"why\":\"%s\",\"fallback\":\"%s\","
+        "\"override_held\":%s,\"bad_run\":%u,"
+        "\"cycles\":%lu,\"good_cycles\":%lu,\"frames_sent\":%lu,"
+        "\"send_failures\":%lu,\"limits_withheld\":%lu,"
+        "\"fallback_entries\":%lu,\"last_good_ms\":%lu",
+        (st.packIdx == BATCOMM_PACK_NONE) ? -1 : (int)st.packIdx,
+        (unsigned)st.inverterBus + 1u, (unsigned)st.batteryBus + 1u,
+        st.batteryBusIsInput ? "true" : "false",
+        BatComm_StateName((eBatCommState)st.state),
+        BatComm_WhyName((eBatCommWhy)st.why),
+        BatComm_FallbackName((eBatCommFallback)st.fallback),
+        /* `override_held` is what an operator has to read to know whether the
+         * real battery is back on the wire; the fallback POLICY alone does
+         * not say, because batteryBusIsInput overrides it. */
+        (st.state == (uint8_t)batState_fallback) ? "false" : "true",
+        (unsigned)st.badRun,
+        (unsigned long)st.cycles, (unsigned long)st.goodCycles,
+        (unsigned long)st.framesSent, (unsigned long)st.sendFailCnt,
+        (unsigned long)st.withheldCnt,
+        (unsigned long)st.fallbackEntries,
+        (unsigned long)st.lastGood_ms);
+
+    /* The input the last cycle used.  A cleared field bit means the value
+     * reads zero and MEANS NOTHING, so the mask is reported beside them. */
+    off = Json_Cat(buf, BATCOMM_JSON_CAP, off,
+        ",\"input\":{\"fields\":%u,\"voltage_mV\":%lu,\"current_mA\":%ld,"
+        "\"soc_pm\":%u,\"soh_pm\":%u,"
+        "\"chargeLimit_mA\":%lu,\"dischargeLimit_mA\":%lu,"
+        "\"chargeVoltLimit_mV\":%lu,\"dischargeVoltLimit_mV\":%lu,"
+        "\"remaining_mAh\":%lu,\"capacity_mAh\":%lu,"
+        "\"tempMax_dC\":%d,\"tempMin_dC\":%d,\"modules\":%u,"
+        "\"chargeAllowed\":%s,\"dischargeAllowed\":%s,\"alarms\":%lu}}",
+        (unsigned)st.in.fields,
+        (unsigned long)st.in.voltage_mV, (long)st.in.current_mA,
+        (unsigned)st.in.soc_pm, (unsigned)st.in.soh_pm,
+        (unsigned long)st.in.chargeLimit_mA,
+        (unsigned long)st.in.dischargeLimit_mA,
+        (unsigned long)st.in.chargeVoltLimit_mV,
+        (unsigned long)st.in.dischargeVoltLimit_mV,
+        (unsigned long)st.in.remaining_mAh,
+        (unsigned long)st.in.capacity_mAh,
+        (int)st.in.tempMax_dC, (int)st.in.tempMin_dC,
+        (unsigned)st.in.modules,
+        st.in.chargeAllowed ? "true" : "false",
+        st.in.dischargeAllowed ? "true" : "false",
+        (unsigned long)st.in.alarms);
+
+    if (off >= BATCOMM_JSON_CAP) {
+        vPortFree(buf);
+        send_json(conn, "500 Internal Server Error",
+                  "{\"error\":\"reply did not fit\"}");
+        return;
+    }
+    buf[off] = '\0';
+    send_json(conn, "200 OK", buf);
+    vPortFree(buf);
+}
+
+/** Report a batcomm config parse failure by key. */
+static void send_batcomm_cfg_result(struct netconn *conn,
+                                    const sBatCommCfgResult *res)
+{
+    char body[320];
+
+    if (res->ok != 0) {
+        /* 200, not 202: unlike the cluster this IS live when it returns —
+         * the swap happens with the frame source disarmed, so there is no
+         * staged state for an operator to wonder about. */
+        (void)snprintf(body, sizeof(body), "{\"ok\":true}");
+        send_json(conn, "200 OK", body);
+        return;
+    }
+    {
+        char fieldEsc[(((sizeof(res->field) - 1u) * 6u) + 1u)];
+
+        (void)Json_Escape(fieldEsc, sizeof(fieldEsc), res->field);
+        (void)snprintf(body, sizeof(body),
+                       "{\"ok\":false,\"field\":\"%s\",\"reason\":\"%s\"}",
+                       fieldEsc, res->reason);
+    }
+    send_json(conn, "422 Unprocessable Entity", body);
+}
+
+/** POST /api/batcomm/config[/verify].  Verify and apply share ONE parser and
+ *  one result struct, so there is never a second validator that can disagree
+ *  with the first. */
+static void handle_batcomm_cfg_post(struct netconn *conn, sConnStream *s,
+                                    int apply)
+{
+    uint32_t          content_length = parse_content_length(req_buf);
+    sBatCommCfgResult res;
+    int               r;
+
+    if ((content_length == 0u) || (content_length > 4u * 1024u)) {
+        send_json(conn, "411 Length Required",
+                  "{\"error\":\"Content-Length required (max 4 KB)\"}");
+        return;
+    }
+    if (header_expects_continue(req_buf)) {
+        send_all(conn, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+    }
+
+    {
+        sBodySource src = { s, content_length };
+
+        (void)memset(&res, 0, sizeof(res));
+        r = apply ? BatComm_ConfigApply(body_source, &src, &res)
+                  : BatComm_ConfigVerify(body_source, &src, &res);
+    }
+
+    if (r == batErr_transport) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"could not persist the configuration\"}");
+        return;
+    }
+    send_batcomm_cfg_result(conn, &res);
+}
+
+/** GET /api/batcomm/config — the active configuration, re-serialised. */
+static void handle_batcomm_cfg_get(struct netconn *conn)
+{
+    char           *body;
+    sPackExportSink sk;
+
+    body = (char *)pvPortMalloc(512u);
+    if (body == NULL) {
+        send_json(conn, "503 Service Unavailable", "{\"error\":\"oom\"}");
+        return;
+    }
+    sk.buf = body;
+    sk.cap = 512u;
+    sk.len = 0u;
+
+    if (BatComm_ConfigExport(pack_http_sink, &sk) != batErr_ok) {
+        vPortFree(body);
+        send_json(conn, "409 Conflict", "{\"error\":\"unprovisioned\"}");
+        return;
+    }
+    body[sk.len] = '\0';
+    send_json(conn, "200 OK", body);
+    vPortFree(body);
+}
+
+/** DELETE /api/batcomm/config — the board stops answering the inverter.  The
+ *  BUS ROLES IN FORCE ARE NOT REVERTED: they describe a cabinet. */
+static void handle_batcomm_cfg_delete(struct netconn *conn)
+{
+    if (BatComm_ConfigErase() != batErr_ok) {
+        send_json(conn, "503 Service Unavailable",
+                  "{\"error\":\"erase failed\"}");
+        return;
+    }
+    send_json(conn, "200 OK", "{\"ok\":true,\"provisioned\":false}");
+}
+
+/* --------------------------------------------------------------------------
  * CAN bridge
  *
  * The CLI reaches this module over USB CDC / UART1 only, i.e. with physical
@@ -4162,6 +4378,260 @@ static void handle_ui_upload(struct netconn *conn, sConnStream *s)
     send_json(conn, "200 OK", resp_buf);
 }
 
+/* --------------------------------------------------------------------------
+ * The delta event stream  --  GET /api/events?since=N[&full=1]
+ *
+ * ONE request returns every module whose JSON has CHANGED since the caller's
+ * mark, and nothing else.  A quiet board answers `{"changed":{},"seq":N}` in
+ * about forty bytes, which is what makes a 250 ms cadence affordable where
+ * re-fetching twenty endpoints at that rate would not be.
+ *
+ * The fingerprint is a CRC32 of the module's own rendered JSON, so nothing
+ * here has to know what any module contains, and a module gains event
+ * delivery the moment it is added to s_evTable -- there is no second
+ * serialiser to keep in step with the one GET already uses (see the capture
+ * seam in send_json).
+ *
+ * `seq` is a BOARD-WIDE counter, not per module.  A client sends back the
+ * seq it last received and gets everything newer, so two browsers, a reload,
+ * or a dropped connection all resynchronise without the board tracking who
+ * is watching.  `?full=1` ignores the marks entirely and re-sends the lot,
+ * which is the explicit-refresh path.
+ *
+ * A module is re-rendered only when its tier is due OR when this caller is
+ * behind on it, so polling faster than a tier costs nothing but the walk.
+ * The reply is chunked, so no buffer is held for the aggregate -- only the
+ * one module being rendered is ever in memory, which matters on a board with
+ * about 11 KB of heap and 2.4 KB of main SRAM free.
+ * -------------------------------------------------------------------------- */
+
+#define EV_PERIOD_FAST_MS     250u   /* electrical state: pack, cluster       */
+#define EV_PERIOD_MED_MS     1000u   /* counters that move under load         */
+#define EV_PERIOD_SLOW_MS    5000u   /* configuration and boot-time facts     */
+
+typedef void (*fEvBuild)(struct netconn *conn, uint8_t arg);
+
+typedef struct {
+    const char *name;        /* key under "changed"                           */
+    fEvBuild    build;
+    uint8_t     arg;
+    uint16_t    period_ms;
+} sEvModule;
+
+typedef struct {
+    uint32_t crc;
+    uint32_t seq;            /* board seq at which this module last changed   */
+    uint32_t lastEval_ms;
+    uint8_t  rendered;       /* built at least once, whatever the status      */
+    uint8_t  hasBody;        /* a 200 has been seen, so crc means something   */
+} sEvState;
+
+/* Adapters: the table needs one shape, the handlers have three. */
+static void evb_image(struct netconn *c, uint8_t a)      { (void)a; handle_image_info(c); }
+static void evb_fwu(struct netconn *c, uint8_t a)        { (void)a; handle_fwu_status(c); }
+static void evb_system(struct netconn *c, uint8_t a)     { (void)a; handle_system_status(c); }
+static void evb_lastRestart(struct netconn *c, uint8_t a){ (void)a; handle_system_last_restart(c); }
+static void evb_crash(struct netconn *c, uint8_t a)      { (void)a; handle_crash_get(c); }
+static void evb_nvdbLayout(struct netconn *c, uint8_t a) { (void)a; handle_nvdb_layout_get(c); }
+static void evb_nvdbUsage(struct netconn *c, uint8_t a)  { (void)a; handle_nvdb_usage(c); }
+static void evb_mbBus(struct netconn *c, uint8_t a)      { (void)a; handle_modbus_bus(c); }
+static void evb_mbGw(struct netconn *c, uint8_t a)       { (void)a; handle_modbus_gw(c); }
+static void evb_mbCfg(struct netconn *c, uint8_t a)      { (void)a; handle_modbus_cfg_status(c); }
+static void evb_mbPlans(struct netconn *c, uint8_t a)    { (void)a; handle_modbus_plans_list(c); }
+static void evb_pack(struct netconn *c, uint8_t a)       { (void)a; handle_pack_status(c); }
+static void evb_packCfg(struct netconn *c, uint8_t a)    { (void)a; handle_pack_cfg_get(c); }
+static void evb_packCells(struct netconn *c, uint8_t a)  { handle_pack_cells(c, a); }
+static void evb_cluster(struct netconn *c, uint8_t a)    { (void)a; handle_cluster_status(c, 1); }
+static void evb_clusterCfg(struct netconn *c, uint8_t a) { (void)a; handle_cluster_cfg_get(c); }
+static void evb_batcomm(struct netconn *c, uint8_t a)    { (void)a; handle_batcomm_status(c); }
+static void evb_batcommCfg(struct netconn *c, uint8_t a) { (void)a; handle_batcomm_cfg_get(c); }
+static void evb_can(struct netconn *c, uint8_t a)        { (void)a; handle_can_status(c); }
+static void evb_canLog(struct netconn *c, uint8_t a)     { (void)a; handle_can_log_status(c); }
+static void evb_wg(struct netconn *c, uint8_t a)         { (void)a; handle_wg_status(c); }
+static void evb_trice(struct netconn *c, uint8_t a)      { (void)a; handle_trice_status(c); }
+static void evb_ui(struct netconn *c, uint8_t a)         { (void)a; handle_ui_status(c); }
+
+static const sEvModule s_evTable[] = {
+    { "pack",        evb_pack,        0u, EV_PERIOD_FAST_MS },
+    { "cluster",     evb_cluster,     0u, EV_PERIOD_FAST_MS },
+    { "system",      evb_system,      0u, EV_PERIOD_MED_MS  },
+    { "can",         evb_can,         0u, EV_PERIOD_MED_MS  },
+    { "batcomm",     evb_batcomm,     0u, EV_PERIOD_MED_MS  },
+    { "modbusBus",   evb_mbBus,       0u, EV_PERIOD_MED_MS  },
+    { "modbusGw",    evb_mbGw,        0u, EV_PERIOD_MED_MS  },
+    { "packCells0",  evb_packCells,   0u, EV_PERIOD_MED_MS  },
+    { "packCells1",  evb_packCells,   1u, EV_PERIOD_MED_MS  },
+    { "packCells2",  evb_packCells,   2u, EV_PERIOD_MED_MS  },
+    { "packCells3",  evb_packCells,   3u, EV_PERIOD_MED_MS  },
+    { "packCells4",  evb_packCells,   4u, EV_PERIOD_MED_MS  },
+    { "packCells5",  evb_packCells,   5u, EV_PERIOD_MED_MS  },
+    { "packCells6",  evb_packCells,   6u, EV_PERIOD_MED_MS  },
+    { "packCells7",  evb_packCells,   7u, EV_PERIOD_MED_MS  },
+    { "fwu",         evb_fwu,         0u, EV_PERIOD_SLOW_MS },
+    { "image",       evb_image,       0u, EV_PERIOD_SLOW_MS },
+    { "lastRestart", evb_lastRestart, 0u, EV_PERIOD_SLOW_MS },
+    { "crash",       evb_crash,       0u, EV_PERIOD_SLOW_MS },
+    { "nvdbLayout",  evb_nvdbLayout,  0u, EV_PERIOD_SLOW_MS },
+    { "nvdbUsage",   evb_nvdbUsage,   0u, EV_PERIOD_SLOW_MS },
+    { "modbusCfg",   evb_mbCfg,       0u, EV_PERIOD_SLOW_MS },
+    { "modbusPlans", evb_mbPlans,     0u, EV_PERIOD_SLOW_MS },
+    { "packCfg",     evb_packCfg,     0u, EV_PERIOD_SLOW_MS },
+    { "clusterCfg",  evb_clusterCfg,  0u, EV_PERIOD_SLOW_MS },
+    { "batcommCfg",  evb_batcommCfg,  0u, EV_PERIOD_SLOW_MS },
+    { "canLog",      evb_canLog,      0u, EV_PERIOD_SLOW_MS },
+    { "wg",          evb_wg,          0u, EV_PERIOD_SLOW_MS },
+    { "trice",       evb_trice,       0u, EV_PERIOD_SLOW_MS },
+    { "ui",          evb_ui,          0u, EV_PERIOD_SLOW_MS },
+};
+#define EV_MODULE_COUNT  ((uint8_t)(sizeof(s_evTable) / sizeof(s_evTable[0])))
+
+/* ~360 B, and CPU-only -- no DMA reaches it, so it belongs in CCM where
+ * main SRAM has 2.4 KB left. */
+static sEvState        s_evState[EV_MODULE_COUNT] CCMRAM_BSS;
+static struct netconn *s_evConn;
+static uint32_t        s_evSeq;
+static uint32_t        s_evSince;
+static uint8_t         s_evCur;
+static uint8_t         s_evCount;
+static uint8_t         s_evFull;
+static uint8_t         s_evFail;
+
+static void ev_chunk(const char *data, size_t len)
+{
+    char hdr[16];
+    int  n;
+
+    if ((s_evFail != 0u) || (len == 0u)) {
+        return;
+    }
+    n = snprintf(hdr, sizeof(hdr), "%X\r\n", (unsigned)len);
+    if (!send_all(s_evConn, hdr, (size_t)n) ||
+        !send_all(s_evConn, data, len) ||
+        !send_all(s_evConn, "\r\n", 2u)) {
+        s_evFail = 1u;
+    }
+}
+
+static void ev_emit(const char *name, const char *json)
+{
+    char pre[40];
+    int  n;
+
+    n = snprintf(pre, sizeof(pre), "%s\"%s\":",
+                 (s_evCount == 0u) ? "" : ",", name);
+    ev_chunk(pre, (size_t)n);
+    ev_chunk(json, strlen(json));
+    if (s_evFail == 0u) {
+        s_evCount++;
+    }
+}
+
+static void ev_capture(const char *status, const char *json)
+{
+    sEvState *st = &s_evState[s_evCur];
+    uint32_t  crc;
+
+    /* Only a 200 carries state.  A 404 -- a pack index that does not exist,
+     * a module this board has no configuration for -- means ABSENT.  While it
+     * has always been absent it is silent: it must not stream the same error
+     * forever to an unprovisioned board.  But a module that WAS present and
+     * has gone (a configuration just deleted) is a real change, and is sent
+     * as an explicit null so the page drops the card rather than leaving a
+     * dead one on screen showing the last good values. */
+    if ((json == NULL) || (status == NULL) || (strncmp(status, "200", 3u) != 0)) {
+        if (st->hasBody != 0u) {
+            st->hasBody = 0u;
+            st->crc     = 0u;
+            s_evSeq++;
+            st->seq = s_evSeq;
+        }
+        if ((st->seq > s_evSince) || (s_evFull != 0u)) {
+            if (st->hasBody == 0u && st->seq != 0u) {
+                ev_emit(s_evTable[s_evCur].name, "null");
+            }
+        }
+        return;
+    }
+
+    crc = ImgMgmt_Crc32((const uint8_t *)json, (uint32_t)strlen(json));
+    if ((st->hasBody == 0u) || (crc != st->crc)) {
+        st->crc     = crc;
+        st->hasBody = 1u;
+        s_evSeq++;
+        st->seq = s_evSeq;
+    }
+
+    if ((s_evFull != 0u) || (st->seq > s_evSince)) {
+        ev_emit(s_evTable[s_evCur].name, json);
+    }
+}
+
+static void handle_events(struct netconn *conn)
+{
+    static const char hdr[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Cache-Control: no-store\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n\r\n";
+
+    uint32_t now = osKernelGetTickCount();
+    char     tail[80];
+    uint8_t  i;
+    int      n;
+
+    s_evSince = (uint32_t)query_int("since", 0);
+    s_evFull  = query_has("full") ? 1u : 0u;
+
+    if (!send_all(conn, hdr, sizeof(hdr) - 1u)) {
+        return;
+    }
+
+    s_evConn  = conn;
+    s_evCount = 0u;
+    s_evFail  = 0u;
+
+    ev_chunk("{\"changed\":{", 12u);
+
+    for (i = 0u; (i < EV_MODULE_COUNT) && (s_evFail == 0u); i++) {
+        sEvState *st = &s_evState[i];
+        bool      due;
+
+        /* Render when the tier is due, when this is a full refresh, when the
+         * module has never been rendered, or when THIS caller is behind on a
+         * change an earlier poll already detected -- the last is what lets
+         * one seq counter serve several browsers without per-client state. */
+        due = (s_evFull != 0u) ||
+              (st->rendered == 0u) ||
+              ((uint32_t)(now - st->lastEval_ms) >= (uint32_t)s_evTable[i].period_ms) ||
+              (st->seq > s_evSince);
+        if (!due) {
+            continue;
+        }
+
+        /* Stamped BEFORE the build and outside ev_capture, so a module that
+         * answers 404 -- seven of the eight per-pack cell slots on a two-pack
+         * board -- is throttled by its tier like any other.  Keying this off
+         * the capture would leave those rebuilding on every single poll. */
+        st->lastEval_ms = now;
+        st->rendered    = 1u;
+        s_evCur     = i;
+        s_evCapture = 1u;
+        s_evTable[i].build(conn, s_evTable[i].arg);
+        s_evCapture = 0u;
+    }
+
+    n = snprintf(tail, sizeof(tail),
+                 "},\"seq\":%u,\"count\":%u,\"tick\":%u}",
+                 (unsigned)s_evSeq, (unsigned)s_evCount, (unsigned)now);
+    ev_chunk(tail, (size_t)n);
+
+    if (s_evFail == 0u) {
+        (void)send_all(conn, "0\r\n\r\n", 5u);
+    }
+    s_evConn = NULL;
+}
+
 static void handle_connection(struct netconn *conn)
 {
     sConnStream stream;
@@ -4172,7 +4642,9 @@ static void handle_connection(struct netconn *conn)
         return;
     }
 
-    if (route_is("POST /api/image/upload")) {
+    if (route_is("GET /api/events")) {
+        handle_events(conn);
+    } else if (route_is("POST /api/image/upload")) {
         handle_image_upload(conn, &stream);
     } else if (route_is("GET /api/image/info")) {
         handle_image_info(conn);
@@ -4279,6 +4751,16 @@ static void handle_connection(struct netconn *conn)
         handle_cluster_cfg_get(conn);
     } else if (route_is("DELETE /api/cluster/config")) {
         handle_cluster_cfg_delete(conn);
+    } else if (route_is("GET /api/batcomm/status")) {
+        handle_batcomm_status(conn);
+    } else if (route_is("POST /api/batcomm/config/verify")) {
+        handle_batcomm_cfg_post(conn, &stream, 0);
+    } else if (route_is("POST /api/batcomm/config")) {
+        handle_batcomm_cfg_post(conn, &stream, 1);
+    } else if (route_is("GET /api/batcomm/config")) {
+        handle_batcomm_cfg_get(conn);
+    } else if (route_is("DELETE /api/batcomm/config")) {
+        handle_batcomm_cfg_delete(conn);
     } else if (route_is("GET /api/can/status")) {
         handle_can_status(conn);
     } else if (route_is("GET /api/can/traffic")) {

@@ -8,6 +8,7 @@
  */
 
 #include "App/Cmd/cmd_parser.h"
+#include "App/BatComm/batcomm.h"
 #include "App/Can/bms_sim.h"
 #include "App/Can/bms_reader.h"
 #include "App/Can/can_bridge.h"
@@ -78,6 +79,45 @@ static void cmd_peripherals(const char *args);
 static void cmd_help(const char *args);
 static void cmd_reboot(const char *args);
 static void cmd_dfu(const char *args);
+static void cmd_batcomm(const char *args);
+/**
+ * batcomm command: what the board says to the inverter.
+ *
+ * READ-ONLY BY DESIGN.  Everything that CHANGES the configuration is on the
+ * HTTP surface, because this console needs physical access and the board is
+ * reached through a tunnel; the same reasoning the cluster uses.
+ *
+ * Usage:
+ *   batcomm status  — dialect, cell, source, state and the numbers on the wire
+ */
+static void cmd_batcomm(const char *args)
+{
+    sBatCommStatus st;
+
+    (void)args;
+
+    if (BatComm_GetStatus(&st) != batErr_ok) {
+        TRice("batcomm: state unavailable\n");
+        return;
+    }
+
+    TRice("batcomm: %s -> CAN%u, src %s%s, %s (%s)\n",
+          BatComm_ProtoName((eBatCommProto)st.proto),
+          (unsigned)st.inverterBus + 1u,
+          BatComm_SourceName((eBatCommSource)st.source),
+          (st.source == (uint8_t)batSrc_pack) ? " (named)" : "",
+          BatComm_StateName((eBatCommState)st.state),
+          BatComm_WhyName((eBatCommWhy)st.why));
+    TRice("  cycles %u good %u frames %u withheld %u fallbacks %u\n",
+          (unsigned)st.cycles, (unsigned)st.goodCycles,
+          (unsigned)st.framesSent, (unsigned)st.withheldCnt,
+          (unsigned)st.fallbackEntries);
+    TRice("  wire: %u mV %d mA soc %u/1000 chg %u mA dsg %u mA fields 0x%03X\n",
+          (unsigned)st.in.voltage_mV, (int)st.in.current_mA,
+          (unsigned)st.in.soc_pm, (unsigned)st.in.chargeLimit_mA,
+          (unsigned)st.in.dischargeLimit_mA, (unsigned)st.in.fields);
+}
+
 static void cmd_bms(const char *args);
 static void cmd_can(const char *args);
 static int  parse_hex_bytes(const char *p, uint8_t *out, size_t maxLen);
@@ -90,6 +130,7 @@ static void cmd_fwu(const char *args);
 
 static const sCmdEntry s_commands[] = {
     { "peripherals", cmd_peripherals, "List device peripherals" },
+    { "batcomm",     cmd_batcomm,     "Battery comms to the inverter (status)" },
     { "bms",         cmd_bms,         "BMS sim/reader (start|stop|read|set)" },
     { "can",         cmd_can,         "CAN bridge + flash trace (start|stop|mode|status|ids|trace|log|send)" },
     { "modbus",      cmd_modbus,      "Modbus (read|get|set|raw|monitor|dump|plan|inject|status)" },
@@ -128,6 +169,16 @@ static void cmd_peripherals(const char *args)
 static void cmd_bms(const char *args)
 {
     if (strncmp(args, "start", 5) == 0) {
+        /* ONE SOURCE SLOT, and the arbitration lives HERE rather than in
+         * either module: the composition root is the only place that knows
+         * both exist, and a simulator quietly displacing the thing that
+         * speaks for a real battery is not a conflict to resolve by link
+         * order. */
+        if (BatComm_IsArmed()) {
+            TRice("BMS sim refused: batcomm holds the bridge source slot\n");
+            BmsReader_Start();
+            return;
+        }
         BmsSim_Start();
         BmsReader_Start();
     } else if (strncmp(args, "stop", 4) == 0) {

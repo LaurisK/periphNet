@@ -17,6 +17,7 @@
 #include "App/app_freertos.h"
 #include "App/system.h"
 #include <string.h>
+#include "App/BatComm/batcomm.h"
 #include "App/Can/bms_reader.h"
 #include "App/Can/can_bridge.h"
 #include "App/Can/can_log.h"
@@ -272,17 +273,31 @@ void App_DefaultTaskEntry(void)
      * On a board that is not wired to either side it costs nothing — there is
      * no traffic to forward and nothing is ever transmitted.
      *
-     * There is NO persisted CAN configuration yet, so mode, bitrate and bus
-     * roles are compile-time defaults; changing one over the tunnel
-     * (POST /api/can/mode) lasts until the next reset.  That is a known gap,
-     * not an oversight: a new nvDb user changes the storage layout, and the
-     * layout is still pinned to what the bootloader was built for.
+     * MODE AND BITRATE ARE STILL COMPILE-TIME DEFAULTS and a change made over
+     * the tunnel (POST /api/can/mode) lasts until the next reset.  THE BUS
+     * ROLES ARE NOT: BatComm_Init below owns them now, from its own nvDb
+     * record, which is what closes
+     * docs/issue_can_bus_roles_not_configurable.md for the one case that
+     * mattered — `bms` mode taking over the wrong cell.
+     *
+     * IT RUNS BEFORE CanBridge_Start ON PURPOSE: CanBridge_SetRoles is legal
+     * only while the bridge is stopped, and an unprovisioned board leaves the
+     * compiled-in roles exactly as they were.
      *
      * The reader is started with it so the battery frame set is decoded for
      * the UI and the CLI from boot; it only subscribes, and puts nothing on
      * the wire. */
+    (void)BatComm_Init();
+
     if (CanBridge_Start(canBrMode_bridge, CAN_BRIDGE_DEFAULT_BPS) == 0) {
         BmsReader_Start();
+        /* Claiming the source slot ARMS NOTHING: the bridge runs the source
+         * timer only in `bms` mode, which this board is not in.  It decides
+         * WHO answers the inverter if an operator asks for the takeover, and
+         * refuses outright on an unprovisioned or disabled configuration. */
+        if (BatComm_Arm() == batErr_ok) {
+            TRice("BatComm: holding the bridge source slot\n");
+        }
     } else {
         TRice("err:CAN: bridge did not start\n");
     }

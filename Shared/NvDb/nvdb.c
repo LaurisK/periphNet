@@ -105,6 +105,7 @@ static const char *const s_userNames[nvdbUser_last] = {
     [nvdbUser_canLog]           = "canLog",
     [nvdbUser_clusterCfg]       = "clusterCfg",
     [nvdbUser_webUi]            = "webUi",
+    [nvdbUser_batCommCfg]       = "batCommCfg",
 };
 
 /* Private function prototypes ----------------------------------------------*/

@@ -1,1 +1,871 @@
-<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PeriphNet</title><style>body{font-family:sans-serif;max-width:640px;margin:20px auto;padding:0 12px}h1{margin-bottom:4px}#ver{color:#666;font-size:.9em}.card{border:1px solid #ddd;border-radius:6px;padding:12px;margin:10px 0}.card h3{margin:0 0 8px}#bar{width:100%;height:18px;background:#eee;border-radius:4px;display:none}#fill{height:100%;background:#4a4;border-radius:4px;transition:width .3s}button{padding:6px 14px;border:none;border-radius:4px;cursor:pointer;margin:4px 2px}.btn-up{background:#37c;color:#fff}.btn-dl{background:#666;color:#fff}.btn-inst{background:#e63;color:#fff}.btn-del{background:#a33;color:#fff}button:disabled{opacity:.5;cursor:default}.msg{margin:8px 0;padding:8px;border-radius:4px;display:none}.ok{background:#dfd;color:#060}.err{background:#fdd;color:#600}.info{color:#555;font-size:.9em;margin:6px 0}pre{background:#f5f5f5;padding:8px;border-radius:4px;font-size:.8em;overflow-x:auto}table.cells{width:100%;border-collapse:collapse;font-size:.8em}table.cells td{padding:1px 4px;white-space:nowrap}.cb{display:inline-block;height:10px;background:#4a8;border-radius:2px;vertical-align:middle}.cmin{background:#e63}.cmax{background:#37c}.warn{color:#a60}.dim{color:#999}</style></head><body><h1>PeriphNet</h1><div id=ver></div><div id=uptime class=info></div><div class=card><h3>Image Management</h3><input type=file id=file accept='.pnfw'><button class=btn-up onclick=upload()>Upload</button><div id=bar><div id=fill></div></div><div id=iinfo class=info></div><div id=imsg class=msg></div><div style='margin-top:8px'><button class=btn-dl onclick=download() id=bdl disabled>Download</button><button class=btn-del onclick=del() id=bdel disabled>Delete</button></div></div><div class=card><h3>Firmware Update</h3><div id=finst class=info></div><div id=finfo class=info></div><div id=fguard class=info></div><div id=fmsg class=msg></div><div style='margin-top:8px'><button class=btn-inst onclick=install() id=binst disabled>Install</button><button class=btn-up onclick=confirmFw() id=bconf disabled>Confirm</button><button class=btn-up onclick=kickFw() id=bkick disabled>Kick</button></div></div><div class=card><h3>System</h3><div id=sysinfo class=info>Loading...</div><div id=systasks></div><button class=btn-dl onclick=resetPeaks()>Reset peaks</button><button class=btn-del onclick=reboot()>Reboot</button></div><div class=card><h3>Battery Pack</h3><div id=pkhdr class=info>Loading...</div><div id=pkcells></div><div id=pkstats class=info></div><button class=btn-dl onclick=balReset()>Reset balance totals</button></div><div class=card><h3>CAN Bridge</h3><div id=canhdr class=info>Loading...</div><div id=canbus class=info></div><div style='margin-top:6px'><button class=btn-up onclick=canMode('bridge')>Bridge</button><button class=btn-dl onclick=canMode('monitor')>Monitor</button><button class=btn-inst onclick=canMode('bms')>Be the BMS</button><button class=btn-del onclick=canMode('off')>Off</button><button class=btn-dl onclick=canReset()>Reset counters</button></div><div id=cantraffic></div><h3 style='margin-top:14px'>Flash Trace</h3><div id=canloghdr class=info>Loading...</div><div style='margin-top:6px'><button class=btn-up onclick=canLogMode('changes')>Changes</button><button class=btn-dl onclick=canLogMode('all')>All frames</button><button class=btn-del onclick=canLogMode('off')>Off</button><button class=btn-del onclick=canLogWipe()>Wipe</button></div></div><div class=card><h3>Last Crash</h3><div id=crash>Loading...</div></div><script>var B='http://'+location.host;function show(id,t,ok){var m=document.getElementById(id);m.textContent=t;m.className='msg '+(ok?'ok':'err');m.style.display='block'}function pollImg(){fetch(B+'/api/image/info').then(r=>r.json()).then(j=>{var t;if(j.present){t='Name: '+(j.name||'(unnamed)')+' | Version: '+j.version+' | Size: '+j.size+' B | CRC32: '+j.crc32}else if(j.status=='uploading'){t='Uploading... '+j.progress+'%'}else if(j.status=='error'){t='Error: '+j.error}else{t='No image uploaded.'}document.getElementById('iinfo').textContent=t;document.getElementById('bdl').disabled=!j.present;document.getElementById('bdel').disabled=!j.present;document.getElementById('binst').disabled=!j.present;document.getElementById('finst').textContent=j.present?'Image ready to install: '+j.version+(j.name?' ('+j.name+')':''):'No image available - upload one in Image Management.';}).catch(()=>{})}function pollFwu(){fetch(B+'/api/fwu/status').then(r=>r.json()).then(j=>{document.getElementById('ver').textContent='Running: '+j.running_version+(j.confirmed?' (confirmed)':' UNCONFIRMED, '+j.attempts_remaining+' boots left');var u=j.uptime,s='';if(u>=86400){s+=Math.floor(u/86400)+'d ';u%=86400}if(u>=3600){s+=Math.floor(u/3600)+'h ';u%=3600}if(u>=60){s+=Math.floor(u/60)+'m ';u%=60}s+=u+'s';document.getElementById('uptime').textContent='Uptime: '+s;var t='';if(j.golden_version)t='Golden: '+j.golden_version;if(j.last_fwu_result!=255)t+=(t?' | ':'')+'Last FWU result: '+j.last_fwu_result;if(j.promote_pending)t+=(t?' | ':'')+'promoting to golden...';document.getElementById('finfo').textContent=t;var g=j.confirm_guard||{};document.getElementById('fguard').textContent=g.armed?'Auto-reboot in '+g.remaining_sec+'s unless kicked or confirmed'+' (kicks: '+g.kicks+')':'';document.getElementById('bconf').disabled=j.confirmed;document.getElementById('bkick').disabled=!g.armed;}).catch(()=>{})}function pct(p){return (p/10).toFixed(1)+'%'}function pollSys(){fetch(B+'/api/system/status').then(r=>r.json()).then(j=>{var h='CPU '+pct(j.cpu_load_permille)+' (peak '+pct(j.cpu_peak_permille)+') | idle '+pct(j.idle_permille)+'<br>Heap '+j.heap.free+' / '+j.heap.size+' B free (min '+j.heap.free_min+')'+'<br>Watchdog margin: worst gap '+j.iwdg.gap_max_ms+' ms of '+j.iwdg.timeout_ms+' ms';if(!j.runtime_counter_ok)h+='<br><b>CPU clock not running</b>';if(j.tasks_stale)h+='<br><b>'+j.tasks_stale+' task(s) missed their check-in deadline</b>';if(j.stack_warnings)h+='<br><b>'+j.stack_warnings+' task(s) below '+j.stack_warn_words+' free stack words</b>';document.getElementById('sysinfo').innerHTML=h;var t='task            pri st    cpu   peak  stack(free/size) checkins\n';j.tasks.forEach(function(k){t+=(k.name+'               ').slice(0,15)+String(k.prio).padStart(4)+' '+k.state+pct(k.cpu_permille).padStart(7)+pct(k.cpu_peak_permille).padStart(7)+'  '+(k.stack_free_min_words+'/'+(k.stack_size_words||'?')).padStart(14)+' '+k.checkins+(k.deadline_ms?' ('+k.since_checkin_ms+'ms)':'')+(k.stale?' STALE':'')+(k.present?'':' GONE')+'\n'});document.getElementById('systasks').innerHTML='<pre>'+t+'</pre>'}).catch(()=>{})}function reboot(){if(!confirm('Reboot the board now?'))return;fetch(B+'/api/system/reboot',{method:'POST'}).then(function(){document.getElementById('sysinfo').textContent='Rebooting - reconnecting...';setTimeout(function(){location.reload()},12000)})}function resetPeaks(){fetch(B+'/api/system/reset-peaks',{method:'POST'}).then(()=>pollSys()).catch(()=>{})}function pollPack(){fetch(B+'/api/pack/status').then(r=>r.json()).then(j=>{var h=document.getElementById('pkhdr');if(!j.provisioned||!j.packs.length){h.innerHTML='<span class=dim>Unprovisioned - upload a pack config to /api/pack/config</span>';document.getElementById('pkcells').innerHTML='';return}var p=j.packs[0];var est=(p.flags&1)?' <span class=dim>(estimated)</span>':' <span class=dim>(BMS)</span>';var cls=p.cond=='online'?'':' class=warn';var why=(p.cond=='online'||!p.whyText)?'':' <span class=dim>('+p.whyText+')</span>';h.innerHTML='<b'+cls+'>'+p.cond+'</b>'+why+' &middot; '+p.name+' &middot; '+(p.voltage_mV/1000).toFixed(3)+' V &middot; '+(p.current_mA/1000).toFixed(2)+' A &middot; '+((p.voltage_mV*p.current_mA)/1e6).toFixed(0)+' W<br>'+'SOC '+(p.soc_pm/10).toFixed(1)+'%'+est+' conf '+(p.socConf_pm/10).toFixed(0)+'%'+(p.socDrift_pm?' drift '+(p.socDrift_pm/10).toFixed(1)+'%':'')+'<br>'+(p.remaining_mAh/1000).toFixed(1)+' Ah of '+(p.capacity_mAh/1000).toFixed(1)+' Ah'+' &middot; SOH '+(p.soh_pm/10).toFixed(0)+'% conf '+(p.sohConf_pm/10).toFixed(0)+'%<br>'+'limits '+(p.chargeLimit_mA/1000).toFixed(0)+' A chg / '+(p.dischargeLimit_mA/1000).toFixed(0)+' A dsg &middot; '+'temp '+(p.tempMin_dC/10).toFixed(1)+'-'+(p.tempMax_dC/10).toFixed(1)+' C'+(p.alarms?' &middot; <span class=warn>ALARM 0x'+p.alarms.toString(16)+'</span>':'');}).catch(e=>{document.getElementById('pkhdr').textContent='pack: '+e})}function pollCells(){fetch(B+'/api/pack/cells?idx=0').then(r=>r.json()).then(j=>{var d=document.getElementById('pkcells');if(!j.cells||!j.cells.length){d.innerHTML='';return}var mv=j.cells.map(c=>c.mV),lo=Math.min.apply(null,mv),hi=Math.max.apply(null,mv);var t='<div class=info>'+j.cellCount+' cells &middot; '+lo+'-'+hi+' mV &middot; spread <b>'+(hi-lo)+' mV</b>'+(j.weakestIdx>=0?' &middot; weakest cell '+j.weakestIdx:'')+' &middot; measured '+(j.measuredCells||0)+'/'+j.cellCount+'</div>';t+='<table class=cells>';for(var i=0;i<j.cells.length;i++){var c=j.cells[i];var w=(hi>lo)?Math.round((c.mV-lo)*100/(hi-lo)):0;var k=(c.mV==lo)?' cmin':((c.mV==hi)?' cmax':'');t+='<tr><td>'+i+'</td><td>'+c.mV+' mV</td>'+'<td style=width:55%><span class=cb'+k+' style=width:'+w+'%></span></td>'+'<td>'+(c.soc_pm>=0?(c.soc_pm/10).toFixed(1)+'%':'<span class=dim>-</span>')+'</td>'+'<td>'+(c.capacity_mAh>0&&c.capConf_pm>0?(c.capacity_mAh/1000).toFixed(1)+' Ah':'<span class=dim>-</span>')+'</td></tr>'}t+='</table>';if(j.balance)t+='<div class=info>balancer '+(j.balance.active?'ON':'idle')+' '+(j.balance.current_mA/1000).toFixed(2)+' A'+(j.balance.srcIdx>=0?' cell '+j.balance.srcIdx+'&rarr;'+j.balance.sinkIdx:'')+'</div>';d.innerHTML=t}).catch(e=>{})}function pollPStats(){fetch(B+'/api/pack/stats?idx=0').then(r=>r.json()).then(j=>{var d=document.getElementById('pkstats');if(!j.stats){d.innerHTML='';return}var U={57:'Ah',9:'C',33:'A',35:'V',255:''};var t='';for(var i=0;i<j.stats.length;i++){var s=j.stats[i];t+=(i?' &middot; ':'')+s.name+' <b>'+(s.value*Math.pow(10,s.scale)).toFixed(2)+'</b> '+(U[s.unit]||'')}d.innerHTML=t}).catch(e=>{})}function balReset(){if(!confirm('Reset accumulated balance totals?'))return;fetch(B+'/api/pack/balance/reset?idx=0',{method:'POST'}).then(()=>pollCells())}function canRows(b,j){var h='<tr><td colspan=6><b>CAN'+b+'</b></td></tr>';if(!j.ids.length){h+='<tr><td colspan=6 class=dim>no traffic</td></tr>';return h}j.ids.forEach(function(r){h+='<tr><td>'+r.id+'</td><td>rx '+r.rx+'</td><td>tx '+r.tx+'</td><td>'+r.data+'</td><td>'+r.age_ms+' ms</td><td>'+(r.max_gap_ms?r.min_gap_ms+'-'+r.max_gap_ms+' ms':'-')+'</td></tr>'});return h}function pollCan(){fetch(B+'/api/can/status').then(r=>r.json()).then(j=>{var t='Mode: <b>'+j.mode+'</b> | battery CAN'+j.battery_bus+' &rarr; inverter CAN'+j.inverter_bus+' | '+j.bitrate_bps+' bps';if(j.mode=='bms')t+=' | source '+(j.source.bound?'bound':'<span class=warn>MISSING</span>')+', '+j.source.emits+' emits';document.getElementById('canhdr').innerHTML=t;var f=j.forward,m=j.monitor;var b='bat&rarr;inv fwd '+f.to_inverter.forwarded+' / supp '+f.to_inverter.suppressed+' / drop '+f.to_inverter.dropped+'<br>inv&rarr;bat fwd '+f.to_battery.forwarded+' / supp '+f.to_battery.suppressed+' / drop '+f.to_battery.dropped+'<br>';j.buses.forEach(function(u){b+='CAN'+u.bus+' '+(u.running?'up':'down')+' rx '+u.rx+' tx '+u.tx_done+'/'+u.tx_accepted+' drop '+u.tx_dropped+' err '+u.errors+' busoff '+u.bus_off_count+' rec/tec '+u.rec+'/'+u.tec+'<br>'});b+='recorded '+m.recorded+', id overflow '+m.id_overflow;document.getElementById('canbus').innerHTML=b}).catch(()=>{});Promise.all([fetch(B+'/api/can/traffic?bus=1').then(r=>r.json()),fetch(B+'/api/can/traffic?bus=2').then(r=>r.json())]).then(function(a){document.getElementById('cantraffic').innerHTML='<table class=cells>'+canRows(1,a[0])+canRows(2,a[1])+'</table>'}).catch(()=>{})}function canMode(m){fetch(B+'/api/can/mode?mode='+m,{method:'POST'}).then(()=>pollCan()).catch(()=>{})}function canReset(){fetch(B+'/api/can/reset',{method:'POST'}).then(()=>pollCan()).catch(()=>{})}function pollCanLog(){fetch(B+'/api/can/log/status').then(r=>r.json()).then(j=>{var t='Mode: <b>'+j.mode+'</b> ('+j.state+') | held '+j.held_recs+' / '+j.capacity_recs+' recs | gap&gt;='+j.min_gap_ms+'ms hb&lt;='+j.heartbeat_ms+'ms<br>staged '+j.staged+'/'+j.stage_depth+' | dropped '+j.dropped+' stalled '+j.stalled+' writeErr '+j.write_errors+' | area '+(j.area_size_bytes/1048576).toFixed(1)+' MB';document.getElementById('canloghdr').innerHTML=t}).catch(()=>{})}function canLogMode(m){fetch(B+'/api/can/log/mode?mode='+m,{method:'POST'}).then(()=>pollCanLog()).catch(()=>{})}function canLogWipe(){if(!confirm('Erase the whole flash trace?'))return;fetch(B+'/api/can/log/wipe',{method:'POST'}).then(()=>pollCanLog()).catch(()=>{})}function poll(){pollImg();pollFwu();pollSys();pollPack();pollCells();pollPStats();pollCan();pollCanLog()}function kickFw(){fetch(B+'/api/fwu/kick',{method:'POST'}).then(r=>r.json()).then(j=>{show('fmsg','Kicked, '+j.window_sec+'s',1);poll()}).catch(e=>show('fmsg',e,0))}function confirmFw(){fetch(B+'/api/fwu/confirm',{method:'POST'}).then(r=>r.json()).then(j=>{show('fmsg','Confirmed'+(j.promote?', promoting to golden':''),1);poll()}).catch(e=>show('fmsg',e,0))}function crashPoll(){fetch(B+'/api/crash/latest').then(r=>r.json()).then(j=>{var d=document.getElementById('crash');if(!j.valid){d.innerHTML='No crash recorded.';return}var h='<b>'+j.type+'</b> at tick '+j.tick+'<br>'+'PC=0x'+j.pc+' LR=0x'+j.lr+' SP=0x'+j.sp+'<br>';if(j.task)h+='Task: '+j.task+'<br>';h+='CFSR=0x'+j.cfsr+' HFSR=0x'+j.hfsr+'<br>';if(j.scan&&j.scan.length)h+='LR scan (candidates, filter): '+j.scan.join(' ')+'<br>';if(j.tasks.length){h+='<pre>';j.tasks.forEach(function(t){h+=t.name+' ['+t.state+'] PC=0x'+t.pc+' stk='+t.free_stack+'\n'});h+='</pre>'}h+='<button class=btn-del onclick=clearCrash()>Clear</button>';d.innerHTML=h}).catch(()=>{})}function clearCrash(){fetch(B+'/api/crash/latest',{method:'DELETE'}).then(()=>crashPoll()).catch(()=>{})}function upload(){var f=document.getElementById('file').files[0];if(!f){show('imsg','Select a file first',0);return}var bar=document.getElementById('bar'),fill=document.getElementById('fill');bar.style.display='block';fill.style.width='0%';var x=new XMLHttpRequest();x.upload.onprogress=function(e){if(e.lengthComputable)fill.style.width=Math.round(100*e.loaded/e.total)+'%'};x.onload=function(){bar.style.display='none';if(x.status==200){var r=JSON.parse(x.responseText);show('imsg','Upload OK: '+r.version+' ('+r.size+' B)',1)}else{show('imsg','Upload failed: '+x.responseText,0)}poll()};x.onerror=function(){bar.style.display='none';show('imsg','Network error',0)};x.open('POST',B+'/api/image/upload');x.setRequestHeader('Content-Type','application/octet-stream');x.setRequestHeader('X-Filename',f.name.replace(/[^\x20-\x7e]/g,'_'));x.send(f)}function download(){window.location=B+'/api/image/download'}function install(){if(!confirm('Install uploaded image? Device will reboot.'))return;fetch(B+'/api/fwu/install',{method:'POST'}).then(r=>r.json()).then(j=>{if(j.status=='deploying'){show('fmsg','Installing... device will reboot',1)}else{show('fmsg','Install failed: '+(j.error||JSON.stringify(j)),0)}}).catch(e=>show('fmsg',e,0))}function del(){fetch(B+'/api/image',{method:'DELETE'}).then(r=>r.json()).then(j=>{show('imsg',j.status=='deleted'?'Image deleted':'Delete failed: '+(j.error||''),j.status=='deleted');poll()}).catch(e=>show('imsg',e,0))}poll();setInterval(poll,5000);crashPoll();</script></body></html>
+<!DOCTYPE html><html lang=en><head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>PeriphNet</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --ink:#16191d; --dim:#6b7280; --line:#e3e6ea;
+  --accent:#2f6fd0; --ok:#1a7f4b; --warn:#a86400; --bad:#b3261e;
+  --chipbg:#eef1f5; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#111418; --panel:#181c22; --ink:#e6e9ee; --dim:#9aa3ae; --line:#262c34;
+  --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --chipbg:#212831;
+}}
+:root[data-theme=dark]{
+  --bg:#111418; --panel:#181c22; --ink:#e6e9ee; --dim:#9aa3ae; --line:#262c34;
+  --accent:#6ea8fe; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --chipbg:#212831;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:14px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-bottom:4px}
+h1{font-size:19px;margin:0;letter-spacing:.2px}
+h2{font-size:14px;margin:0;letter-spacing:.3px}
+.sub{color:var(--dim);font-size:12.5px}
+.spacer{flex:1}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:8px 10px;margin:8px 0 14px;font-size:12.5px;color:var(--dim)}
+.bar b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--dim)}
+.dot.on{background:var(--ok)} .dot.off{background:var(--bad)}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:12px 13px;min-width:0}
+.card.wide{grid-column:1/-1}
+.chead{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.chead .spacer{flex:1}
+.tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);
+  background:var(--chipbg);border-radius:4px;padding:2px 6px}
+.tag.ok{color:var(--ok)} .tag.warn{color:var(--warn)} .tag.bad{color:var(--bad)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px}
+.kv dt{color:var(--dim)} .kv dd{margin:0;font-family:var(--mono);word-break:break-word}
+.num{font-family:var(--mono)}
+.muted{color:var(--dim)}
+.good{color:var(--ok)} .warnc{color:var(--warn)} .badc{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font-weight:600;color:var(--dim);font-size:11px;
+  text-transform:uppercase;letter-spacing:.4px;padding:3px 6px 3px 0;
+  border-bottom:1px solid var(--line)}
+td{padding:3px 6px 3px 0;font-family:var(--mono);white-space:nowrap}
+td.name{font-family:inherit;white-space:normal}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+button{font:inherit;font-size:12.5px;padding:5px 11px;border:1px solid var(--line);
+  border-radius:6px;background:var(--chipbg);color:var(--ink);cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+button.p{background:var(--accent);color:#fff;border-color:transparent}
+button.d{background:transparent;color:var(--bad);border-color:var(--line)}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:9px}
+select,input[type=text]{font:inherit;font-size:12.5px;padding:4px 7px;
+  border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink)}
+textarea{width:100%;min-height:180px;font-family:var(--mono);font-size:12px;
+  line-height:1.4;padding:8px;border:1px solid var(--line);border-radius:6px;
+  background:var(--bg);color:var(--ink);resize:vertical;tab-size:2}
+textarea.dirty{border-color:var(--warn)}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:8px;font-size:11.5px;overflow-x:auto;margin:0;font-family:var(--mono)}
+details>summary{cursor:pointer;color:var(--dim);font-size:12px;margin-top:8px}
+.msg{margin-top:8px;padding:7px 9px;border-radius:6px;font-size:12.5px;display:none}
+.msg.show{display:block}
+.msg.ok{background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
+.msg.err{background:color-mix(in srgb,var(--bad) 14%,transparent);color:var(--bad)}
+.msg.info{background:var(--chipbg);color:var(--dim)}
+.bars{height:8px;background:var(--chipbg);border-radius:4px;overflow:hidden;min-width:60px}
+.bars>i{display:block;height:100%;background:var(--accent)}
+.cellrow{display:grid;grid-template-columns:2.2em 5em 1fr 4em;gap:6px;
+  align-items:center;font-family:var(--mono);font-size:11.5px;padding:1px 0}
+.cellbar{height:7px;border-radius:3px;background:var(--accent);min-width:2px}
+.cellbar.lo{background:var(--bad)} .cellbar.hi{background:var(--ok)}
+.pk{border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:9px}
+.pk:first-of-type{margin-top:0}
+.hidden{display:none!important}
+</style></head><body><div class=wrap>
+
+<header>
+  <h1>PeriphNet</h1>
+  <span class=sub id=hver>connecting…</span>
+  <span class=spacer></span>
+  <span class=sub id=huptime></span>
+</header>
+
+<div class=bar>
+  <span class=dot id=hdot></span>
+  <span id=hstate>starting</span>
+  <span>·</span>
+  <span>seq <b id=hseq>0</b></span>
+  <span>·</span>
+  <span>last reply <b id=hbytes>–</b></span>
+  <span>·</span>
+  <span>changed <b id=hchanged>0</b></span>
+  <span>·</span>
+  <span><b id=hrate>–</b> req/s, <b id=hbps>–</b> B/s</span>
+  <span class=spacer></span>
+  <label>poll
+    <select id=hpoll>
+      <option value=250 selected>250 ms</option>
+      <option value=500>500 ms</option>
+      <option value=1000>1 s</option>
+      <option value=5000>5 s</option>
+      <option value=0>paused</option>
+    </select></label>
+  <button id=hfull>Full refresh</button>
+  <button id=htheme title="Toggle theme">◐</button>
+</div>
+
+<div class=grid id=grid></div>
+
+</div>
+<script>
+"use strict";
+/* ---------------------------------------------------------------------------
+ * The page holds one object per board module and never asks for a module it
+ * already has.  /api/events?since=N returns only what changed, so the steady
+ * state on a quiet board is a ~40 byte reply at whatever cadence is selected.
+ * Everything below is a pure function of S; the stream decides when to run it.
+ * ------------------------------------------------------------------------- */
+const S = {};                 /* module name -> parsed JSON, or absent        */
+let seq = 0, inflight = false, timer = null, pollMs = 250;
+let online = false, everSynced = false;
+const win = [];               /* [ms, bytes] samples for the rate readout     */
+
+const $  = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---- unit helpers: the board speaks mV / mA / mAh / per-mille / deci-C ---- */
+const V   = v => (v/1000).toFixed(3);
+const A   = v => (v/1000).toFixed(2);
+const AH  = v => (v/1000).toFixed(1);
+const PM  = v => (v/10).toFixed(1);
+const PM0 = v => (v/10).toFixed(0);
+const C   = v => (v/10).toFixed(1);
+const W   = (mv,ma) => (mv*ma/1e6).toFixed(0);
+const nz  = v => (v === undefined || v === null) ? '–' : v;
+
+function dur(s){
+  if (s === undefined || s === null) return '–';
+  let o = '';
+  if (s >= 86400) { o += Math.floor(s/86400)+'d '; s %= 86400; }
+  if (s >= 3600)  { o += Math.floor(s/3600)+'h ';  s %= 3600; }
+  if (s >= 60)    { o += Math.floor(s/60)+'m ';    s %= 60; }
+  return o + s + 's';
+}
+function age(ms){
+  if (ms === undefined || ms === null) return '–';
+  return ms < 1000 ? ms+' ms' : (ms/1000).toFixed(1)+' s';
+}
+
+/* ---------------------------------------------------------------------------
+ * Cards.  `deps` are module names; a trailing * is a prefix match, which is
+ * how the eight per-pack cell modules feed one card.
+ * ------------------------------------------------------------------------- */
+const CARDS = [];
+/* `render` is re-run whenever a dependency changes, so it must hold nothing
+ * the operator is in the middle of typing.  `fixed` is emitted once at build
+ * time and never replaced -- that is where a file input, a textarea and the
+ * action buttons live, because a card whose module carries uptime re-renders
+ * every second and would otherwise clear them under the operator's hands. */
+function card(id, title, deps, render, opts){
+  CARDS.push({id, title, deps, render, wide: !!(opts && opts.wide),
+              fixed: (opts && opts.fixed) || null});
+}
+const hits = (deps, changed) => deps.some(d =>
+  d.endsWith('*') ? changed.some(c => c.startsWith(d.slice(0,-1)))
+                  : changed.includes(d));
+
+function kv(pairs){
+  return '<dl class=kv>' + pairs.filter(Boolean).map(([k,v]) =>
+    `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('') + '</dl>';
+}
+function raw(name){
+  const v = S[name];
+  if (v === undefined) return '';
+  return `<details><summary>${esc(name)} — raw JSON</summary>`
+       + `<pre>${esc(JSON.stringify(v,null,1))}</pre></details>`;
+}
+const absent = what =>
+  `<p class=muted>${esc(what)}</p>`;
+
+/* ============================ Firmware / image ============================ */
+card('fwu','Firmware',['fwu','image'],() => {
+  const f = S.fwu, im = S.image;
+  if (!f) return absent('waiting for the board…');
+  const g = f.confirm_guard || {};
+  const conf = f.confirmed
+    ? '<span class=good>confirmed</span>'
+    : `<span class=badc>UNCONFIRMED — ${nz(f.attempts_remaining)} boots left</span>`;
+  let h = kv([
+    ['running', `${esc(f.running_version)} ${conf}`],
+    f.golden_version ? ['golden', esc(f.golden_version)] : null,
+    ['reset cause', esc(f.reset_cause)],
+    (f.last_fwu_result !== 255) ? ['last FWU result', f.last_fwu_result] : null,
+    g.armed ? ['auto-reboot',
+      `<span class=warnc>in ${g.remaining_sec}s unless kicked</span> (${g.kicks} kicks)`] : null,
+    ['stored image', im && im.present
+      ? `${esc(im.name||'(unnamed)')} · ${esc(im.version)} · ${im.size} B`
+      : '<span class=muted>none</span>'],
+  ]);
+  /* Buttons live in the fixed section; only their enabled state is derived. */
+  const dis = (id,cond) => { const e = $(id); if (e) e.disabled = !cond; };
+  dis('fwinst', im && im.present);
+  dis('fwdel',  im && im.present);
+  dis('fwconf', !f.confirmed);
+  dis('fwkick', g.armed);
+  return h;
+}, {fixed: `<div class=row>
+    <input type=file id=fwfile accept=".pnfw">
+    <button class=p id=fwup>Upload</button>
+    <button id=fwinst disabled>Install</button>
+    <button id=fwconf disabled>Confirm</button>
+    <button id=fwkick disabled>Kick</button>
+    <button class=d id=fwdel disabled>Delete</button>
+  </div>
+  <div class=bars id=fwbar style="display:none;margin-top:8px"><i style="width:0"></i></div>
+  <div class="msg" id=fwmsg></div>`});
+
+/* ================================= System ================================= */
+card('sys','System',['system'],() => {
+  const s = S.system;
+  if (!s) return absent('no system data');
+  const heapPct = 100 - (s.heap.free*100/s.heap.size);
+  let h = kv([
+    ['CPU', `${PM(s.cpu_load_permille)} % <span class=muted>(peak ${PM(s.cpu_peak_permille)} %, idle ${PM(s.idle_permille)} %)</span>`],
+    ['heap', `${s.heap.free} / ${s.heap.size} B free <span class=muted>(floor ${s.heap.free_min})</span>`],
+    ['IWDG margin', `worst gap ${s.iwdg.gap_max_ms} ms of ${s.iwdg.timeout_ms} ms`],
+    s.tasks_stale ? ['stale', `<span class=badc>${s.tasks_stale} task(s) missed a deadline</span>`] : null,
+    s.stack_warnings ? ['stacks', `<span class=warnc>${s.stack_warnings} below ${s.stack_warn_words} words</span>`] : null,
+    (s.tasks_listed < s.tasks_total)
+      ? ['listing', `<span class=warnc>${s.tasks_listed} of ${s.tasks_total} tasks — reply buffer full</span>`] : null,
+  ]);
+  h += `<div class=scroll><table><thead><tr>
+    <th>task</th><th>pri</th><th>st</th><th>CPU</th><th>peak</th>
+    <th>stack free/size</th><th>check-ins</th></tr></thead><tbody>`;
+  for (const t of s.tasks) {
+    const low = t.stack_size_words && (t.stack_free_min_words*100/t.stack_size_words) < 15;
+    h += `<tr><td class=name>${esc(t.name)}${t.stale?' <span class=badc>STALE</span>':''}</td>
+      <td>${t.prio}</td><td>${esc(t.state)}</td>
+      <td>${PM(t.cpu_permille)}%</td><td>${PM(t.cpu_peak_permille)}%</td>
+      <td class="${low?'badc':''}">${t.stack_free_min_words}/${t.stack_size_words||'?'}</td>
+      <td>${t.checkins}${t.deadline_ms?` <span class=muted>(${t.since_checkin_ms} ms)</span>`:''}</td></tr>`;
+  }
+  h += `</tbody></table></div>` + raw('system');
+  return h;
+}, {wide:true, fixed:`<div class=row><button id=sysrp>Reset peaks</button>
+  <button class=d id=sysreb>Reboot</button></div>`});
+
+/* ============================== Battery packs ============================= */
+card('packs','Battery packs',['pack','packCells*'],() => {
+  const p = S.pack;
+  if (!p) return absent('no pack data');
+  if (!p.provisioned) return absent('unprovisioned — upload a pack configuration below');
+  if (!p.packs || !p.packs.length) return absent('configured, but no packs reported');
+
+  let h = `<p class=sub>${p.count} pack${p.count===1?'':'s'} ·
+    ${p.stats.updates} updates · ${p.stats.stale} stale ·
+    ${p.stats.bindFailures} bind failures</p>`;
+
+  for (const k of p.packs) {
+    const bad = k.cond !== 'online';
+    const cells = S['packCells'+k.idx];
+    h += `<div class=pk><div class=chead>
+      <h2>${esc(k.name)}</h2>
+      <span class="tag ${bad?'bad':'ok'}">${esc(k.cond)}</span>
+      ${bad&&k.whyText?`<span class=muted>${esc(k.whyText)}</span>`:''}
+      <span class=spacer></span>
+      <span class=muted>#${k.idx} · ${esc(k.type)}</span></div>`;
+    h += kv([
+      ['electrical', `${V(k.voltage_mV)} V · ${A(k.current_mA)} A · ${W(k.voltage_mV,k.current_mA)} W`],
+      ['SOC', `${PM(k.soc_pm)} % <span class=muted>conf ${PM0(k.socConf_pm)} %` +
+        (k.socDrift_pm?`, drift ${PM(k.socDrift_pm)} %`:'') + '</span>'],
+      ['charge', `${AH(k.remaining_mAh)} of ${AH(k.capacity_mAh)} Ah ` +
+        `<span class=muted>(nameplate ${AH(k.nameplate_mAh)} Ah)</span>`],
+      ['SOH', `${PM0(k.soh_pm)} % <span class=muted>conf ${PM0(k.sohConf_pm)} %</span>`],
+      ['limits', `${A(k.chargeLimit_mA)} A chg / ${A(k.dischargeLimit_mA)} A dsg · ` +
+        `${V(k.chargeVoltLimit_mV)}–${V(k.dischargeVoltLimit_mV)} V`],
+      ['switches', `chg ${esc(k.chargeSwitchText)} · dsg ${esc(k.dischargeSwitchText)}`],
+      ['temperature', `${C(k.tempMin_dC)} – ${C(k.tempMax_dC)} °C`],
+      ['cells', `${k.cellMin_mV}–${k.cellMax_mV} mV ` +
+        `<span class=muted>spread ${k.cellMax_mV-k.cellMin_mV} mV, ` +
+        `min #${k.cellMinIdx}, max #${k.cellMaxIdx}</span>`],
+      ['anchoring', k.anchorSamples
+        ? `${k.dcRes_uOhm} µΩ over ${k.dcResSteps} steps · ${k.anchorSamples} rest samples`
+        : `<span class=warnc>never anchored from rest — SOC is free-running</span>`],
+      k.alarms ? ['alarms', `<span class=badc>${esc((k.alarmNames||[]).join(', ')||('0x'+k.alarms.toString(16)))}</span>`] : null,
+      ['oldest group', age(Math.max.apply(null, k.age_ms||[0]))],
+    ]);
+    if (cells && cells.cells && cells.cells.length) {
+      const mv = cells.cells.map(c => c.mV);
+      const lo = Math.min.apply(null, mv), hi = Math.max.apply(null, mv);
+      h += `<details><summary>${cells.cellCount} cells · spread ${hi-lo} mV`
+         + (cells.balance ? ` · balancer ${cells.balance.active?'ON':'idle'}` : '')
+         + `</summary><div style="margin-top:6px">`;
+      cells.cells.forEach((c,i) => {
+        const w = hi>lo ? Math.round((c.mV-lo)*100/(hi-lo)) : 0;
+        const cls = c.mV===lo ? 'lo' : (c.mV===hi ? 'hi' : '');
+        h += `<div class=cellrow><span class=muted>${i}</span><span>${c.mV} mV</span>
+          <span class=bars><i class="cellbar ${cls}" style="width:${Math.max(w,2)}%"></i></span>
+          <span class=muted>${c.soc_pm>=0?PM(c.soc_pm)+'%':'–'}</span></div>`;
+      });
+      h += `</div></details>`;
+    }
+    h += `</div>`;
+  }
+  return h + raw('pack');
+}, {wide:true});
+
+/* ================================ Cluster ================================= */
+card('cluster','Battery cluster',['cluster'],() => {
+  const c = S.cluster;
+  if (!c) return absent('no cluster data');
+  if (!c.provisioned) return absent('unprovisioned — the published limits are zero');
+  const p = c.published;
+  const lim = d => {
+    const l = c.limit[d];
+    return `<b class=num>${A(l.published_mA)} A</b> <span class=muted>` +
+      `target ${A(l.target_mA)} → derated ${A(l.derated_mA)} → published` +
+      ` · ${esc(l.state)} (${esc(l.why)})` +
+      (l.bindingPack !== null && l.bindingPack !== undefined
+        ? ` · bound by ${esc(l.bindingPack)}` : ' · nobody binds a prediction') +
+      ` · load ${PM(l.loadMax_pm)} %</span>`;
+  };
+  let h = kv([
+    ['state', `<span class="tag ${c.cond==='online'?'ok':'bad'}">${esc(c.cond)}</span> ` +
+      `${c.online}/${c.members} online · ${esc(c.profile)} · seq ${c.seq} · ${age(c.age_ms)} old`],
+    ['published', `${V(p.voltage_mV)} V · ${A(p.current_mA)} A · ` +
+      `${PM(p.soc_pm)} % · ${AH(p.remaining_mAh)} of ${AH(p.capacity_mAh)} Ah`],
+    ['spread', `${p.voltSpread_mV} mV between packs`],
+    ['charge limit', lim('charge')],
+    ['discharge limit', lim('discharge')],
+    ['voltage window', `${V(p.chargeVoltLimit_mV)} – ${V(p.dischargeVoltLimit_mV)} V`],
+    ['allowed', `${p.chargeAllowed?'charge':'<span class=badc>no charge</span>'} · ` +
+      `${p.dischargeAllowed?'discharge':'<span class=badc>no discharge</span>'}`],
+    (p.clusterAlarms && p.clusterAlarms.length)
+      ? ['cluster alarms', `<span class=warnc>${esc(p.clusterAlarms.join(', '))}</span>`] : null,
+    (p.missing && p.missing.length)
+      ? ['missing', `<span class=badc>${esc(p.missing.join(', '))}</span>`] : null,
+  ]);
+  if (c.packs && c.packs.length) {
+    h += `<div class=scroll><table><thead><tr><th>member</th><th>state</th>
+      <th>current</th><th>share</th><th>load</th><th>SOC</th><th>age</th><th>flags</th>
+      </tr></thead><tbody>`;
+    for (const m of c.packs) {
+      h += `<tr><td class=name>${esc(m.name)}</td><td>${esc(m.state)}</td>
+        <td>${A(m.current_mA)} A</td><td>${PM(m.share_pm)}%</td>
+        <td>${PM(m.load_pm)}%</td><td>${PM(m.soc_pm)}%</td>
+        <td>${age(m.elecAge_ms)}</td>
+        <td class="${m.flags&&m.flags.length?'warnc':''}">${esc((m.flags||[]).join(',')||'–')}</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+  const st = c.stats;
+  h += `<p class=sub style="margin-top:8px">ticks ${st.ticks} · predicted chg/dsg
+    ${st.predictedChg}/${st.predictedDsg} · diverge soc/share
+    ${st.divergeSoc}/${st.divergeShare} · sanitised ${st.sanitised}</p>`;
+  return h + raw('cluster');
+}, {wide:true});
+
+/* ================================== CAN =================================== */
+card('can','CAN bridge',['can','canLog'],() => {
+  const c = S.can;
+  if (!c) return absent('no CAN data');
+  let h = kv([
+    ['mode', `<span class=tag>${esc(c.mode)}</span> battery CAN${c.battery_bus}
+      → inverter CAN${c.inverter_bus} · ${c.bitrate_bps} bps`],
+    c.source ? ['frame source', c.source.bound
+      ? `bound · ${c.source.emits} emits`
+      : '<span class=warnc>not bound</span>'] : null,
+    ['bat→inv', `fwd ${c.forward.to_inverter.forwarded} · supp
+      ${c.forward.to_inverter.suppressed} · drop ${c.forward.to_inverter.dropped}`],
+    ['inv→bat', `fwd ${c.forward.to_battery.forwarded} · supp
+      ${c.forward.to_battery.suppressed} · drop ${c.forward.to_battery.dropped}`],
+  ]);
+  h += `<div class=scroll><table><thead><tr><th>bus</th><th>up</th><th>rx</th>
+    <th>tx</th><th>drop</th><th>err</th><th>bus-off</th><th>rec/tec</th>
+    </tr></thead><tbody>`;
+  for (const b of c.buses) {
+    h += `<tr><td>CAN${b.bus}</td><td class="${b.running?'good':'badc'}">${b.running?'up':'down'}</td>
+      <td>${b.rx}</td><td>${b.tx_done}/${b.tx_accepted}</td><td>${b.tx_dropped}</td>
+      <td class="${b.errors?'warnc':''}">${b.errors}</td><td>${b.bus_off_count}</td>
+      <td>${b.rec}/${b.tec}</td></tr>`;
+  }
+  h += `</tbody></table></div>`;
+  if (S.canLog) {
+    const l = S.canLog;
+    h += `<p class=sub style="margin-top:8px">flash trace: <b>${esc(l.mode)}</b>
+      (${esc(l.state)}) · ${l.held_recs}/${l.capacity_recs} recs ·
+      dropped ${l.dropped} · ${(l.area_size_bytes/1048576).toFixed(1)} MB</p>`;
+  }
+  return h + raw('can');
+}, {fixed:`<div class=row>
+    <button data-can=bridge>Bridge</button><button data-can=monitor>Monitor</button>
+    <button data-can=bms>Be the BMS</button><button class=d data-can=off>Off</button>
+    <button id=canrst>Reset counters</button></div>
+    <div class="msg" id=canmsg></div>`});
+
+/* ================================= Modbus ================================= */
+card('modbus','Modbus',['modbusCfg','modbusBus','modbusGw','modbusPlans'],() => {
+  const c = S.modbusCfg, b = S.modbusBus, g = S.modbusGw;
+  if (!c) return absent('no Modbus data');
+  let h = kv([
+    ['config', `<span class="tag ${c.valid?'ok':'bad'}">${esc(c.state)}</span>
+      region ${c.active_region} · ${c.devices} devices · ${c.plans} plans ·
+      ${c.points} points`],
+    ['scheduler', `${c.scheduler.sequences} sequences · ${c.scheduler.ticks_live} live · ` +
+      (c.scheduler.arm_failures
+        ? `<span class=badc>${c.scheduler.arm_failures} arm failures</span>`
+        : '<span class=good>healthy</span>')],
+    g ? ['TCP gateway', g.listening
+      ? `listening on ${esc(g.bind_ip)}:502 · ${g.connections} conns ·
+         ${g.requests} reqs · ${g.exceptions} exc · ${g.busy_exceptions} busy`
+      : '<span class=muted>not listening — no tunnel configured</span>'] : null,
+  ]);
+  if (c.devices_state && c.devices_state.length) {
+    h += `<div class=scroll><table><thead><tr><th>device</th><th>slave</th><th>port</th>
+      <th>baud</th><th>plans</th><th>polled</th></tr></thead><tbody>`;
+    for (const d of c.devices_state) {
+      h += `<tr><td class=name>${esc(d.prefix)}</td><td>${d.slave}</td>
+        <td class="${d.port_up?'':'badc'}">${esc(d.port)}</td><td>${d.baud}</td>
+        <td>${d.plans}</td><td>${d.polled?'yes':'<span class=muted>no</span>'}</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+  if (b && b.ports) {
+    h += `<div class=scroll><table><thead><tr><th>port</th><th>txns</th>
+      <th>duty (life)</th><th>duty (60 s)</th><th>last</th><th>longest</th>
+      </tr></thead><tbody>`;
+    for (const p of b.ports) {
+      h += `<tr><td class=name>${esc(p.port)}</td><td>${nz(p.txns)}</td>
+        <td>${PM(p.duty_permille)}%</td><td>${PM(p.win_permille)}%</td>
+        <td>${nz(p.last_ms)} ms</td><td class="${p.max_ms>=1000?'warnc':''}">${nz(p.max_ms)} ms</td></tr>`;
+    }
+    h += `</tbody></table></div>`;
+  }
+  return h + raw('modbusCfg') + raw('modbusBus') + raw('modbusGw');
+}, {wide:true});
+
+/* ================================ BatComm ================================= */
+card('batcomm','Battery comms',['batcomm'],() => {
+  const b = S.batcomm;
+  if (!b) return absent('this firmware has no BatComm module, or it is unconfigured');
+  let h = kv([
+    ['state', `<span class=tag>${esc(b.state)}</span> ${esc(b.why||'')}`],
+    ['dialect', esc(b.dialect)],
+    ['peripheral', `inverter on CAN${nz(b.peripheral)}`],
+    ['source', esc(b.source)],
+  ]);
+  if (b.input) {
+    h += `<p class=sub style="margin-top:8px">as it went on the wire:</p>` + kv(
+      Object.entries(b.input).map(([k,v]) => [k, `<span class=num>${esc(v)}</span>`]));
+  }
+  return h + raw('batcomm');
+});
+
+/* =============================== WireGuard ================================ */
+card('wg','WireGuard',['wg'],() => {
+  const w = S.wg;
+  if (!w) return absent('no tunnel data');
+  return kv([
+    ['session', w.session_up
+      ? '<span class=good>up</span>' : '<span class=badc>DOWN</span>'],
+    ['provisioned', w.provisioned ? 'yes' : '<span class=badc>no</span>'],
+    ['tunnel', `${esc(w.tunnel_ip)}/${nz(w.tunnel_mask)}`],
+    ['endpoint', `${esc(w.endpoint_ip)}:${nz(w.endpoint_port)} · keepalive ${nz(w.keepalive)}`],
+    ['local port', `<b class=num>${nz(w.local_port)}</b>
+      <span class=muted>${nz(w.port_rotations)} rotations</span>`],
+    ['silence', `${age(w.alive_age_ms)} since the hub last proved it is there`],
+    ['ladder', `rung ${nz(w.ladder_rung)} · ${nz(w.recoveries)} rebuilds · ` +
+      `${nz(w.terminal_reboots)}/${nz(w.terminal_reboots_max)} terminal reboots`],
+    ['RNG', w.rng_hw_seeded ? 'hardware seeded'
+      : '<span class=warnc>fell back to jitter</span>'],
+    ['public key', `<span style="font-size:11px">${esc(w.public_key)}</span>`],
+  ]) + raw('wg');
+});
+
+/* ================================== nvDb ================================== */
+card('nvdb','Storage',['nvdbLayout','nvdbUsage'],() => {
+  const l = S.nvdbLayout;
+  if (!l) return absent('no storage data');
+  let h = kv([
+    ['layout', `${esc(l.name)} v${l.version} · nvdbVer ${l.nvdbVer}`],
+    ['free', `${(l.freeSpace/1048576).toFixed(2)} MB`],
+    ['last apply', `${esc(l.lastApplyMode)} → result ${l.lastApplyResult}`],
+    l.onboarding && l.onboarding !== 'none'
+      ? ['pending', `<span class=warnc>${esc(l.onboarding)} — applies at next boot</span>`] : null,
+  ]);
+  h += `<details><summary>${Object.keys(l.users).length} users</summary>
+    <div class=scroll><table><thead><tr><th>user</th><th>size</th></tr></thead><tbody>`;
+  for (const [k,v] of Object.entries(l.users)) {
+    h += `<tr><td class=name>${esc(k)}</td><td>${v >= 1048576
+      ? (v/1048576).toFixed(1)+' MB' : (v/1024).toFixed(0)+' KB'}</td></tr>`;
+  }
+  h += `</tbody></table></div></details>`;
+  return h + raw('nvdbUsage');
+});
+
+/* ============================ Crash / restart ============================= */
+card('crash','Last crash & restart',['crash','lastRestart'],() => {
+  const c = S.crash, r = S.lastRestart;
+  let h = '';
+  if (!c || !c.valid) h += absent('no crash recorded');
+  else {
+    h += kv([
+      ['type', `<span class=badc>${esc(c.type)}</span> at tick ${c.tick}`],
+      ['registers', `PC=0x${c.pc} LR=0x${c.lr} SP=0x${c.sp}`],
+      ['fault regs', `CFSR=0x${c.cfsr} HFSR=0x${c.hfsr}`],
+      c.task ? ['task', esc(c.task)] : null,
+      (c.scan && c.scan.length) ? ['LR scan', esc(c.scan.join(' '))] : null,
+    ]);
+    h += `<div class=row><button class=d id=crclr>Clear</button></div>`;
+  }
+  if (r && r.present) {
+    h += `<p class=sub style="margin-top:10px">Black box — the board restarted itself:</p>`;
+    h += kv(Object.entries(r).filter(([k]) => k !== 'present')
+      .map(([k,v]) => [k, esc(typeof v === 'object' ? JSON.stringify(v) : v)]));
+  }
+  return h;
+});
+
+/* ============================ Configuration =============================== */
+const CFGS = [
+  {key:'pack',    label:'Battery packs',   mod:'packCfg',
+   get:null, verify:'/api/pack/config/verify',   apply:'/api/pack/config',
+   del:'/api/pack/config',    note:'applied on return'},
+  {key:'cluster', label:'Battery cluster', mod:'clusterCfg',
+   get:null, verify:'/api/cluster/config/verify', apply:'/api/cluster/config',
+   del:'/api/cluster/config', note:'202 Accepted — STAGED, adopted at the next tick'},
+  {key:'batcomm', label:'Battery comms',   mod:'batcommCfg',
+   get:null, verify:'/api/batcomm/config/verify', apply:'/api/batcomm/config',
+   del:'/api/batcomm/config', note:'LIVE on return; a moved peripheral bounces both CAN cells'},
+  {key:'modbus',  label:'Modbus registers', mod:null,
+   get:'/api/modbus/config/download', verify:'/api/modbus/config/verify',
+   apply:'/api/modbus/config/upload', then:'/api/modbus/config/apply',
+   del:'/api/modbus/config',  note:'upload compiles, then apply swaps — 16 KB, fetched on demand'},
+  {key:'nvdb',    label:'Storage layout',  mod:'nvdbLayout',
+   get:null, verify:null, apply:'/api/nvdb/layout',
+   del:'/api/nvdb/layout',    note:'202 Accepted — applied at the NEXT BOOT only'},
+];
+const dirty = {};
+
+card('cfg','Configuration',[],() => '', {wide:true, fixed:
+  `<p class=sub>Each module round-trips its own JSON. Verify writes nothing —
+    a 422 names the offending index and key.</p>
+    <div class=row><label>module
+      <select id=cfgsel>${CFGS.map(c =>
+        `<option value=${c.key}>${esc(c.label)}</option>`).join('')}</select></label>
+      <button id=cfgload>Reload from board</button>
+      <span class=spacer></span>
+      <span class=sub id=cfgnote></span></div>
+    <div style="margin-top:8px"><textarea id=cfgta spellcheck=false
+      placeholder="select a module…"></textarea></div>
+    <div class=row>
+      <button id=cfgver>Verify</button>
+      <button class=p id=cfgapp>Apply</button>
+      <button class=d id=cfgdel>Erase</button>
+      <span class=spacer></span>
+      <span class=sub id=cfgdirty></span></div>
+    <div class="msg" id=cfgmsg></div>`});
+
+/* ============================== Raw modules =============================== */
+card('rawall','All module JSON',[],() => {
+  const names = Object.keys(S).sort();
+  return `<p class=sub>${names.length} modules held. This is the whole board state
+    the page is working from.</p>
+    <details><summary>show everything</summary>
+    <pre>${esc(JSON.stringify(S,null,1))}</pre></details>`;
+}, {wide:true});
+
+/* ---------------------------------------------------------------------------
+ * Rendering
+ * ------------------------------------------------------------------------- */
+function build(){
+  $('grid').innerHTML = CARDS.map(c =>
+    `<section class="card${c.wide?' wide':''}" id="card-${c.id}">
+       <div class=chead><h2>${esc(c.title)}</h2><span class=spacer></span>
+         <span class=tag id="tag-${c.id}"></span></div>
+       <div id="body-${c.id}"></div>
+       ${c.fixed ? `<div id="fixed-${c.id}">${c.fixed}</div>` : ''}
+     </section>`).join('');
+}
+function renderCards(changed, all){
+  for (const c of CARDS) {
+    /* A card with no dependencies is static: re-running it on every delta
+     * would fight the operator for the <details> they just opened. */
+    if (!all && (c.deps.length === 0 || !hits(c.deps, changed))) continue;
+    const el = $('body-'+c.id);
+    if (!el) continue;
+
+    /* Disclosure state is the operator's, not the renderer's.  Pack cells sit
+     * behind a <details> on a card that updates four times a second, so
+     * without this it could never be held open long enough to read. */
+    const open = [...el.querySelectorAll('details')].map(d => d.open);
+
+    let html;
+    try { html = c.render(); }
+    catch (e) { html = `<p class=badc>render error: ${esc(e.message)}</p>`; }
+    el.innerHTML = html;
+
+    const now = el.querySelectorAll('details');
+    for (let i = 0; i < now.length && i < open.length; i++) now[i].open = open[i];
+  }
+  wire();
+}
+
+/* ---------------------------------------------------------------------------
+ * The delta stream
+ * ------------------------------------------------------------------------- */
+async function tick(full){
+  if (inflight) return;
+  inflight = true;
+  try {
+    const url = full ? '/api/events?since=0&full=1' : '/api/events?since=' + seq;
+    const res = await fetch(url, {cache:'no-store'});
+    const txt = await res.text();
+    const j   = JSON.parse(txt);
+
+    seq = j.seq;
+    const ch = j.changed || {};
+    const names = Object.keys(ch);
+    for (const k of names) {
+      if (ch[k] === null) delete S[k]; else S[k] = ch[k];
+    }
+    online = true; everSynced = true;
+
+    win.push([Date.now(), txt.length]);
+    while (win.length && Date.now() - win[0][0] > 5000) win.shift();
+
+    if (names.length || full) renderCards(names, full);
+    /* The editor is fixed HTML, so the stream has to push into it directly --
+     * and only when the operator has not started typing. */
+    const cfgMod = CFGS.find(c => c.key === ($('cfgsel') || {}).value);
+    if (cfgMod && cfgMod.mod && names.includes(cfgMod.mod)) loadCfg(false);
+    stats(txt.length, names.length);
+  } catch (e) {
+    online = false;
+    $('hstate').textContent = 'unreachable — ' + e.message;
+    $('hdot').className = 'dot off';
+  } finally {
+    inflight = false;
+    schedule();
+  }
+}
+function schedule(){
+  if (timer) clearTimeout(timer);
+  if (pollMs > 0) timer = setTimeout(() => tick(false), pollMs);
+}
+function stats(bytes, n){
+  const f = S.fwu;
+  if (f) {
+    $('hver').textContent = f.running_version +
+      (f.confirmed ? ' · confirmed' : ' · UNCONFIRMED');
+    $('huptime').textContent = 'up ' + dur(f.uptime);
+  }
+  $('hdot').className   = 'dot ' + (online ? 'on' : 'off');
+  $('hstate').textContent = online
+    ? (n ? n + ' module' + (n===1?'':'s') + ' updated' : 'no update')
+    : 'unreachable';
+  $('hseq').textContent     = seq;
+  $('hbytes').textContent   = bytes + ' B';
+  $('hchanged').textContent = n;
+  if (win.length > 1) {
+    const span = (win[win.length-1][0] - win[0][0]) / 1000 || 1;
+    const tot  = win.reduce((a,b) => a + b[1], 0);
+    $('hrate').textContent = (win.length/span).toFixed(1);
+    $('hbps').textContent  = Math.round(tot/span);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Actions
+ * ------------------------------------------------------------------------- */
+function msg(id, text, kind){
+  const m = $(id); if (!m) return;
+  m.textContent = text;
+  m.className = 'msg show ' + (kind || 'info');
+}
+async function post(url, body, ct){
+  const o = {method:'POST'};
+  if (body !== undefined) {
+    o.body = body;
+    o.headers = {'Content-Type': ct || 'application/json'};
+  }
+  const r = await fetch(url, o);
+  const t = await r.text();
+  let j = null; try { j = JSON.parse(t); } catch(e){}
+  return {ok:r.ok, status:r.status, text:t, json:j};
+}
+/* Assignment, not addEventListener: wire() runs after every render and must
+ * not stack a second copy of a handler onto a fixed element that survived. */
+function on(id, ev, fn){ const e = $(id); if (e) e['on'+ev] = fn; }
+
+function wire(){
+  /* --- firmware --- */
+  on('fwup','click', async () => {
+    const f = $('fwfile').files[0];
+    if (!f) return msg('fwmsg','Select a .pnfw file first','err');
+    const bar = $('fwbar'); bar.style.display='block';
+    const x = new XMLHttpRequest();
+    x.upload.onprogress = e => {
+      if (e.lengthComputable)
+        bar.firstElementChild.style.width = Math.round(100*e.loaded/e.total)+'%';
+    };
+    x.onload = () => {
+      bar.style.display='none';
+      msg('fwmsg', x.status===200 ? 'Upload OK' : 'Upload failed: '+x.responseText,
+          x.status===200 ? 'ok' : 'err');
+      tick(true);
+    };
+    x.onerror = () => { bar.style.display='none'; msg('fwmsg','Network error','err'); };
+    x.open('POST','/api/image/upload');
+    x.setRequestHeader('Content-Type','application/octet-stream');
+    x.setRequestHeader('X-Filename', f.name.replace(/[^\x20-\x7e]/g,'_'));
+    x.send(f);
+  });
+  on('fwinst','click', async () => {
+    if (!confirm('Install the uploaded image? The board reboots.')) return;
+    const r = await post('/api/fwu/install');
+    msg('fwmsg', r.ok ? 'Installing — the board is rebooting' : 'Failed: '+r.text,
+        r.ok ? 'ok':'err');
+  });
+  on('fwconf','click', async () => {
+    const r = await post('/api/fwu/confirm');
+    msg('fwmsg', r.ok ? 'Confirmed — rollback disarmed, stored image promoted to golden'
+                      : 'Failed: '+r.text, r.ok?'ok':'err');
+    tick(true);
+  });
+  on('fwkick','click', async () => {
+    const r = await post('/api/fwu/kick');
+    msg('fwmsg', r.ok ? 'Kicked — countdown reloaded' : 'Failed: '+r.text, r.ok?'ok':'err');
+    tick(true);
+  });
+  on('fwdel','click', async () => {
+    if (!confirm('Erase the stored image?')) return;
+    await fetch('/api/image',{method:'DELETE'}); tick(true);
+  });
+  /* --- system --- */
+  on('sysrp','click', async () => { await post('/api/system/reset-peaks'); tick(true); });
+  on('sysreb','click', async () => {
+    if (!confirm('Reboot the board now?')) return;
+    await post('/api/system/reboot');
+    $('hstate').textContent = 'rebooting…';
+  });
+  /* --- CAN --- */
+  document.querySelectorAll('[data-can]').forEach(b => {
+    b.onclick = async () => {
+      const m = b.getAttribute('data-can');
+      if (m === 'bms' && !confirm('Take over the inverter link as its BMS?')) return;
+      const r = await post('/api/can/mode?mode=' + m);
+      msg('canmsg', r.ok ? 'mode → '+m : 'failed: '+r.text, r.ok?'ok':'err');
+      tick(true);
+    };
+  });
+  on('canrst','click', async () => { await post('/api/can/reset'); tick(true); });
+  on('crclr','click', async () => { await fetch('/api/crash/latest',{method:'DELETE'}); tick(true); });
+  /* --- configuration --- */
+  on('cfgsel','change', loadCfg);
+  on('cfgload','click', () => loadCfg(true));
+  on('cfgta','input', () => {
+    const k = $('cfgsel').value;
+    dirty[k] = true;
+    $('cfgta').classList.add('dirty');
+    $('cfgdirty').textContent = 'edited — not sent';
+  });
+  on('cfgver','click', () => sendCfg(true));
+  on('cfgapp','click', () => sendCfg(false));
+  on('cfgdel','click', async () => {
+    const sel = $('cfgsel');
+    const c = CFGS.find(x => x.key === (sel && sel.value));
+    if (!c) return;
+    if (!confirm('Erase the '+c.label+' configuration? The board becomes unprovisioned '
+               + 'and there is no built-in default to fall back to.')) return;
+    const r = await fetch(c.del,{method:'DELETE'});
+    msg('cfgmsg', r.ok ? 'Erased' : 'Failed: '+await r.text(), r.ok?'ok':'err');
+    tick(true);
+  });
+}
+
+let cfgLoadedFor = null;
+async function loadCfg(force){
+  const sel = $('cfgsel');
+  const c = CFGS.find(x => x.key === (sel && sel.value)) || CFGS[0];
+  if (sel && !sel.value) sel.value = c.key;
+  $('cfgnote').textContent = c.note;
+  $('cfgver').disabled = !c.verify;
+  if (!force && dirty[c.key]) return;
+  let text = '';
+  if (c.mod && S[c.mod] !== undefined) {
+    text = JSON.stringify(S[c.mod], null, 2);
+  } else if (c.get) {
+    try {
+      const r = await fetch(c.get);
+      text = r.ok ? JSON.stringify(JSON.parse(await r.text()), null, 2)
+                  : '(' + r.status + ' — nothing stored)';
+    } catch (e) { text = '(fetch failed: ' + e.message + ')'; }
+  } else {
+    text = '(not present on this board)';
+  }
+  $('cfgta').value = text;
+  dirty[c.key] = false;
+  $('cfgta').classList.remove('dirty');
+  $('cfgdirty').textContent = '';
+  cfgLoadedFor = c.key;
+}
+async function sendCfg(verifyOnly){
+  const sel = $('cfgsel');
+  const c = CFGS.find(x => x.key === (sel && sel.value));
+  if (!c) return msg('cfgmsg','No module selected','err');
+  const body = $('cfgta').value;
+  try { JSON.parse(body); }
+  catch (e) { return msg('cfgmsg','Not valid JSON: '+e.message,'err'); }
+  const url = verifyOnly ? c.verify : c.apply;
+  if (!url) return msg('cfgmsg','This module has no verify endpoint','err');
+  const r = await post(url, body);
+  if (!r.ok) {
+    const j = r.json || {};
+    return msg('cfgmsg', `${r.status} — ` +
+      (j.error || r.text) +
+      (j.field ? ` (field "${j.field}"` + (j.index!==undefined?`, index ${j.index}`:'') + ')' : ''),
+      'err');
+  }
+  if (verifyOnly) return msg('cfgmsg','Verified — nothing was written','ok');
+  if (c.then) {
+    const r2 = await post(c.then);
+    return msg('cfgmsg', r2.ok ? 'Uploaded and applied' : 'Uploaded, apply failed: '+r2.text,
+               r2.ok?'ok':'err');
+  }
+  dirty[c.key] = false;
+  $('cfgta').classList.remove('dirty');
+  $('cfgdirty').textContent = '';
+  msg('cfgmsg', r.status === 202
+      ? '202 Accepted — staged, not yet in force. ' + c.note
+      : 'Applied (' + r.status + ')', 'ok');
+  tick(true);
+}
+
+/* ---------------------------------------------------------------------------
+ * Boot
+ * ------------------------------------------------------------------------- */
+$('hpoll').addEventListener('change', e => {
+  pollMs = parseInt(e.target.value, 10);
+  if (pollMs > 0) schedule();
+  else if (timer) { clearTimeout(timer); timer = null; $('hstate').textContent = 'paused'; }
+});
+$('hfull').addEventListener('click', () => tick(true));
+$('htheme').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('pn-theme', next); } catch (e) {}
+});
+try {
+  const t = localStorage.getItem('pn-theme');
+  if (t) document.documentElement.setAttribute('data-theme', t);
+} catch (e) {}
+
+build();
+renderCards([], true);
+loadCfg();
+tick(true);
+</script></body></html>
