@@ -1,9 +1,12 @@
 /*
  * batcomm_frame.c
  *
- * The pure encoder (docs/design_battery_comm.md §4).  Every byte here is
- * either measured in reference_dyness_can_capture_2026-09-05.md or is a
- * documented zero; nothing is invented.
+ * The pure encoder (docs/design_battery_comm.md §4).  Every byte of the
+ * dyness_lv set is either measured in reference_dyness_can_capture_2026-09-05.md
+ * or is a documented zero; nothing is invented.  The pylon_lv set is the
+ * standard Pylontech layout (docs/design_can_bms_frame_source.md §4.1) and has
+ * NOT been captured off a wire — its 0x35E string and the 'P','N' bytes of
+ * 0x359 are the specification's, not a measurement.
  *
  * LIBC ONLY, ZERO FILE STATICS, NO FLOAT.  See batcomm_frame.h.
  *
@@ -51,8 +54,18 @@ static void     frame_init(sBatCommFrame *out, uint32_t id);
 static int32_t  current_counts(const sBatCommTune *t, int32_t mA);
 static uint16_t limit_counts(const sBatCommTune *t, uint32_t mA, int allowed);
 static void     alarm_bytes(const sBatCommIn *in, uint8_t *b);
+static int      build_limits(const sBatCommTune *t, const sBatCommIn *in,
+                             sBatCommFrame *out);
+static void     build_soc(const sBatCommIn *in, sBatCommFrame *out);
+static void     build_measure(const sBatCommTune *t, const sBatCommIn *in,
+                              sBatCommFrame *out);
+static void     build_alarm(const sBatCommTune *t, const sBatCommIn *in,
+                            int withPn, sBatCommFrame *out);
+static void     build_chgctrl(const sBatCommIn *in, sBatCommFrame *out);
 static int      build_dyness(const sBatCommTune *t, const sBatCommIn *in,
                              uint8_t slot, sBatCommFrame *out);
+static int      build_pylon(const sBatCommTune *t, const sBatCommIn *in,
+                            uint8_t slot, sBatCommFrame *out);
 
 /* Private functions --------------------------------------------------------*/
 
@@ -188,6 +201,142 @@ static void alarm_bytes(const sBatCommIn *in, uint8_t *b)
     }
 }
 
+/* --- the frames the two dialects share -------------------------------------
+ * 0x351, 0x355, 0x356, 0x359 and 0x35C are the same fields in the same
+ * positions in dyness_lv and pylon_lv, so there is ONE encoder for each and
+ * the host tests can assert that the two dialects agree on the bytes they
+ * have in common rather than hoping two copies stayed in step.
+ * ------------------------------------------------------------------------*/
+
+/** 0x351.  Returns 0 when WITHHELD.
+ *
+ *  0x351 IS WITHHELD, NOT ZEROED, when a voltage limit is missing.  A zero CVL
+ *  is an instruction to stop charging and a pack that cannot report its limits
+ *  has not given one. */
+static int build_limits(const sBatCommTune *t, const sBatCommIn *in,
+                        sBatCommFrame *out)
+{
+    if (((in->fields & (uint16_t)batField_chargeVoltLimit) == 0u) ||
+        ((in->fields & (uint16_t)batField_dischargeVoltLimit) == 0u)) {
+        return 0;
+    }
+    /* A VOLTAGE LIMIT OF ZERO IS INVALID WHATEVER THE VALIDITY BIT SAYS.  No
+     * battery has a 0 V limit, so a zero here is a value nobody has read yet
+     * (a capability is advertised from bind, the register arrives later) —
+     * found on hardware 2026-10-04, when booting straight into `bms` put an
+     * all-zero 0x351 on the wire for the first seconds.  Withhold it, exactly
+     * as for a missing limit. */
+    if ((in->chargeVoltLimit_mV == 0u) || (in->dischargeVoltLimit_mV == 0u)) {
+        return 0;
+    }
+    frame_init(out, BATCOMM_ID_LIMITS);
+    put_u16(&out->data[0], sat_u15(in->chargeVoltLimit_mV / 100u));
+    put_u16(&out->data[2],
+            limit_counts(t, in->chargeLimit_mA,
+                         ((in->fields & (uint16_t)batField_chargeLimit) !=
+                          0u) && (in->chargeAllowed != 0u)));
+    put_u16(&out->data[4],
+            limit_counts(t, in->dischargeLimit_mA,
+                         ((in->fields & (uint16_t)batField_dischargeLimit) !=
+                          0u) && (in->dischargeAllowed != 0u)));
+    put_u16(&out->data[6], sat_u15(in->dischargeVoltLimit_mV / 100u));
+    return 1;
+}
+
+static void build_soc(const sBatCommIn *in, sBatCommFrame *out)
+{
+    frame_init(out, BATCOMM_ID_SOC);
+    /* TRUNCATED, not rounded: a rounded-up SOC is an over-report, and this is
+     * the field the inverter's own charge decision reads. */
+    put_u16(&out->data[0],
+            ((in->fields & (uint16_t)batField_soc) != 0u)
+                ? sat_u16((uint32_t)in->soc_pm / 10u) : 0u);
+    put_u16(&out->data[2],
+            ((in->fields & (uint16_t)batField_soh) != 0u)
+                ? sat_u16((uint32_t)in->soh_pm / 10u) : 0u);
+}
+
+static void build_measure(const sBatCommTune *t, const sBatCommIn *in,
+                          sBatCommFrame *out)
+{
+    frame_init(out, BATCOMM_ID_MEASURE);
+    put_i16(&out->data[0],
+            ((in->fields & (uint16_t)batField_voltage) != 0u)
+                ? sat_i16((int32_t)(in->voltage_mV / 10u)) : 0);
+    put_i16(&out->data[2],
+            ((in->fields & (uint16_t)batField_current) != 0u)
+                ? sat_i16(current_counts(t, in->current_mA)) : 0);
+    put_i16(&out->data[4],
+            ((in->fields & (uint16_t)batField_temperature) != 0u)
+                ? in->tempMax_dC : 0);
+}
+
+/** 0x359.  Byte 4 is the module count.  Bytes 5-6 are the generic protocol's
+ *  'P','N' ASCII: the standard Pylontech set carries them (`withPn`), the
+ *  captured DYNESS device does NOT send them. */
+static void build_alarm(const sBatCommTune *t, const sBatCommIn *in,
+                        int withPn, sBatCommFrame *out)
+{
+    frame_init(out, BATCOMM_ID_ALARM);
+    if (t->emitAlarms != 0u) {
+        alarm_bytes(in, &out->data[0]);
+    }
+    out->data[4] = (in->modules == 0u) ? 1u : in->modules;
+    if (withPn != 0) {
+        out->data[5] = (uint8_t)'P';
+        out->data[6] = (uint8_t)'N';
+    }
+}
+
+static void build_chgctrl(const sBatCommIn *in, sBatCommFrame *out)
+{
+    frame_init(out, BATCOMM_ID_CHGCTRL);
+    if (in->chargeAllowed != 0u) {
+        out->data[0] |= (uint8_t)BF_CHG_EN;
+    }
+    if (in->dischargeAllowed != 0u) {
+        out->data[0] |= (uint8_t)BF_DSG_EN;
+    }
+}
+
+/** The standard Pylontech LV set (docs/design_can_bms_frame_source.md §4.1):
+ *  six frames, the cycle order the spec gives.  This is what the JK itself
+ *  sends to a Solis set to PYLON_LV, and the only dialect measured accepted by
+ *  the inverter at sodas.  Every frame is padded to DLC 8 like the DYNESS set,
+ *  for the same reason. */
+static int build_pylon(const sBatCommTune *t, const sBatCommIn *in,
+                       uint8_t slot, sBatCommFrame *out)
+{
+    switch (slot) {
+    case 0u:
+        return build_limits(t, in, out);
+
+    case 1u:
+        build_soc(in, out);
+        return 1;
+
+    case 2u:
+        build_measure(t, in, out);
+        return 1;
+
+    case 3u:
+        build_alarm(t, in, 1, out);
+        return 1;
+
+    case 4u:
+        build_chgctrl(in, out);
+        return 1;
+
+    case 5u:
+        frame_init(out, BATCOMM_ID_MFGNAME);
+        (void)memcpy(out->data, "PYLON   ", 8u);
+        return 1;
+
+    default:
+        return 0;                       /* the empty tail of the cycle       */
+    }
+}
+
 static int build_dyness(const sBatCommTune *t, const sBatCommIn *in,
                         uint8_t slot, sBatCommFrame *out)
 {
@@ -200,60 +349,18 @@ static int build_dyness(const sBatCommTune *t, const sBatCommIn *in,
         return 1;
 
     case 1u:
-        /* 0x351 IS WITHHELD, NOT ZEROED, when a voltage limit is missing.
-         * A zero CVL is an instruction to stop charging and a pack that
-         * cannot report its limits has not given one. */
-        if (((in->fields & (uint16_t)batField_chargeVoltLimit) == 0u) ||
-            ((in->fields & (uint16_t)batField_dischargeVoltLimit) == 0u)) {
-            return 0;
-        }
-        frame_init(out, BATCOMM_ID_LIMITS);
-        put_u16(&out->data[0], sat_u15(in->chargeVoltLimit_mV / 100u));
-        put_u16(&out->data[2],
-                limit_counts(t, in->chargeLimit_mA,
-                             ((in->fields & (uint16_t)batField_chargeLimit) !=
-                              0u) && (in->chargeAllowed != 0u)));
-        put_u16(&out->data[4],
-                limit_counts(t, in->dischargeLimit_mA,
-                             ((in->fields &
-                               (uint16_t)batField_dischargeLimit) != 0u) &&
-                             (in->dischargeAllowed != 0u)));
-        put_u16(&out->data[6], sat_u15(in->dischargeVoltLimit_mV / 100u));
-        return 1;
+        return build_limits(t, in, out);
 
     case 2u:
-        frame_init(out, BATCOMM_ID_SOC);
-        /* TRUNCATED, not rounded: a rounded-up SOC is an over-report, and
-         * this is the field the inverter's own charge decision reads. */
-        put_u16(&out->data[0],
-                ((in->fields & (uint16_t)batField_soc) != 0u)
-                    ? sat_u16((uint32_t)in->soc_pm / 10u) : 0u);
-        put_u16(&out->data[2],
-                ((in->fields & (uint16_t)batField_soh) != 0u)
-                    ? sat_u16((uint32_t)in->soh_pm / 10u) : 0u);
+        build_soc(in, out);
         return 1;
 
     case 3u:
-        frame_init(out, BATCOMM_ID_MEASURE);
-        put_i16(&out->data[0],
-                ((in->fields & (uint16_t)batField_voltage) != 0u)
-                    ? sat_i16((int32_t)(in->voltage_mV / 10u)) : 0);
-        put_i16(&out->data[2],
-                ((in->fields & (uint16_t)batField_current) != 0u)
-                    ? sat_i16(current_counts(t, in->current_mA)) : 0);
-        put_i16(&out->data[4],
-                ((in->fields & (uint16_t)batField_temperature) != 0u)
-                    ? in->tempMax_dC : 0);
+        build_measure(t, in, out);
         return 1;
 
     case 4u:
-        frame_init(out, BATCOMM_ID_ALARM);
-        if (t->emitAlarms != 0u) {
-            alarm_bytes(in, &out->data[0]);
-        }
-        /* Byte 4 is the module count.  Bytes 5-6 are the generic protocol's
-         * 'P','N' ASCII and the captured device does NOT send them. */
-        out->data[4] = (in->modules == 0u) ? 1u : in->modules;
+        build_alarm(t, in, 0, out);
         return 1;
 
     case 5u:
@@ -261,13 +368,7 @@ static int build_dyness(const sBatCommTune *t, const sBatCommIn *in,
         return 1;
 
     case 6u:
-        frame_init(out, BATCOMM_ID_CHGCTRL);
-        if (in->chargeAllowed != 0u) {
-            out->data[0] |= (uint8_t)BF_CHG_EN;
-        }
-        if (in->dischargeAllowed != 0u) {
-            out->data[0] |= (uint8_t)BF_DSG_EN;
-        }
+        build_chgctrl(in, out);
         return 1;
 
     case 7u:
@@ -313,10 +414,41 @@ static int build_dyness(const sBatCommTune *t, const sBatCommIn *in,
 
 /* Exported functions -------------------------------------------------------*/
 
+int BatFrame_PackReady(const sPackState *p)
+{
+    if (p == NULL) {
+        return 0;
+    }
+    if (p->age_ms[packGrp_electrical] == PACK_AGE_NEVER) {
+        return 0;
+    }
+    if (((p->caps & ((uint32_t)packCap_capacityAh | (uint32_t)packCap_soh)) !=
+         0u) && (p->age_ms[packGrp_charge] == PACK_AGE_NEVER)) {
+        return 0;
+    }
+    if (((p->caps & (uint32_t)packCap_temperatures) != 0u) &&
+        (p->age_ms[packGrp_temperature] == PACK_AGE_NEVER)) {
+        return 0;
+    }
+    if (((p->caps & ((uint32_t)packCap_currentLimits |
+                     (uint32_t)packCap_voltageLimits)) != 0u) &&
+        (p->age_ms[packGrp_limits] == PACK_AGE_NEVER)) {
+        return 0;
+    }
+    if (((p->caps & (uint32_t)packCap_switchState) != 0u) &&
+        (p->age_ms[packGrp_switches] == PACK_AGE_NEVER)) {
+        return 0;
+    }
+    return 1;
+}
+
 uint8_t BatFrame_SlotCount(eBatCommProto proto)
 {
     if (proto == batProto_dynessLv) {
         return 12u;
+    }
+    if (proto == batProto_pylonLv) {
+        return 6u;
     }
     return 0u;
 }
@@ -329,6 +461,9 @@ int BatFrame_Build(eBatCommProto proto, const sBatCommTune *tune,
     }
     if (proto == batProto_dynessLv) {
         return build_dyness(tune, in, slot, out);
+    }
+    if (proto == batProto_pylonLv) {
+        return build_pylon(tune, in, slot, out);
     }
     return 0;
 }

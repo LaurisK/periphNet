@@ -267,18 +267,27 @@ void App_DefaultTaskEntry(void)
 
     /* The CAN1/CAN2 bridge.
      *
-     * IT COMES UP FORWARDING, and that is the deliberate choice: this board
-     * sits BETWEEN a battery and an inverter, so any boot state other than
-     * `bridge` is a boot that silently cuts the inverter off from its BMS.
-     * On a board that is not wired to either side it costs nothing — there is
-     * no traffic to forward and nothing is ever transmitted.
+     * IT COMES UP FORWARDING unless BatComm is configured, and that is the
+     * deliberate choice: this board sits BETWEEN a battery and an inverter, so
+     * any boot state other than `bridge` is a boot that silently cuts the
+     * inverter off from its BMS.  On a board that is not wired to either side
+     * it costs nothing — there is no traffic to forward and nothing is ever
+     * transmitted.
      *
-     * MODE AND BITRATE ARE STILL COMPILE-TIME DEFAULTS and a change made over
-     * the tunnel (POST /api/can/mode) lasts until the next reset.  THE BUS
-     * ROLES ARE NOT: BatComm_Init below owns them now, from its own nvDb
-     * record, which is what closes
-     * docs/issue_can_bus_roles_not_configurable.md for the one case that
-     * mattered — `bms` mode taking over the wrong cell.
+     * A CONFIGURED AND ENABLED BatComm COMES UP IN `bms` (2026-10-04, below).
+     * That board is the inverter's BMS, so "forwarding" is the wrong thing to
+     * boot into: with the real battery not on the bus it is silence, and every
+     * reset — a power cut, an OTA, the unconfirmed-image self-reboot — would
+     * hand the inverter no battery data until an operator re-asked for the
+     * takeover over a tunnel that may be down.  `enabled:false` is how a
+     * configured board stays passive.
+     *
+     * BITRATE IS STILL A COMPILE-TIME DEFAULT, and a mode change made over the
+     * tunnel (POST /api/can/mode) lasts until the next reset, after which the
+     * configuration decides again.  THE BUS ROLES ARE NOT COMPILE-TIME:
+     * BatComm_Init below owns them now, from its own nvDb record, which is
+     * what closes docs/issue_can_bus_roles_not_configurable.md for the one
+     * case that mattered — `bms` mode taking over the wrong cell.
      *
      * IT RUNS BEFORE CanBridge_Start ON PURPOSE: CanBridge_SetRoles is legal
      * only while the bridge is stopped, and an unprovisioned board leaves the
@@ -291,12 +300,28 @@ void App_DefaultTaskEntry(void)
 
     if (CanBridge_Start(canBrMode_bridge, CAN_BRIDGE_DEFAULT_BPS) == 0) {
         BmsReader_Start();
-        /* Claiming the source slot ARMS NOTHING: the bridge runs the source
-         * timer only in `bms` mode, which this board is not in.  It decides
-         * WHO answers the inverter if an operator asks for the takeover, and
-         * refuses outright on an unprovisioned or disabled configuration. */
+        /* Claiming the source slot decides WHO answers the inverter, and
+         * refuses outright on an unprovisioned or disabled configuration —
+         * which is what makes a successful Arm the whole test for "this board
+         * has been told to be a BMS".  The bridge runs the source timer only
+         * in `bms` mode, so the claim alone puts nothing on the wire.
+         *
+         * THE MODE CHANGE LIVES HERE AND NOT IN App/BatComm, on purpose:
+         * the module's contract is that it never moves the bridge, because a
+         * module that quietly flipped modes would make the one state an
+         * operator has to be sure about unobservable.  This is the composition
+         * root acting on an operator's stored, explicit configuration.  The
+         * live mode change keeps the wire up, and if the source is not ready
+         * for the first seconds the module's own staleTrip/fallback logic
+         * covers it (emit nothing, then hand the wire back, then retake it on
+         * the first good cycle). */
         if (BatComm_Arm() == batErr_ok) {
             TRice("BatComm: holding the bridge source slot\n");
+            if (CanBridge_SetMode(canBrMode_bms) == 0) {
+                TRice("BatComm: configured; bridge in bms mode at boot\n");
+            } else {
+                TRice("err:BatComm: could not enter bms mode at boot\n");
+            }
         }
     } else {
         TRice("err:CAN: bridge did not start\n");

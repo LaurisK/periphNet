@@ -10,8 +10,10 @@
  * THREE PARAMETERS, ALL CONFIGURATION, NONE COMPILED IN
  * (docs/design_battery_comm.md §2):
  *
- *   protocol    which dialect to speak.  `dyness_lv` today, mimicking the
- *               PowerBrick that the Solis at zaliakalnis already accepts.
+ *   protocol    which dialect to speak.  `dyness_lv` mimics the PowerBrick
+ *               that the Solis at zaliakalnis already accepts; `pylon_lv` is
+ *               the standard Pylontech set the Solis at sodas (43009 = 1) was
+ *               accepting from its JK.  Match the profile to the inverter.
  *   peripheral  which cell the INVERTER is on — can1 or can2.  This is the
  *               same site fact issue_can_bus_roles_not_configurable.md is
  *               about, and this module is where it stops being a #define.
@@ -19,9 +21,13 @@
  *               (one pack, App/Pack — a straight translation).
  *
  * WHAT IT WILL NOT DO: aggregate; derate; decide a limit; change the bridge's
- * MODE.  Taking over the wire is an operator act (`POST /api/can/mode`), and
- * a module that quietly moved the bridge in and out of `bms` would make the
- * one state an operator has to be sure about unobservable.
+ * MODE.  Taking over the wire is the operator's act, and a module that quietly
+ * moved the bridge in and out of `bms` would make the one state an operator
+ * has to be sure about unobservable.  The operator makes it two ways: live,
+ * with `POST /api/can/mode`, and PERSISTENTLY by uploading an `enabled`
+ * configuration — at boot the COMPOSITION ROOT (app_freertos.c, not this
+ * module) enters `bms` when BatComm_Arm() succeeds, so a configured board
+ * answers its inverter after every reset without anyone asking again.
  *
  * FIVE CONTRACTS
  *
@@ -56,9 +62,10 @@
  *
  * BOUNDARY: a consumer includes ONLY this header.
  *
- * STATUS: implemented, host-tested (tests/test_batcomm.c).  NOT YET RUN ON
- * HARDWARE, and it puts nothing on a wire until an operator both configures
- * it and puts the bridge in `bms` mode.
+ * STATUS: implemented, host-tested (tests/test_batcomm.c).  Running on sodas
+ * since 2026-10-04.  It puts nothing on a wire until an operator has
+ * configured AND ENABLED it (then the board boots into `bms`), or has put the
+ * bridge in `bms` mode by hand.
  */
 
 #ifndef BATCOMM_H_
@@ -125,10 +132,13 @@ typedef enum {
     batErr_notFound      = -6,
 } eBatCommErr;
 
-/** THE DIALECT.  One today.  PERSISTED — never renumbered, append only. */
+/** THE DIALECT.  PERSISTED — never renumbered, append only. */
 typedef enum {
     batProto_none = 0,
     batProto_dynessLv,          /* the captured PowerBrick / DYNESS-L set    */
+    batProto_pylonLv,           /* the standard Pylontech LV set, six frames:
+                                   what the JK itself speaks to a Solis set
+                                   to PYLON_LV (43009 = 1)                   */
     batProto_last
 } eBatCommProto;
 

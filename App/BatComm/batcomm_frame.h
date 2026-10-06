@@ -47,6 +47,24 @@ extern "C" {
 /* Exported functions -------------------------------------------------------*/
 
 /**
+ * @brief  Has every group this pack ADVERTISES been delivered at least once?
+ *
+ * pack.h's rule: a field is meaningful only when its capability is set AND its
+ * group has been delivered — `age_ms[] == PACK_AGE_NEVER` is "not read yet",
+ * which is a different statement from "read as zero".  A capability is
+ * advertised from bind, but a slow group (a JK's limits) arrives well after
+ * the fast one, and mapping the gap onto the wire as zeros tells the inverter
+ * to stop charging with a 0 V limit.  So until this returns 1 the source is
+ * NOT READY and nothing is emitted (batcomm.h contract 2).
+ *
+ * Pure: reads only its argument, so the host tests drive it directly.
+ *
+ * @param  p - one pack's state
+ * @retval 1 when every advertised group has been delivered, 0 otherwise
+ */
+int BatFrame_PackReady(const sPackState *p);
+
+/**
  * @brief  How many leading slots of a cycle carry a frame.
  * @param  proto - the dialect
  * @retval the count, or 0 for an unknown dialect

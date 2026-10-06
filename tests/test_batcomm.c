@@ -193,6 +193,241 @@ static void test_frame_unknown_protocol_emits_nothing(void)
 }
 
 /* ============================================================================
+ * pylon_lv — the standard Pylontech set (design_can_bms_frame_source.md §4.1)
+ *
+ * NOT an imitation test: nothing was captured off a wire for this dialect, so
+ * what is asserted is the standard layout, and — the part that can actually
+ * regress — that it agrees with dyness_lv on every frame the two share.
+ * ============================================================================ */
+
+static void expect_pylon_frame(uint8_t slot, uint32_t id, const char *hex)
+{
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame f;
+    uint8_t       want[8];
+
+    capture_input(&in);
+    default_tune(&t);
+
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, slot, &f) == 1);
+    TEST_ASSERT(f.id == id);
+    TEST_ASSERT(f.dlc == 8u);
+    TEST_ASSERT(hex2bin(hex, want, sizeof(want)) == 8u);
+    TEST_ASSERT_MEM_EQ(f.data, want, 8u);
+}
+
+static void test_pylon_frames_match_the_standard_layout(void)
+{
+    expect_pylon_frame(0u, 0x351u, "3502F00A880FE001");
+    expect_pylon_frame(1u, 0x355u, "4500640000000000");
+    expect_pylon_frame(2u, 0x356u, "B5146CFEE3000000");
+    /* modules = 2, then the standard's 'P','N' that DYNESS does not send. */
+    expect_pylon_frame(3u, 0x359u, "0000000002504E00");
+    expect_pylon_frame(4u, 0x35Cu, "C000000000000000");
+    /* "PYLON   " */
+    expect_pylon_frame(5u, 0x35Eu, "50594C4F4E202020");
+}
+
+static void test_pylon_cycle_is_six_frames_then_empty(void)
+{
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame f;
+    uint8_t       slot;
+
+    capture_input(&in);
+    default_tune(&t);
+
+    TEST_ASSERT(BatFrame_SlotCount(batProto_pylonLv) == 6u);
+    for (slot = 6u; slot < 20u; slot++) {
+        TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, slot, &f) == 0);
+    }
+}
+
+/** A Pylontech-model inverter has never been shown a DYNESS identifier, so
+ *  none may leak into this dialect — and each of the six identifiers must
+ *  appear exactly once per cycle. */
+static void test_pylon_emits_only_its_six_identifiers(void)
+{
+    static const uint32_t want[6] = { 0x351u, 0x355u, 0x356u, 0x359u, 0x35Cu,
+                                      0x35Eu };
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame f;
+    uint8_t       slot;
+
+    capture_input(&in);
+    default_tune(&t);
+
+    for (slot = 0u; slot < 6u; slot++) {
+        TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, slot, &f) == 1);
+        TEST_ASSERT(f.id == want[slot]);
+    }
+}
+
+/** The five shared frames are ONE encoder, and this is what holds it so:
+ *  with a deliberately awkward input — discharging, an alarm raised, a
+ *  forbidden charge direction, one module — both dialects must agree on
+ *  0x351/0x355/0x356/0x35C to the byte, and on 0x359 everywhere but 'P','N'. */
+static void test_pylon_agrees_with_dyness_on_the_shared_frames(void)
+{
+    static const uint8_t dynSlot[4] = { 1u, 2u, 3u, 6u };
+    static const uint8_t pylSlot[4] = { 0u, 1u, 2u, 4u };
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame d;
+    sBatCommFrame p;
+    int           i;
+
+    capture_input(&in);
+    default_tune(&t);
+    in.current_mA       = -123456;
+    in.alarms           = (uint32_t)packAlarm_cellUnderVoltage |
+                          (uint32_t)packAlarm_overTemperature;
+    in.chargeAllowed    = 0u;
+    in.modules          = 1u;
+
+    for (i = 0; i < 4; i++) {
+        TEST_ASSERT(BatFrame_Build(batProto_dynessLv, &t, &in, dynSlot[i],
+                                   &d) == 1);
+        TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, pylSlot[i],
+                                   &p) == 1);
+        TEST_ASSERT(d.id == p.id);
+        TEST_ASSERT(d.dlc == p.dlc);
+        TEST_ASSERT_MEM_EQ(d.data, p.data, 8u);
+    }
+
+    TEST_ASSERT(BatFrame_Build(batProto_dynessLv, &t, &in, 4u, &d) == 1);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, 3u, &p) == 1);
+    TEST_ASSERT(d.id == p.id);
+    TEST_ASSERT_MEM_EQ(d.data, p.data, 5u);         /* alarms + module count */
+    TEST_ASSERT(d.data[5] == 0u);
+    TEST_ASSERT(p.data[5] == (uint8_t)'P');
+    TEST_ASSERT(p.data[6] == (uint8_t)'N');
+    TEST_ASSERT(p.data[7] == 0u);
+}
+
+/** batcomm.h contract 3 holds for this dialect too, and withholding 0x351
+ *  must not take the other five frames with it. */
+static void test_pylon_withholds_limits_without_voltage_limits(void)
+{
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame f;
+
+    capture_input(&in);
+    default_tune(&t);
+
+    in.fields &= (uint16_t)~(uint16_t)batField_chargeVoltLimit;
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, 0u, &f) == 0);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, 1u, &f) == 1);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv, &t, &in, 5u, &f) == 1);
+}
+
+/* ============================================================================
+ * Found on hardware 2026-10-04: booting straight into `bms` put an all-zero
+ * 0x351 on the wire, because a pack advertises a capability from bind while
+ * the register behind it arrives much later.  Two guards, both pinned here.
+ * ============================================================================ */
+
+/** A voltage limit of ZERO is invalid whatever the validity bit says — in both
+ *  dialects, and for either limit.  Withheld, not zeroed. */
+static void test_zero_voltage_limit_withholds_0x351(void)
+{
+    sBatCommIn    in;
+    sBatCommTune  t;
+    sBatCommFrame f;
+
+    default_tune(&t);
+
+    capture_input(&in);
+    in.chargeVoltLimit_mV = 0u;
+    TEST_ASSERT(BatFrame_Build(batProto_dynessLv, &t, &in, 1u, &f) == 0);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv,  &t, &in, 0u, &f) == 0);
+
+    capture_input(&in);
+    in.dischargeVoltLimit_mV = 0u;
+    TEST_ASSERT(BatFrame_Build(batProto_dynessLv, &t, &in, 1u, &f) == 0);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv,  &t, &in, 0u, &f) == 0);
+
+    /* ...and the other frames still go, as contract 3 says. */
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv,  &t, &in, 1u, &f) == 1);
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv,  &t, &in, 2u, &f) == 1);
+
+    /* A genuine ZERO CURRENT limit is NOT invalid: "0 A" is the BMS saying
+     * stop, and must reach the inverter. */
+    capture_input(&in);
+    in.chargeLimit_mA = 0u;
+    TEST_ASSERT(BatFrame_Build(batProto_pylonLv,  &t, &in, 0u, &f) == 1);
+    TEST_ASSERT(f.data[2] == 0u);
+    TEST_ASSERT(f.data[3] == 0u);
+}
+
+static void ready_pack(sPackState *p)
+{
+    uint32_t g;
+
+    (void)memset(p, 0, sizeof(*p));
+    p->caps = (uint32_t)packCap_capacityAh | (uint32_t)packCap_soh |
+              (uint32_t)packCap_temperatures | (uint32_t)packCap_currentLimits |
+              (uint32_t)packCap_voltageLimits | (uint32_t)packCap_switchState;
+    for (g = 0u; g < (uint32_t)packGrp_last; g++) {
+        p->age_ms[g] = 100u;                /* delivered a moment ago        */
+    }
+}
+
+/** `PACK_AGE_NEVER` is "not read yet", not "read as zero".  Every group the
+ *  pack ADVERTISES must have been delivered before a frame is built from it —
+ *  and a group it does not advertise must not hold the stream hostage. */
+static void test_pack_ready_waits_for_every_advertised_group(void)
+{
+    sPackState p;
+
+    TEST_ASSERT(BatFrame_PackReady(NULL) == 0);
+
+    ready_pack(&p);
+    TEST_ASSERT(BatFrame_PackReady(&p) == 1);
+
+    ready_pack(&p);
+    p.age_ms[packGrp_electrical] = PACK_AGE_NEVER;
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+
+    ready_pack(&p);
+    p.age_ms[packGrp_charge] = PACK_AGE_NEVER;          /* SOC would read 0 % */
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+
+    ready_pack(&p);
+    p.age_ms[packGrp_temperature] = PACK_AGE_NEVER;     /* would read 0.0 C   */
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+
+    ready_pack(&p);
+    p.age_ms[packGrp_limits] = PACK_AGE_NEVER;          /* the hardware case  */
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+
+    ready_pack(&p);
+    p.age_ms[packGrp_switches] = PACK_AGE_NEVER;
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+
+    /* NOT advertised -> not waited for. */
+    ready_pack(&p);
+    p.caps &= ~(uint32_t)packCap_temperatures;
+    p.age_ms[packGrp_temperature] = PACK_AGE_NEVER;
+    TEST_ASSERT(BatFrame_PackReady(&p) == 1);
+
+    ready_pack(&p);
+    p.caps &= ~((uint32_t)packCap_currentLimits | (uint32_t)packCap_voltageLimits);
+    p.age_ms[packGrp_limits] = PACK_AGE_NEVER;
+    TEST_ASSERT(BatFrame_PackReady(&p) == 1);
+
+    /* Either limit capability alone is enough to require the group. */
+    ready_pack(&p);
+    p.caps &= ~(uint32_t)packCap_currentLimits;
+    p.age_ms[packGrp_limits] = PACK_AGE_NEVER;
+    TEST_ASSERT(BatFrame_PackReady(&p) == 0);
+}
+
+/* ============================================================================
  * The contracts
  * ============================================================================ */
 
@@ -455,6 +690,33 @@ static void test_cfg_accepts_the_zaliakalnis_document(void)
     TEST_ASSERT(cfg.batteryBusIsInput == 0u);
 }
 
+/* The sodas document: the Solis there is set to PYLON_LV (43009 = 1), so the
+ * profile is matched to the inverter — never the inverter to the profile. */
+static const char SODAS[] =
+    "{\"version\":1,\"protocol\":\"pylon_lv\",\"peripheral\":\"can1\","
+    "\"source\":\"pack\",\"pack\":\"sodas15\",\"enabled\":true,"
+    "\"fallback\":\"bridge\",\"batteryBusIsInput\":false}";
+
+static void test_cfg_accepts_the_sodas_document(void)
+{
+    sBatCommCfg       cfg;
+    sBatCommCfgResult res;
+    eBatCommProto     p;
+
+    TEST_ASSERT(parse(SODAS, &cfg, &res) == batErr_ok);
+    TEST_ASSERT(cfg.proto == (uint8_t)batProto_pylonLv);
+    TEST_ASSERT(cfg.source == (uint8_t)batSrc_pack);
+    TEST_ASSERT(strcmp(cfg.packName, "sodas15") == 0);
+    TEST_ASSERT(cfg.inverterBus == 0u);             /* can1                  */
+    TEST_ASSERT(cfg.enabled == 1u);
+    TEST_ASSERT(cfg.fallback == (uint8_t)batFallback_bridge);
+    TEST_ASSERT(cfg.batteryBusIsInput == 0u);
+
+    TEST_ASSERT(strcmp(BatComm_ProtoName(batProto_pylonLv), "pylon_lv") == 0);
+    TEST_ASSERT(BatComm_ProtoFromName("pylon_lv", &p) == batErr_ok);
+    TEST_ASSERT(p == batProto_pylonLv);
+}
+
 static void test_cfg_defaults_are_applied_when_keys_are_absent(void)
 {
     sBatCommCfg cfg;
@@ -513,8 +775,11 @@ static void test_cfg_reject_matrix(void)
         /* the three required statements */
         { "{\"peripheral\":\"can1\",\"source\":\"cluster\"}",   "protocol" },
         { "{\"protocol\":\"dyness_lv\",\"peripheral\":\"can1\"}", "source" },
-        /* a dialect this image does not carry must FAIL, not fall back */
-        { "{\"protocol\":\"pylon_lv\",\"peripheral\":\"can1\","
+        /* a dialect this image does not carry must FAIL, not fall back.
+         * pylon_hv is a real, different Pylontech dialect — which is exactly
+         * the kind of near-miss name that must not be quietly accepted as
+         * pylon_lv. */
+        { "{\"protocol\":\"pylon_hv\",\"peripheral\":\"can1\","
           "\"source\":\"cluster\"}",                            "protocol" },
         /* there is no third cell */
         { "{\"protocol\":\"dyness_lv\",\"peripheral\":\"can3\","
@@ -532,6 +797,10 @@ static void test_cfg_reject_matrix(void)
          * that fell off the end */
         { "{\"protocol\":\"dyness_lv\",\"peripheral\":\"can1\","
           "\"source\":\"cluster\",\"tune\":{\"slots\":8}}",     "slots" },
+        /* ...and the limit is the PROFILE's, not a constant: pylon_lv has
+         * six frames, so five slots is too short and eight is not */
+        { "{\"protocol\":\"pylon_lv\",\"peripheral\":\"can1\","
+          "\"source\":\"cluster\",\"tune\":{\"slots\":5}}",     "slots" },
         { "{\"protocol\":\"dyness_lv\",\"peripheral\":\"can1\","
           "\"source\":\"cluster\","
           "\"tune\":{\"currentScale_mA\":0}}",         "currentScale_mA" },
@@ -658,6 +927,13 @@ int main(void)
     RUN_TEST(test_frame_reproduces_the_capture);
     RUN_TEST(test_frame_cycle_tail_is_empty);
     RUN_TEST(test_frame_unknown_protocol_emits_nothing);
+    RUN_TEST(test_pylon_frames_match_the_standard_layout);
+    RUN_TEST(test_pylon_cycle_is_six_frames_then_empty);
+    RUN_TEST(test_pylon_emits_only_its_six_identifiers);
+    RUN_TEST(test_pylon_agrees_with_dyness_on_the_shared_frames);
+    RUN_TEST(test_pylon_withholds_limits_without_voltage_limits);
+    RUN_TEST(test_zero_voltage_limit_withholds_0x351);
+    RUN_TEST(test_pack_ready_waits_for_every_advertised_group);
     RUN_TEST(test_frame_withholds_limits_without_voltage_limits);
     RUN_TEST(test_frame_forbidden_direction_publishes_zero);
     RUN_TEST(test_frame_invalid_limit_field_publishes_zero);
@@ -670,6 +946,7 @@ int main(void)
     RUN_TEST(test_frame_scales_are_configuration);
 
     RUN_TEST(test_cfg_accepts_the_zaliakalnis_document);
+    RUN_TEST(test_cfg_accepts_the_sodas_document);
     RUN_TEST(test_cfg_defaults_are_applied_when_keys_are_absent);
     RUN_TEST(test_cfg_pack_source_needs_a_name);
     RUN_TEST(test_cfg_rejects_a_pack_name_on_a_cluster_source);

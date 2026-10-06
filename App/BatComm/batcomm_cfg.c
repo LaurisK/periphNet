@@ -522,6 +522,7 @@ const char *BatComm_ProtoName(eBatCommProto proto)
     switch (proto) {
     case batProto_none:     return "none";
     case batProto_dynessLv: return "dyness_lv";
+    case batProto_pylonLv:  return "pylon_lv";
     case batProto_last:     break;
     }
     return "?";
@@ -587,6 +588,10 @@ int BatComm_ProtoFromName(const char *name, eBatCommProto *out)
     }
     if (strcmp(name, "dyness_lv") == 0) {
         *out = batProto_dynessLv;
+        return batErr_ok;
+    }
+    if (strcmp(name, "pylon_lv") == 0) {
+        *out = batProto_pylonLv;
         return batErr_ok;
     }
     if (strcmp(name, "none") == 0) {

@@ -226,6 +226,15 @@ static int RefreshFromPack(void)
         s_why = (uint8_t)batWhy_packNotOnline;
         return 0;
     }
+    /* ONLINE IS NOT THE SAME AS "EVERY GROUP HAS BEEN READ": the electrical
+     * group makes a pack online within a cycle or two of boot, while a JK's
+     * limits arrive far later.  Booting straight into `bms` made that gap
+     * visible — an all-zero 0x351, a 0 % SOC and a 0.0 C temperature are all
+     * things an inverter would act on.  Emit nothing until they are real. */
+    if (BatFrame_PackReady(&s_pack) == 0) {
+        s_why = (uint8_t)batWhy_sourceNotReady;
+        return 0;
+    }
 
     (void)memset(&s_in, 0, sizeof(s_in));
     s_in.voltage_mV            = s_pack.voltage_mV;
