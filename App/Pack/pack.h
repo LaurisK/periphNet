@@ -910,6 +910,12 @@ typedef struct {
     uint32_t dcResSteps;        /* current steps folded into the fit        */
     uint32_t anchorSamples;     /* voltages folded into anchors             */
     uint32_t anchorIrSamples;   /* of those, taken under load and corrected */
+    uint16_t socInverter_pm;    /* real SOC mapped to the inverter window   */
+    uint16_t socCc_pm;          /* coulomb-count confidence (decays)        */
+    uint16_t socKnee_pm;        /* knee weight: how much OCV is being heard */
+    uint32_t socLatchHigh;      /* latch events                             */
+    uint32_t socLatchLow;
+    uint32_t socJkSteps;        /* vendor re-calibration steps absorbed     */
 } sPackSocDiag;
 
 /**

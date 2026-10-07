@@ -405,6 +405,120 @@ int PackSoc_ResGet_uOhm(const sPackSocRes *r, uint32_t *r_uOhm_out);
  */
 int PackSoc_WeakestUnit(const sPackSocUnit *u, uint8_t n, int32_t *cap_mAh_out);
 
+
+/* === The fused LFP estimator (the pack's published SOC) ====================
+ *
+ * Coulomb count (the JK's own SOC) fused with an OCV opinion, a latch engine
+ * that re-anchors at the true ends, a confidence that DECAYS with throughput
+ * and time, and temperature / load compensation.  It replaces "OCV anchor
+ * overwrites the estimate" -- defect D2 of
+ * docs/issue_soc_estimator_sodas_2026-10-06.md -- with a blend whose weights
+ * the arithmetic decides, and it never integrates charge itself, so the
+ * truncating integrator (D1) cannot reach it.  A vendor re-calibration step
+ * (D3) is absorbed into an offset instead of being believed.
+ *
+ * All integer: per-mille, mV, mA, uOhm, decidegrees, milliseconds. */
+
+/** Latch thresholds are derived from these, with a 3/4 headroom rule:
+ *  high = full + 3/4 (overcharge - full), low = empty - 3/4 (empty - under). */
+#define PACK_SOC_LFP_V_FULL_mV          3450u
+#define PACK_SOC_LFP_V_EMPTY_mV         2900u
+#define PACK_SOC_LFP_V_OVERCHG_mV       3600u
+#define PACK_SOC_LFP_V_UNDERDIS_mV      2500u
+/** Tail current for the average-cell high latch, per-mille of capacity (C). */
+#define PACK_SOC_LFP_TAIL_C_pm          20u
+/** Knee voltages, mV per cell (compensated). */
+#define PACK_SOC_LFP_KNEE_LOW_mV        3200
+#define PACK_SOC_LFP_KNEE_HIGH_mV       3380
+/** Confidence decay: per-mille per 1.0C of throughput, ppm per hour, floor. */
+#define PACK_SOC_LFP_ALPHA_pm           50u
+#define PACK_SOC_LFP_BETA_ppm_h         1000u
+#define PACK_SOC_LFP_CONF_MIN_pm        100u
+/** Coulombic efficiency, per-mille. */
+#define PACK_SOC_LFP_ETA_CHG_pm         992u
+#define PACK_SOC_LFP_ETA_DIS_pm         1000u
+/** Inverter display window, per-mille. */
+#define PACK_SOC_LFP_DISP_MIN_pm        60u
+#define PACK_SOC_LFP_DISP_MAX_pm        1000u
+/** Per-cell resistance used ONLY when no pack resistance has been fitted yet:
+ *  uOhm * Ah, so R_cell = this / capacity_Ah (~250 uOhm for a 280 Ah cell). */
+#define PACK_SOC_LFP_R_UOHM_AH          70000u
+/** A JK SOC step bigger than this beyond what the current explains is a
+ *  vendor re-calibration, not charge (D3). */
+#define PACK_SOC_LFP_JK_STEP_pm         50
+/** Longest interval whose current is integrated as if it were constant. */
+#define PACK_SOC_LFP_DT_MAX_ms          60000u
+
+/** Which latch fired on the last update. */
+typedef enum {
+    packSocLatch_none = 0,
+    packSocLatch_high,
+    packSocLatch_low,
+} ePackSocLatch;
+
+/** One telemetry frame. */
+typedef struct {
+    uint16_t cellMin_mV;
+    uint16_t cellMax_mV;
+    uint16_t cellAvg_mV;
+    int32_t  i_mA;              /* POSITIVE = charge                        */
+    uint32_t rMin_uOhm;         /* per-cell resistance, lowest cell         */
+    uint32_t rMax_uOhm;         /* per-cell resistance, highest cell        */
+    uint8_t  rMeasured;         /* 1 = already at present temperature       */
+    int16_t  tMin_dC;
+    uint16_t socJk_pm;          /* the vendor's SOC                         */
+} sPackSocLfpIn;
+
+typedef struct {
+    uint32_t qNominal_mAh;
+    uint16_t vHigh_mV;          /* derived single-cell emergency latch      */
+    uint16_t vLow_mV;
+    uint16_t dispMin_pm;
+    uint16_t dispMax_pm;
+
+    /* persistent state */
+    uint16_t conf_pm;           /* coulomb-count confidence, 100..1000      */
+    int64_t  qAbs_mAms;         /* |I| * eta * dt since the last latch      */
+    int64_t  tLatch_ms;
+    int32_t  jkOffset_pm;       /* re-anchors the vendor SOC at a latch     */
+    int32_t  lastJk_pm;
+    uint8_t  haveJk;
+    uint8_t  haveEst;
+
+    /* results */
+    uint16_t socReal_pm;
+    uint16_t socInverter_pm;
+    uint16_t socOcv_pm;
+    uint16_t wKnee_pm;
+    uint16_t wLower_pm;
+    uint16_t wUpper_pm;
+    int16_t  innovation_pm;     /* fused MINUS corrected vendor SOC (D4)    */
+    int32_t  vCompMin_mV;
+    int32_t  vCompMax_mV;
+    uint32_t qEff_mAh;
+    ePackSocLatch lastLatch;
+    uint32_t latchHigh;
+    uint32_t latchLow;
+    uint32_t jkSteps;           /* vendor re-calibrations absorbed          */
+} sPackSocLfp;
+
+/** @brief Start the estimator.  @note Pure. */
+void PackSocLfp_Init(sPackSocLfp *s, uint32_t qNominal_mAh);
+
+/**
+ * @brief  Fold one telemetry frame in.
+ * @param  dt_ms - time since the previous frame (0 on the first)
+ * @note   Pure.  Latches win the frame in which they fire.
+ */
+void PackSocLfp_Update(sPackSocLfp *s, const sPackSocLfpIn *in, uint32_t dt_ms);
+
+/** @brief Per-cell resistance to use when none has been fitted, uOhm. */
+uint32_t PackSocLfp_DefaultCellR_uOhm(uint32_t qNominal_mAh);
+
+/** @brief Temperature multipliers, per-mille, by piecewise-linear lookup. */
+int32_t PackSocLfp_Kq_pm(int16_t t_dC);
+int32_t PackSocLfp_Kr_pm(int16_t t_dC);
+
 #ifdef __cplusplus
 }
 #endif

@@ -472,3 +472,230 @@ int PackSoc_NoteCounter(sPackSoc *s, int32_t counter_mAh, uint32_t maxStep_mAh,
     }
     return 1;
 }
+
+/* --- the fused LFP estimator --------------------------------------------- */
+
+#define LFP_TEMP_N  7
+
+static const int16_t s_lfpT[LFP_TEMP_N]  = { -200, -100, 0, 150, 250, 450, 700 };
+static const int16_t s_lfpKq[LFP_TEMP_N] = { 650, 780, 880, 960, 1000, 1020, 1030 };
+static const int16_t s_lfpKr[LFP_TEMP_N] = { 3500, 2300, 1600, 1150, 1000, 920, 900 };
+
+static int32_t Clamp32(int32_t x, int32_t lo, int32_t hi)
+{
+    return (x < lo) ? lo : ((x > hi) ? hi : x);
+}
+
+/* Piecewise-linear over the temperature axis, saturating at both ends. */
+static int32_t LfpInterp(const int16_t *ys, int16_t t_dC)
+{
+    uint32_t i;
+
+    if (t_dC <= s_lfpT[0]) {
+        return ys[0];
+    }
+    if (t_dC >= s_lfpT[LFP_TEMP_N - 1u]) {
+        return ys[LFP_TEMP_N - 1u];
+    }
+    for (i = 1u; i < LFP_TEMP_N; i++) {
+        if (t_dC <= s_lfpT[i]) {
+            const int32_t dT = (int32_t)s_lfpT[i] - (int32_t)s_lfpT[i - 1u];
+            const int32_t dY = (int32_t)ys[i] - (int32_t)ys[i - 1u];
+
+            return (int32_t)ys[i - 1u] +
+                   (((int32_t)t_dC - (int32_t)s_lfpT[i - 1u]) * dY) / dT;
+        }
+    }
+    return ys[LFP_TEMP_N - 1u];
+}
+
+int32_t PackSocLfp_Kq_pm(int16_t t_dC) { return LfpInterp(s_lfpKq, t_dC); }
+int32_t PackSocLfp_Kr_pm(int16_t t_dC) { return LfpInterp(s_lfpKr, t_dC); }
+
+uint32_t PackSocLfp_DefaultCellR_uOhm(uint32_t qNominal_mAh)
+{
+    const uint32_t ah = (qNominal_mAh >= 1000u) ? (qNominal_mAh / 1000u) : 1u;
+
+    return PACK_SOC_LFP_R_UOHM_AH / ah;
+}
+
+static void LfpThresholds(sPackSocLfp *s)
+{
+    s->vHigh_mV = (uint16_t)(PACK_SOC_LFP_V_FULL_mV +
+        (3u * (PACK_SOC_LFP_V_OVERCHG_mV - PACK_SOC_LFP_V_FULL_mV)) / 4u);
+    s->vLow_mV  = (uint16_t)(PACK_SOC_LFP_V_EMPTY_mV -
+        (3u * (PACK_SOC_LFP_V_EMPTY_mV - PACK_SOC_LFP_V_UNDERDIS_mV)) / 4u);
+}
+
+static void LfpMapInverter(sPackSocLfp *s)
+{
+    s->socInverter_pm = (uint16_t)((uint32_t)s->dispMin_pm +
+        ((uint32_t)s->socReal_pm * (uint32_t)(s->dispMax_pm - s->dispMin_pm)) /
+        PACK_SOC_FULL_pm);
+}
+
+void PackSocLfp_Init(sPackSocLfp *s, uint32_t qNominal_mAh)
+{
+    if (s == NULL) {
+        return;
+    }
+    (void)memset(s, 0, sizeof(*s));
+    s->qNominal_mAh = qNominal_mAh;
+    s->qEff_mAh     = qNominal_mAh;
+    s->dispMin_pm   = PACK_SOC_LFP_DISP_MIN_pm;
+    s->dispMax_pm   = PACK_SOC_LFP_DISP_MAX_pm;
+    s->conf_pm      = (uint16_t)PACK_SOC_FULL_pm;
+    LfpThresholds(s);
+    s->socInverter_pm = s->dispMin_pm;
+}
+
+static void LfpLatch(sPackSocLfp *s, const sPackSocLfpIn *in, int32_t target)
+{
+    s->socReal_pm   = (uint16_t)target;
+    s->jkOffset_pm  = target - (int32_t)in->socJk_pm;  /* re-anchor the vendor */
+    s->lastJk_pm    = (int32_t)in->socJk_pm;
+    s->haveJk       = 1u;
+    s->conf_pm      = (uint16_t)PACK_SOC_FULL_pm;
+    s->qAbs_mAms    = 0;
+    s->tLatch_ms    = 0;
+    s->wKnee_pm     = 0u;
+    s->innovation_pm = 0;
+    s->haveEst      = 1u;
+    if (target >= (int32_t)(PACK_SOC_FULL_pm / 2u)) {
+        s->lastLatch = packSocLatch_high;
+        s->latchHigh++;
+    } else {
+        s->lastLatch = packSocLatch_low;
+        s->latchLow++;
+    }
+    LfpMapInverter(s);
+}
+
+void PackSocLfp_Update(sPackSocLfp *s, const sPackSocLfpIn *in, uint32_t dt_ms)
+{
+    int32_t  tailCur_mA;
+    int32_t  i;
+    int32_t  kr;
+    int32_t  rMin;
+    int32_t  rMax;
+    int32_t  vCompMin;
+    int32_t  vCompMax;
+    int32_t  wLower;
+    int32_t  wUpper;
+    int32_t  wKnee;
+    int32_t  vKnee;
+    int32_t  jkRaw;
+    int32_t  jkCorr;
+    int32_t  soc;
+    int64_t  wCoul;
+    int64_t  denom;
+    int64_t  decay;
+    uint32_t dtInt_ms;
+
+    if ((s == NULL) || (in == NULL) || (s->qNominal_mAh == 0u)) {
+        return;
+    }
+    i = in->i_mA;
+    s->lastLatch = packSocLatch_none;
+
+    /* Temperature scaling. */
+    s->qEff_mAh = (uint32_t)(((uint64_t)s->qNominal_mAh *
+                              (uint32_t)PackSocLfp_Kq_pm(in->tMin_dC)) / 1000u);
+    kr   = (in->rMeasured != 0u) ? 1000 : PackSocLfp_Kr_pm(in->tMin_dC);
+    rMin = (int32_t)(((int64_t)in->rMin_uOhm * kr) / 1000);
+    rMax = (int32_t)(((int64_t)in->rMax_uOhm * kr) / 1000);
+
+    /* LATCHES, before anything integrates: they win the frame. */
+    tailCur_mA = (int32_t)(((uint64_t)s->qNominal_mAh *
+                            PACK_SOC_LFP_TAIL_C_pm) / 1000u);
+    if (((in->cellAvg_mV >= PACK_SOC_LFP_V_FULL_mV) &&
+         (i >= 0) && (i <= tailCur_mA)) ||
+        (in->cellMax_mV >= s->vHigh_mV)) {
+        LfpLatch(s, in, (int32_t)PACK_SOC_FULL_pm);
+        return;
+    }
+    if ((in->cellAvg_mV <= PACK_SOC_LFP_V_EMPTY_mV) ||
+        (in->cellMin_mV <= s->vLow_mV)) {
+        LfpLatch(s, in, 0);
+        return;
+    }
+
+    /* Vendor SOC, re-anchored by the last latch.  A step the current does
+     * not explain is a vendor re-calibration: absorb it into the offset so
+     * the estimate stays continuous (D3: +67.8 Ah in one poll was believed
+     * as charge and drove the pack to 100 %). */
+    jkRaw = (int32_t)in->socJk_pm;
+    dtInt_ms = (dt_ms > PACK_SOC_LFP_DT_MAX_ms) ? PACK_SOC_LFP_DT_MAX_ms : dt_ms;
+    if (s->haveJk != 0u) {
+        const int32_t expect = (int32_t)(((int64_t)i * (int64_t)dtInt_ms) /
+                                         (3600 * (int64_t)s->qNominal_mAh));
+        const int32_t step   = (jkRaw - s->lastJk_pm) - expect;
+
+        if ((step > PACK_SOC_LFP_JK_STEP_pm) ||
+            (step < -PACK_SOC_LFP_JK_STEP_pm)) {
+            s->jkOffset_pm -= step;
+            s->jkSteps++;
+        }
+    }
+    s->lastJk_pm = jkRaw;
+    s->haveJk    = 1u;
+    jkCorr = Clamp32(jkRaw + s->jkOffset_pm, 0, (int32_t)PACK_SOC_FULL_pm);
+
+    /* Confidence decay: throughput (with coulombic efficiency) and time. */
+    {
+        const int32_t absI = (i < 0) ? -i : i;
+        const int32_t eta  = (i > 0) ? (int32_t)PACK_SOC_LFP_ETA_CHG_pm
+                                     : (int32_t)PACK_SOC_LFP_ETA_DIS_pm;
+
+        s->qAbs_mAms += ((int64_t)absI * eta * (int64_t)dt_ms) / 1000;
+        s->tLatch_ms += (int64_t)dt_ms;
+    }
+    decay = (s->qAbs_mAms * (int64_t)PACK_SOC_LFP_ALPHA_pm) /
+            (3600000 * (int64_t)s->qNominal_mAh);
+    decay += (s->tLatch_ms * (int64_t)PACK_SOC_LFP_BETA_ppm_h) / 3600000000LL;
+    if (decay > 1000) {
+        decay = 1000;
+    }
+    s->conf_pm = (uint16_t)Clamp32((int32_t)(1000 - decay),
+                                   (int32_t)PACK_SOC_LFP_CONF_MIN_pm, 1000);
+
+    /* Load compensation: V - I*R, charge positive. */
+    vCompMin = (int32_t)in->cellMin_mV - (int32_t)(((int64_t)i * rMin) / 1000000);
+    vCompMax = (int32_t)in->cellMax_mV - (int32_t)(((int64_t)i * rMax) / 1000000);
+    s->vCompMin_mV = vCompMin;
+    s->vCompMax_mV = vCompMax;
+
+    wLower = Clamp32(((PACK_SOC_LFP_KNEE_LOW_mV - vCompMin) * 1000) /
+                     (PACK_SOC_LFP_KNEE_LOW_mV - (int32_t)PACK_SOC_LFP_V_EMPTY_mV),
+                     0, 1000);
+    wUpper = Clamp32(((vCompMax - PACK_SOC_LFP_KNEE_HIGH_mV) * 1000) /
+                     ((int32_t)PACK_SOC_LFP_V_FULL_mV - PACK_SOC_LFP_KNEE_HIGH_mV),
+                     0, 1000);
+    if (wLower >= wUpper) {
+        wKnee = wLower;
+        vKnee = vCompMin;
+    } else {
+        wKnee = wUpper;
+        vKnee = vCompMax;
+    }
+    s->wLower_pm = (uint16_t)wLower;
+    s->wUpper_pm = (uint16_t)wUpper;
+    s->wKnee_pm  = (uint16_t)wKnee;
+    s->socOcv_pm = (uint16_t)PackSoc_OcvToSoc_pm(
+                       (uint16_t)Clamp32(vKnee, 0, 65535));
+
+    /* Fusion, in ppm weights: Wc = Cc (1 - Wk), floor 1e-4 on the sum. */
+    wCoul = (int64_t)s->conf_pm * (int64_t)(1000 - wKnee);
+    denom = wCoul + (int64_t)wKnee * 1000;
+    if (denom < 100) {
+        denom = 100;
+    }
+    soc = (int32_t)((wCoul * (int64_t)jkCorr +
+                     (int64_t)wKnee * 1000 * (int64_t)s->socOcv_pm) / denom);
+    soc = Clamp32(soc, 0, (int32_t)PACK_SOC_FULL_pm);
+
+    s->innovation_pm = (int16_t)(soc - jkCorr);
+    s->socReal_pm    = (uint16_t)soc;
+    s->haveEst       = 1u;
+    LfpMapInverter(s);
+}

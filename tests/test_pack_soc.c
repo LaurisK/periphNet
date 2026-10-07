@@ -799,6 +799,256 @@ static void test_the_correction_a_real_site_needs_is_small(void)
     }
 }
 
+
+/* === the fused LFP estimator ==============================================
+ *
+ * Validated against docs/issue_soc_estimator_sodas_2026-10-06.md: the sodas15
+ * pack (660 Ah, 16S) and the numbers measured there.  The capture TSV the
+ * issue cites is not in the repository, so its table 1.1 is replayed by hand. */
+
+#define SODAS_mAh   660000u
+
+static sPackSocLfpIn frame(uint16_t vmin, uint16_t vmax, int32_t i_mA,
+                           uint16_t jk_pm)
+{
+    sPackSocLfpIn f;
+
+    memset(&f, 0, sizeof(f));
+    f.cellMin_mV = vmin;
+    f.cellMax_mV = vmax;
+    f.cellAvg_mV = (uint16_t)((vmin + vmax) / 2u);
+    f.i_mA       = i_mA;
+    f.rMin_uOhm  = PackSocLfp_DefaultCellR_uOhm(SODAS_mAh);
+    f.rMax_uOhm  = f.rMin_uOhm;
+    f.tMin_dC    = 250;
+    f.socJk_pm   = jk_pm;
+    return f;
+}
+
+static int near(int32_t a, int32_t b, int32_t tol)
+{
+    return ((a - b) <= tol) && ((b - a) <= tol);
+}
+
+static void test_lfp_emergency_high_latch(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3400, 3563, 20000, 800);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3400;                 /* average is nowhere near full */
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.socReal_pm == 1000u);
+    TEST_ASSERT(s.conf_pm == 1000u);
+    TEST_ASSERT(s.lastLatch == packSocLatch_high);
+}
+
+static void test_lfp_emergency_low_latch_locks_inverter(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(2600, 3100, -30000, 100);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3000;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.socReal_pm == 0u);
+    TEST_ASSERT(s.socInverter_pm == 60u);
+}
+
+static void test_lfp_thresholds_are_the_75_percent_rule(void)
+{
+    sPackSocLfp s;
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    TEST_ASSERT(s.vHigh_mV == 3562u || s.vHigh_mV == 3563u);
+    TEST_ASSERT(s.vLow_mV == 2600u);
+}
+
+static void test_lfp_average_high_latch_needs_the_tail_current(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3440, 3460, 99000, 900);   /* tail = 13.2 A */
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3450;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.socReal_pm < 1000u);
+    f.i_mA = 10000;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.socReal_pm == 1000u);
+}
+
+static void test_lfp_inverter_window_maps_linearly(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3300, 3310, 0, 500);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(near(s.socInverter_pm, 60 + (500 * 940) / 1000, 1));
+    TEST_ASSERT(s.socReal_pm == 500u);
+}
+
+/** D2: at 11:40 the old estimator overwrote the vendor's ~23 % with 81 % from
+ *  a plateau voltage.  A plateau sample must not move the estimate. */
+static void test_lfp_plateau_voltage_does_not_override_the_count(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3345, 3350, 99000, 227);   /* JK 150/660 Ah */
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.wKnee_pm == 0u);
+    TEST_ASSERT(near(s.socReal_pm, 227, 2));
+}
+
+/** ...and the same disagreement AT THE KNEE is heard, and shows as a large
+ *  innovation (D4: it used to read 1-3 pm all afternoon). */
+static void test_lfp_knee_is_heard_and_reported_as_innovation(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3440, 3450, 0, 700);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3445;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.wKnee_pm == 1000u);
+    TEST_ASSERT(s.socReal_pm > 950u);
+    TEST_ASSERT(s.innovation_pm > 100);
+}
+
+static void test_lfp_lower_knee_pulls_down_without_stepping_to_zero(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3150, 3250, -15000, 200);
+    uint16_t      prev = 200u;
+    int           k;
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3200;
+    for (k = 0; k < 5; k++) {
+        PackSocLfp_Update(&s, &f, 5000u);
+        TEST_ASSERT(s.socReal_pm > 0u);
+        TEST_ASSERT(s.socReal_pm <= prev);
+        prev = s.socReal_pm;
+        f.cellMin_mV = (uint16_t)(f.cellMin_mV - 10u);
+    }
+    TEST_ASSERT(s.socReal_pm < 200u);
+}
+
+/** Load compensation: a discharge spike must not read as a knee. */
+static void test_lfp_load_compensation_prevents_a_false_knee(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3190, 3250, -30000, 400);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.rMin_uOhm = 2000u;                 /* 30 A * 2 mOhm = 60 mV */
+    f.rMeasured = 1u;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.vCompMin_mV >= 3200);
+    TEST_ASSERT(s.wKnee_pm == 0u);
+}
+
+/** D3: 16:08, JK counter +67.8 Ah in one poll against ~0.6 Ah of charge. */
+static void test_lfp_vendor_recalibration_step_is_not_charge(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3300, 3310, 109000, 897);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 20000u);
+    f.socJk_pm = 1000u;
+    PackSocLfp_Update(&s, &f, 20000u);
+    TEST_ASSERT(s.jkSteps == 1u);
+    TEST_ASSERT(near(s.socReal_pm, 897, 5));
+}
+
+/** A genuine +4 Ah poll against a matching current is accepted. */
+static void test_lfp_a_real_step_is_accepted(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3300, 3310, 100000, 500);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 5000u);
+    f.socJk_pm = 502u;
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(s.jkSteps == 0u);
+    TEST_ASSERT(s.socReal_pm == 502u);
+}
+
+/** D1: every poll is a fraction of one per-mille on this pack; the estimate
+ *  must still follow the count across a window. */
+static void test_lfp_follows_the_count_between_knees(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3300, 3310, 99000, 650);
+    int           k;
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 5000u);
+    for (k = 0; k < 60; k++) {          /* 5 min, 1 pm per 3 polls */
+        if ((k % 3) == 2) { f.socJk_pm++; }
+        PackSocLfp_Update(&s, &f, 5000u);
+    }
+    TEST_ASSERT(near(s.socReal_pm, f.socJk_pm, 1));
+    TEST_ASSERT(f.socJk_pm > 650u);
+}
+
+static void test_lfp_a_latch_re_anchors_the_vendor_count(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3400, 3563, 20000, 920);
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    f.cellAvg_mV = 3400;
+    PackSocLfp_Update(&s, &f, 5000u);
+    f = frame(3300, 3310, 0, 920);       /* vendor still says 92 % */
+    PackSocLfp_Update(&s, &f, 5000u);
+    TEST_ASSERT(near(s.socReal_pm, 1000, 2));
+}
+
+static void test_lfp_confidence_decays_with_throughput_and_time(void)
+{
+    sPackSocLfp   s;
+    sPackSocLfpIn f = frame(3300, 3310, -660000, 500);   /* 1.0 C */
+    int           k;
+
+    PackSocLfp_Init(&s, SODAS_mAh);
+    PackSocLfp_Update(&s, &f, 0u);
+    for (k = 0; k < 720; k++) {         /* one hour in 5 s polls */
+        PackSocLfp_Update(&s, &f, 5000u);
+    }
+    /* 1 - (0.05 * 1.0 + 0.001 * 1) = 0.949 */
+    TEST_ASSERT(near(s.conf_pm, 949, 1));
+}
+
+static void test_lfp_charge_efficiency_applies_only_to_charge(void)
+{
+    sPackSocLfp   a, b;
+    sPackSocLfpIn fc = frame(3300, 3310, 660000, 500);
+    sPackSocLfpIn fd = frame(3300, 3310, -660000, 500);
+
+    PackSocLfp_Init(&a, SODAS_mAh);
+    PackSocLfp_Init(&b, SODAS_mAh);
+    PackSocLfp_Update(&a, &fc, 3600000u);
+    PackSocLfp_Update(&b, &fd, 3600000u);
+    TEST_ASSERT(a.qAbs_mAms < b.qAbs_mAms);
+    TEST_ASSERT(near((int32_t)(a.qAbs_mAms * 1000 / b.qAbs_mAms), 992, 1));
+}
+
+static void test_lfp_temperature_tables(void)
+{
+    TEST_ASSERT(PackSocLfp_Kq_pm(-200) == 650);
+    TEST_ASSERT(PackSocLfp_Kq_pm(250) == 1000);
+    TEST_ASSERT(PackSocLfp_Kq_pm(700) == 1030);
+    TEST_ASSERT(PackSocLfp_Kq_pm(-500) == 650);
+    TEST_ASSERT(PackSocLfp_Kq_pm(75) == 920);
+    TEST_ASSERT(PackSocLfp_Kr_pm(-200) == 3500);
+    TEST_ASSERT(PackSocLfp_Kr_pm(150) == 1150);
+}
+
 int main(void)
 {
     printf("=== pack_soc tests ===\n");
@@ -847,6 +1097,24 @@ int main(void)
     RUN_TEST(test_the_correction_a_real_site_needs_is_small);
     RUN_TEST(test_a_working_site_fits_inside_the_error_budget);
     RUN_TEST(test_the_bound_is_smaller_than_the_error_it_replaces);
+
+    /* the fused LFP estimator, against the sodas issue */
+    RUN_TEST(test_lfp_emergency_high_latch);
+    RUN_TEST(test_lfp_emergency_low_latch_locks_inverter);
+    RUN_TEST(test_lfp_thresholds_are_the_75_percent_rule);
+    RUN_TEST(test_lfp_average_high_latch_needs_the_tail_current);
+    RUN_TEST(test_lfp_inverter_window_maps_linearly);
+    RUN_TEST(test_lfp_plateau_voltage_does_not_override_the_count);
+    RUN_TEST(test_lfp_knee_is_heard_and_reported_as_innovation);
+    RUN_TEST(test_lfp_lower_knee_pulls_down_without_stepping_to_zero);
+    RUN_TEST(test_lfp_load_compensation_prevents_a_false_knee);
+    RUN_TEST(test_lfp_vendor_recalibration_step_is_not_charge);
+    RUN_TEST(test_lfp_a_real_step_is_accepted);
+    RUN_TEST(test_lfp_follows_the_count_between_knees);
+    RUN_TEST(test_lfp_a_latch_re_anchors_the_vendor_count);
+    RUN_TEST(test_lfp_confidence_decays_with_throughput_and_time);
+    RUN_TEST(test_lfp_charge_efficiency_applies_only_to_charge);
+    RUN_TEST(test_lfp_temperature_tables);
 
     printf("%s (%d failures)\n", test_failures ? "FAILED" : "PASSED",
            test_failures);

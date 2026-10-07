@@ -2448,6 +2448,8 @@ static void handle_pack_status(struct netconn *conn)
             "\"socConf_pm\":%u,\"sohConf_pm\":%u,\"socDrift_pm\":%d,"
             "\"dcRes_uOhm\":%lu,\"dcResSteps\":%lu,"
             "\"anchorSamples\":%lu,\"anchorIrSamples\":%lu,"
+            "\"socInverter_pm\":%u,\"socCc_pm\":%u,\"socKnee_pm\":%u,"
+            "\"socLatchHigh\":%lu,\"socLatchLow\":%lu,\"socJkSteps\":%lu,"
             "\"remaining_mAh\":%u,\"capacity_mAh\":%u,\"nameplate_mAh\":%u,"
             "\"chargeLimit_mA\":%u,\"dischargeLimit_mA\":%u,"
             "\"chargeVoltLimit_mV\":%u,\"dischargeVoltLimit_mV\":%u,"
@@ -2477,6 +2479,9 @@ static void handle_pack_status(struct netconn *conn)
             (unsigned long)diag.dcResSteps,
             (unsigned long)diag.anchorSamples,
             (unsigned long)diag.anchorIrSamples,
+            (unsigned)diag.socInverter_pm, (unsigned)diag.socCc_pm,
+            (unsigned)diag.socKnee_pm, (unsigned long)diag.socLatchHigh,
+            (unsigned long)diag.socLatchLow, (unsigned long)diag.socJkSteps,
             (unsigned)st.remaining_mAh, (unsigned)st.capacity_mAh,
             (unsigned)st.nameplate_mAh,
             (unsigned)st.chargeLimit_mA, (unsigned)st.dischargeLimit_mA,

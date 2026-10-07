@@ -132,6 +132,9 @@ typedef struct {
      * consumer noticing" promise of §2. */
     sPackSoc             soc;                        /* pack unit + counter */
     sPackSocUnit         socCell[PACK_CELLS_MAX];    /* SAME type, per cell */
+    sPackSocLfp          socLfp;         /* the fused estimate that is PUBLISHED */
+    uint32_t             socLfpLast_ms;
+    uint8_t              socLfpHave;
     int32_t              socBalSnap_mAs[PACK_CELLS_MAX]; /* last step's net */
     uint8_t              haveBalSnap;
     uint32_t             socRestSamples;
@@ -536,21 +539,20 @@ static void BuildState(const sPackInst *in, uint8_t idx, sPackState *out,
     out->socConf_pm       = (in->live.socConf_pm < cap) ? in->live.socConf_pm
                                                         : cap;
 
-    /* THE ESTIMATE REPLACES THE VENDOR'S ONLY ONCE IT HAS ANCHORED, and says
-     * so through packFlag_socEstimated -- a flag that has existed since the
-     * module was written and been produced by nothing until now.  Before the
-     * first anchor the JK's number stands, because an unanchored coulomb
-     * count is not an opinion, it is an accumulator. */
-    {
-        uint16_t      estConf = 0u;
-        const int32_t est     = PackSoc_UnitGet_pm(&in->soc.unit, &estConf);
+    /* THE FUSED ESTIMATE REPLACES THE VENDOR'S once it has a frame to fuse,
+     * and says so through packFlag_socEstimated.  Its confidence is the larger
+     * of the coulomb count's decayed confidence and the knee weight, so a pack
+     * charging on the plateau for hours reads low and one that has just
+     * touched a knee or a latch reads high; the "drift" is the innovation --
+     * fused minus the vendor's own number -- which can now disagree. */
+    if (in->socLfp.haveEst != 0u) {
+        const uint16_t conf = (in->socLfp.conf_pm > in->socLfp.wKnee_pm)
+                                  ? in->socLfp.conf_pm : in->socLfp.wKnee_pm;
 
-        out->socDrift_pm = (int16_t)in->soc.unit.driftResidual_pm;
-        if (est >= 0) {
-            out->soc_pm     = (uint16_t)est;
-            out->socConf_pm = (estConf < cap) ? estConf : cap;
-            out->flags     |= (uint32_t)packFlag_socEstimated;
-        }
+        out->soc_pm      = in->socLfp.socReal_pm;
+        out->socConf_pm  = (conf < cap) ? conf : cap;
+        out->socDrift_pm = in->socLfp.innovation_pm;
+        out->flags      |= (uint32_t)packFlag_socEstimated;
     }
     out->sohConf_pm       = (in->live.sohConf_pm < cap) ? in->live.sohConf_pm
                                                         : cap;
@@ -724,6 +726,8 @@ static void BindAll(void)
         in->bounds     = in->boundsOwn;
         in->bal.cellCount = e->cellCount;
         PackSoc_Init(&in->soc, e->nameplate_mAh);
+        PackSocLfp_Init(&in->socLfp, e->nameplate_mAh);
+        in->socLfpHave = 0u;
         {
             uint8_t c;
 
@@ -1522,6 +1526,12 @@ int Pack_SocDiag(uint8_t idx, sPackSocDiag *out)
         out->dcResSteps      = in->soc.res.steps;
         out->anchorSamples   = in->socRestSamples;
         out->anchorIrSamples = in->socIrSamples;
+        out->socInverter_pm  = in->socLfp.socInverter_pm;
+        out->socCc_pm        = in->socLfp.conf_pm;
+        out->socKnee_pm      = in->socLfp.wKnee_pm;
+        out->socLatchHigh    = in->socLfp.latchHigh;
+        out->socLatchLow     = in->socLfp.latchLow;
+        out->socJkSteps      = in->socLfp.jkSteps;
     }
     CoreUnlock(saved);
     return 0;
@@ -1870,6 +1880,44 @@ static void SocOnCommit(uint8_t idx, uint32_t groups)
 
     if (cap == 0u) {
         return;
+    }
+
+    /* THE FUSED ESTIMATE: one frame per refresh of the vendor's SOC.  Placed
+     * before the legacy anchor gate, whose early returns must not starve it. */
+    if (((groups & PACK_GRP_BIT(packGrp_charge)) != 0u) &&
+        (in->live.cellMax_mV != 0u) && (in->live.cellMin_mV != 0u) &&
+        (in->live.voltage_mV != 0u)) {
+        const uint32_t now_ms = (uint32_t)osKernelGetTickCount();
+        const uint8_t  n      = (in->cellCount > 0u) ? in->cellCount : 16u;
+        const uint32_t q      = (in->nameplate_mAh != 0u) ? in->nameplate_mAh
+                                                          : cap;
+        sPackSocLfpIn  fi;
+        uint32_t       rPack_uOhm = 0u;
+        uint32_t       rCell;
+
+        if (in->socLfp.qNominal_mAh != q) {
+            PackSocLfp_Init(&in->socLfp, q);
+        }
+        if (PackSoc_ResGet_uOhm(&in->soc.res, &rPack_uOhm) != 0) {
+            rCell        = rPack_uOhm / n;
+            fi.rMeasured = 1u;
+        } else {
+            rCell        = PackSocLfp_DefaultCellR_uOhm(q);
+            fi.rMeasured = 0u;
+        }
+        fi.cellMin_mV = in->live.cellMin_mV;
+        fi.cellMax_mV = in->live.cellMax_mV;
+        fi.cellAvg_mV = (uint16_t)(in->live.voltage_mV / n);
+        fi.i_mA       = in->live.current_mA;
+        fi.rMin_uOhm  = rCell;
+        fi.rMax_uOhm  = rCell;
+        fi.tMin_dC    = (int16_t)in->live.tempMin_dC;
+        fi.socJk_pm   = in->live.soc_pm;
+        PackSocLfp_Update(&in->socLfp, &fi,
+                          (in->socLfpHave != 0u)
+                              ? (uint32_t)(now_ms - in->socLfpLast_ms) : 0u);
+        in->socLfpLast_ms = now_ms;
+        in->socLfpHave    = 1u;
     }
 
     /* The vendor's counter: one step per commit that refreshed it. */
